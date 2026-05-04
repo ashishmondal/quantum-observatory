@@ -8,3 +8,11 @@
 include/secrets.h
 
 deploy.bat
+
+# Star catalog (32 MB) — fetched on demand by tools/skyculture_to_header.py.
+# See assets/README.md for the download URL.
+assets/hygdata_v41.csv
+assets/hygdata_v40.csv
+assets/hygdata_v3.csv
+assets/hygdata.csv
+assets/hip_main.dat

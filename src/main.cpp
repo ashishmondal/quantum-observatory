@@ -14,6 +14,8 @@
 #include "wifi_link.h"
 #include "mqtt_link.h"
 #include "iss_state.h"
+#include "jupiter_state.h"
+#include "constellation_state.h"
 #include "moon_state.h"
 #include "scenes/scene.h"
 #include "scenes/background_scene.h"
@@ -25,7 +27,9 @@
 #include "scenes/night_scene.h"
 #include "scenes/offline_scene.h"
 #include "scenes/iss_pass_scene.h"
+#include "scenes/jupiter_visibility_scene.h"
 #include "scenes/moon_phase_scene.h"
+#include "scenes/constellation_now_scene.h"
 #include "scenes/sky_timelapse_scene.h"
 #include "scenes/splash_scene.h"
 #include "scenes/text_demo_scene.h"
@@ -74,6 +78,8 @@ static GfxTestScene    s_gfx_test_scene;    // graphics smoke-test (FPS, palette
 static SkyTimelapseScene s_sky_timelapse_scene; // debug: 1 day per 10 s
 static IssPassScene    s_iss_pass_scene;    // phase 7.1 — "ISS NOW" callout
 static MoonPhaseScene  s_moon_phase_scene;  // phase 7.2 — sticky moon disc + phase
+static JupiterVisibilityScene s_jupiter_visibility_scene; // phase 7.3 — Jupiter look-angles
+static ConstellationNowScene  s_constellation_now_scene;  // phase 7.4 — dynamic constellation art
 
 // Single "current scene" pointer; loop() just delegates to it. Swapping
 // scenes is one assignment — no other code changes. (NFR-5.1)
@@ -104,6 +110,8 @@ static Scene* scene_for(scene_state::SceneId id) {
     case SI::SKY_TIMELAPSE: return &s_sky_timelapse_scene;
     case SI::ISS_PASS:     return &s_iss_pass_scene;
     case SI::MOON_PHASE:   return &s_moon_phase_scene;
+    case SI::JUPITER_VISIBILITY: return &s_jupiter_visibility_scene;
+    case SI::CONSTELLATION_NOW:  return &s_constellation_now_scene;
   }
   return nullptr;
 }
@@ -222,6 +230,17 @@ void setup() {
   // (observatory/iss). Falls back to a "WAIT" placeholder when
   // no fresh value has been pushed.
   iss_state::init();
+
+  // Jupiter-visibility IPC for the jupiter_visibility scene's MQTT
+  // data path (observatory/jupiter). Falls back to a "WAIT"
+  // placeholder when no fresh value has been pushed.
+  jupiter_state::init();
+
+  // Constellation selector IPC for the constellation_now scene's
+  // MQTT data path (observatory/constellation). Falls back to a
+  // local rotation through the catalog every 30 s when no fresh
+  // value has been pushed (so the scene works standalone).
+  constellation_state::init();
 
   // DS3231 RTC bring-up (FR-9.5). Battery-backed authoritative time
   // source — every reader (chrome, giant clock, future scenes) goes

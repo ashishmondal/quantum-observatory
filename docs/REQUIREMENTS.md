@@ -226,6 +226,7 @@ Topic: `observatory/status` — JSON heartbeat every 30 s:
 | `iss_pass` | nebula | typewriter ALT/CREW/VIS | priority 4; on-device look-angle + visibility derivation per FR-14 |
 | `moon_phase` | starfield | phase glyph + name | sticky |
 | `jupiter_visibility` | nebula | direction + time | example in §5.1 |
+| `constellation_now` | starfield | constellation art + name | sticky; HA picks current overhead constellation by date + observer lat/lon — see [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 1 |
 
 All scenes above (except possibly `boot` during the splash window) carry the standard small clock readout per FR-9.2.
 

@@ -55,6 +55,8 @@ enum class SceneId : uint8_t {
   SKY_TIMELAPSE = 14,  // debug: 1 day every 10 s, sun rises L → sets R
   ISS_PASS      = 15,  // priority-4 "ISS NOW" callout (phase 7.1)
   MOON_PHASE    = 16,  // sticky moon disc + phase readout (phase 7.2)
+  JUPITER_VISIBILITY = 17,  // Jupiter look-angles + magnitude readout (phase 7.3)
+  CONSTELLATION_NOW  = 18,  // dynamic constellation art + name (phase 7.4)
 };
 
 // One-time mutex init. Call from setup() before either core spins.

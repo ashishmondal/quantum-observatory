@@ -19,6 +19,8 @@
 #include "secrets.h"
 #include "light_sensor.h"
 #include "iss_state.h"
+#include "jupiter_state.h"
+#include "constellation_state.h"
 #include "moon_state.h"
 #include "thermal_monitor.h"
 #include "time_of_day.h"
@@ -40,6 +42,8 @@ constexpr const char* kTopicThermal = "observatory/thermal"; // FR-7.4
 constexpr const char* kTopicTime    = "observatory/time";    // FR-9.5
 constexpr const char* kTopicMoon    = "observatory/moon";    // phase 7.2 follow-up
 constexpr const char* kTopicIss     = "observatory/iss";     // phase 7.1+ iss data path
+constexpr const char* kTopicJupiter = "observatory/jupiter"; // phase 7.3 jupiter data path
+constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
 
 // §5.4 example payload is ~85 bytes serialised. NFR-2.3 → max + 25%.
 // Using 256 here gives generous headroom for future fields without
@@ -76,6 +80,10 @@ uint32_t s_moon_msgs         = 0;
 uint32_t s_moon_rejects      = 0;
 uint32_t s_iss_msgs          = 0;
 uint32_t s_iss_rejects       = 0;
+uint32_t s_jupiter_msgs      = 0;
+uint32_t s_jupiter_rejects   = 0;
+uint32_t s_constellation_msgs    = 0;
+uint32_t s_constellation_rejects = 0;
 uint32_t s_clear_msgs        = 0;
 
 // Tag identifying which §5.2 threshold topic a payload arrived on.
@@ -425,6 +433,214 @@ void handle_iss(char* buf, unsigned int length, uint32_t now_ms) {
   Serial.println();
 }
 
+// observatory/jupiter handler — phase 7.3 raw HA pass-through.
+//
+// Same Director/Cinematographer split as the ISS handler: HA polls
+// any astronomy integration (e.g. ephemeris/astroweather built on
+// pyephem/skyfield) for Jupiter's `azimuth` + `altitude`, and
+// re-emits them verbatim via a Jinja template. Wire payload:
+//   { "bearing_deg": 90, "elevation_deg": 45,
+//     "magnitude": -2.1, "distance_au": 5.4 }
+//
+// • bearing_deg / elevation_deg are required — without them we
+//   can't render the look-here string or decide BELOW/DAY/VIS.
+// • magnitude / distance_au are optional ornaments; absent fields
+//   render as "?" without rejecting the rest of the payload.
+//
+// Jupiter is always sunlit (planets shine by reflected light), so
+// there is no `sunlit` field — only the observer-side darkness
+// condition matters. The jupiter_visibility scene ANDs (elevation
+// ≥ 0) with (sun ≤ -6°) every frame on-device.
+//
+// Per FR-1.3 / FR-1.4 any malformed/out-of-range payload is logged
+// and dropped; the previous fresh snapshot keeps rendering.
+void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
+  ++s_jupiter_msgs;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  StaticJsonDocument<256> doc;
+#pragma GCC diagnostic pop
+  const DeserializationError err = deserializeJson(doc, buf, length);
+  if (err) {
+    ++s_jupiter_rejects;
+    Serial.print("[mqtt] jupiter parse FAILED err=");
+    Serial.print(err.c_str());
+    Serial.print(" payload=");
+    Serial.println(buf);
+    return;
+  }
+
+  // Required fields. ArduinoJson `is<T>` accepts ints for float
+  // slots silently, so we test for numeric presence broadly.
+  if (!(doc["bearing_deg"].is<float>()   || doc["bearing_deg"].is<int>()) ||
+      !(doc["elevation_deg"].is<float>() || doc["elevation_deg"].is<int>())) {
+    ++s_jupiter_rejects;
+    Serial.print("[mqtt] jupiter missing required fields payload=");
+    Serial.println(buf);
+    return;
+  }
+  const float bearing_in   = doc["bearing_deg"].as<float>();
+  const float elevation_in = doc["elevation_deg"].as<float>();
+
+  // Range checks. bearing 0..359 (we wrap 360 → 0), elevation
+  // -90..+90.
+  if (bearing_in < -1.0f || bearing_in > 360.5f) {
+    ++s_jupiter_rejects;
+    Serial.print("[mqtt] jupiter bearing_deg out-of-range=");
+    Serial.println(bearing_in);
+    return;
+  }
+  if (elevation_in < -90.5f || elevation_in > 90.5f) {
+    ++s_jupiter_rejects;
+    Serial.print("[mqtt] jupiter elevation_deg out-of-range=");
+    Serial.println(elevation_in);
+    return;
+  }
+  // Round + wrap bearing into [0,359]; clamp elevation into [-90,90].
+  int b = static_cast<int>(bearing_in + 0.5f);
+  if (b >= 360) b -= 360;
+  if (b <    0) b += 360;
+  int e = static_cast<int>(elevation_in >= 0.0f
+                            ? elevation_in + 0.5f
+                            : elevation_in - 0.5f);
+  if (e >  90) e =  90;
+  if (e < -90) e = -90;
+
+  // Optional magnitude. Stored as ×10 fixed-point so the render loop
+  // stays float-free (NFR-1.3). Out-of-range demotes to "absent"
+  // without rejecting the rest.
+  bool    have_magnitude  = false;
+  int16_t magnitude_x10   = 0;
+  if (doc["magnitude"].is<float>() || doc["magnitude"].is<int>()) {
+    const float m = doc["magnitude"].as<float>();
+    if (m >= -30.0f && m <= 30.0f) {
+      have_magnitude = true;
+      magnitude_x10  = static_cast<int16_t>(m >= 0.0f
+                                               ? m * 10.0f + 0.5f
+                                               : m * 10.0f - 0.5f);
+    } else {
+      Serial.print("[mqtt] jupiter magnitude out-of-range=");
+      Serial.println(m);
+    }
+  }
+
+  // Optional distance_au, ×10 fixed-point. Jupiter sits at ~4..6 AU
+  // in practice; cap at 100 AU for sanity (would catch a sign-flip
+  // or a wrong-target template bug).
+  bool     have_distance   = false;
+  uint16_t distance_au_x10 = 0;
+  if (doc["distance_au"].is<float>() || doc["distance_au"].is<int>()) {
+    const float d = doc["distance_au"].as<float>();
+    if (d >= 0.0f && d <= 100.0f) {
+      have_distance   = true;
+      distance_au_x10 = static_cast<uint16_t>(d * 10.0f + 0.5f);
+    } else {
+      Serial.print("[mqtt] jupiter distance_au out-of-range=");
+      Serial.println(d);
+    }
+  }
+
+  jupiter_state::set_from_mqtt(static_cast<int16_t>(b),
+                               static_cast<int8_t>(e),
+                               have_magnitude, magnitude_x10,
+                               have_distance,  distance_au_x10,
+                               now_ms);
+  Serial.print("[mqtt] jupiter applied bearing=");
+  Serial.print(b);
+  Serial.print(" elev=");
+  Serial.print(e);
+  if (have_magnitude) {
+    Serial.print(" mag=");
+    Serial.print(magnitude_x10 / 10.0f);
+  }
+  if (have_distance) {
+    Serial.print(" dist_au=");
+    Serial.print(distance_au_x10 / 10.0f);
+  }
+  Serial.println();
+}
+
+// observatory/constellation handler — phase 7.4 selector for the
+// constellation_now scene.
+//
+// Wire payload:
+//   { "index": 0, "highlight_star": 1 }
+//
+// • index           — required, 0..kCatalogCount-1 (88 IAU
+//                     constellations). Clamped on the reader side
+//                     anyway, but obviously-wrong values are
+//                     rejected here so the log shows the bug.
+// • highlight_star  — optional, 0..63. -1 (or omit) clears any
+//                     highlight. The index is the BRIGHTNESS RANK
+//                     among stars rendered for the chosen
+//                     constellation: 0 = brightest, 1 = second,
+//                     etc. Out-of-range for the chosen entry is
+//                     harmless (the scene checks).
+//
+// Per FR-1.3 / FR-1.4 any malformed payload is logged and dropped;
+// the scene keeps using the previous fresh selector or rotates
+// locally if none.
+void handle_constellation(char* buf, unsigned int length, uint32_t now_ms) {
+  ++s_constellation_msgs;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  StaticJsonDocument<128> doc;
+#pragma GCC diagnostic pop
+  const DeserializationError err = deserializeJson(doc, buf, length);
+  if (err) {
+    ++s_constellation_rejects;
+    Serial.print("[mqtt] constellation parse FAILED err=");
+    Serial.print(err.c_str());
+    Serial.print(" payload=");
+    Serial.println(buf);
+    return;
+  }
+
+  if (!doc["index"].is<int>()) {
+    ++s_constellation_rejects;
+    Serial.print("[mqtt] constellation missing index payload=");
+    Serial.println(buf);
+    return;
+  }
+  const long index_in = doc["index"].as<long>();
+  // Sanity-cap at 255 (uint8 max). The catalog will rarely exceed
+  // ~50 entries; anything beyond that is a Director bug. The scene's
+  // by_index() rejects out-of-range too — defence in depth.
+  if (index_in < 0 || index_in > 255) {
+    ++s_constellation_rejects;
+    Serial.print("[mqtt] constellation index out-of-range=");
+    Serial.println(index_in);
+    return;
+  }
+
+  // Optional highlight. -1 / absent / out-of-range = no highlight.
+  bool    have_highlight = false;
+  uint8_t highlight_star = 0;
+  if (doc["highlight_star"].is<int>()) {
+    const long h = doc["highlight_star"].as<long>();
+    if (h >= 0 && h <= 63) {
+      have_highlight = true;
+      highlight_star = static_cast<uint8_t>(h);
+    } else if (h != -1) {
+      Serial.print("[mqtt] constellation highlight_star out-of-range=");
+      Serial.println(h);
+    }
+  }
+
+  constellation_state::set_from_mqtt(static_cast<uint8_t>(index_in),
+                                     have_highlight, highlight_star,
+                                     now_ms);
+  Serial.print("[mqtt] constellation applied index=");
+  Serial.print(index_in);
+  if (have_highlight) {
+    Serial.print(" highlight_star=");
+    Serial.print(highlight_star);
+  }
+  Serial.println();
+}
+
 // PubSubClient inbound callback. Runs on Core 0 from inside
 // PubSubClient::loop() (called from poll()) — same thread as the rest
 // of mqtt_link, so no locking needed against our own static state.
@@ -469,6 +685,14 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
   }
   if (strcmp(topic, kTopicIss) == 0) {
     handle_iss(buf, length, millis());
+    return;
+  }
+  if (strcmp(topic, kTopicJupiter) == 0) {
+    handle_jupiter(buf, length, millis());
+    return;
+  }
+  if (strcmp(topic, kTopicConstellation) == 0) {
+    handle_constellation(buf, length, millis());
     return;
   }
   if (strcmp(topic, kTopicClear) == 0) {
@@ -693,7 +917,7 @@ void poll(uint32_t now_ms) {
         // doesn't remember non-persistent sessions across our outages.
         // All three subscriptions go through the same on_mqtt_message
         // dispatcher, which routes by topic.
-        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss };
+        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicConstellation };
         for (const char* t : topics) {
           if (s_client.subscribe(t)) {
             Serial.print("[mqtt] sub ");

@@ -315,7 +315,8 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 
 - [x] **7.1** `iss_pass` — typewriter ALT/CREW/VIS, on-device look-angle + visibility derivation (FR-14)
 - [x] **7.2** `moon_phase` — phase glyph + name (sticky)
-- [ ] **7.3** `jupiter_visibility` — direction + time
+- [x] **7.3** `jupiter_visibility` — direction + time
+- [x] **7.4** `constellation_now` — overhead constellation art + name (sticky); HA picks current overhead constellation by date + observer lat/lon. See [FUTURE_SCENES.md](FUTURE_SCENES.md) for the long-tail scene backlog.
 - [ ] **7.5** Home Assistant automations & sensors that publish them
 
 ---
