@@ -7,6 +7,7 @@
 
 #include "backgrounds/bitmap_bg.h"
 
+#include "bitmaps/observatory.h"
 #include "bitmaps/starfield.h"
 
 struct ImageEntry {
@@ -18,7 +19,8 @@ struct ImageEntry {
 };
 
 inline constexpr ImageEntry kImageRegistry[] = {
+  { "observatory", kObservatoryPalette, kObservatoryPixels, kObservatoryRegions, kObservatoryRegionsCount },
   { "starfield", kStarfieldPalette, kStarfieldPixels, kStarfieldRegions, kStarfieldRegionsCount },
 };
 
-inline constexpr int kImageRegistryCount = 1;
+inline constexpr int kImageRegistryCount = 2;

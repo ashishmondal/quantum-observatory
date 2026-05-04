@@ -31,6 +31,7 @@ struct State {
   bool     night_active    = false;           // FR-7.2 firmware override
   bool     thermal_active  = false;           // FR-7.3 firmware override (highest priority)
   bool     offline_active  = false;           // FR-5.1 firmware override (mqtt-disconnect)
+  bool     splash_active   = false;           // boot splash override (highest)
   bool     dirty           = true;            // resolved-state changed since last take_pending
 };
 
@@ -42,6 +43,7 @@ mutex_t s_mutex;
 // priority list changes. (FR-7.5: thermal > night > director;
 // phase 6.4: offline slots between night and director.)
 SceneId resolve(const State& s) {
+  if (s.splash_active)  return SceneId::SPLASH;
   if (s.thermal_active) return SceneId::THERMAL_SAFE;
   if (s.night_active)   return SceneId::NIGHT;
   if (s.offline_active) return SceneId::OFFLINE;
@@ -151,6 +153,16 @@ void set_offline_active(bool active) {
   mutex_exit(&s_mutex);
 }
 
+void set_splash_active(bool active) {
+  mutex_enter_blocking(&s_mutex);
+  if (s_state.splash_active != active) {
+    const SceneId before = resolve(s_state);
+    s_state.splash_active = active;
+    if (resolve(s_state) != before) s_state.dirty = true;
+  }
+  mutex_exit(&s_mutex);
+}
+
 void clear_sticky() {
   // FR-2.2: clear_sticky only affects scenes that won't auto-expire.
   // For non-sticky scenes, tick() already handles revert; doing
@@ -214,7 +226,8 @@ constexpr IdMapping kIdMap[] = {
   { "bg_nebula",    SceneId::BG_NEBULA    },
   { "bg_bitmap",    SceneId::BG_BITMAP    },
   { "bg_image",     SceneId::BG_IMAGE     },
-  { "gfx_test",     SceneId::GFX_TEST     },
+  { "gfx_test",      SceneId::GFX_TEST      },
+  { "sky_timelapse", SceneId::SKY_TIMELAPSE },
 };
 }  // namespace
 

@@ -51,6 +51,8 @@ enum class SceneId : uint8_t {
   BG_BITMAP     = 10,  // bitmap-backed background with palette cycling
   BG_IMAGE      = 11,  // direct RGB565 image from assets/*.bmp (no animation)
   OFFLINE       = 12,  // MQTT-disconnect fallback — firmware override (FR-5.1)
+  SPLASH        = 13,  // boot splash — firmware override, shown until first MQTT connect
+  SKY_TIMELAPSE = 14,  // debug: 1 day every 10 s, sun rises L → sets R
 };
 
 // One-time mutex init. Call from setup() before either core spins.
@@ -110,6 +112,14 @@ void clear_sticky();
 // reappears when MQTT reconnects (same pattern as night/thermal).
 // (added in phase 6.4)
 void set_offline_active(bool active);
+
+// Writer (Core 0). Boot splash override — highest priority of all
+// firmware overrides so the splash holds the screen until the device
+// has finished its first network handshake. Cleared exactly once,
+// when MQTT first transitions to connected; the falling edge re-
+// exposes whatever the lower-priority resolution would otherwise
+// pick (typically the giant clock).
+void set_splash_active(bool active);
 
 // Reader (Core 1). Atomically returns true + writes the *resolved*
 // scene id into *out exactly once per effective-state change. On

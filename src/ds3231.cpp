@@ -12,6 +12,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <hardware/gpio.h>
 
 #include "config.h"
 
@@ -85,42 +86,67 @@ void begin() {
   Wire1.setSCL(PIN_RTC_SCL);
   Wire1.setClock(RTC_I2C_HZ);
   Wire1.begin();
+  // Vendor demo enables internal pull-ups on SDA/SCL; the carrier
+  // board apparently relies on them. Use the Pico SDK helper directly
+  // — pinMode(INPUT_PULLUP) reconfigures the GPIO function back to
+  // SIO and breaks Wire's I²C alt-function (caused the panel to keep
+  // going OFFLINE because every RTC read failed).
+  gpio_pull_up(PIN_RTC_SDA);
+  gpio_pull_up(PIN_RTC_SCL);
   // Intentionally do NOT touch the control or status registers here.
   // FR-9.6 requires us to observe the oscillator-stop flag on first
   // boot; clearing it eagerly would defeat that.
 }
 
 bool read(int32_t* epoch_local) {
-  // Set register pointer to 0x00.
-  Wire1.beginTransmission(DS3231_I2C_ADDR);
-  Wire1.write(REG_TIME);
-  if (Wire1.endTransmission(false) != 0) {  // repeated start
-    return false;
-  }
-  if (Wire1.requestFrom(static_cast<uint8_t>(DS3231_I2C_ADDR),
-                        static_cast<uint8_t>(7)) != 7) {
-    return false;
-  }
-  uint8_t raw[7];
-  for (int i = 0; i < 7; ++i) raw[i] = static_cast<uint8_t>(Wire1.read());
+  // Two consecutive reads, accept only if they agree (within 1 second).
+  // The DS3231 nominally latches the time registers at the start of a
+  // burst, but in practice we've seen wildly wrong values appear for a
+  // single frame on Core 1 (e.g. 1:03 SUN 22 JUN instead of 8:00 SUN 03
+  // MAY) — could be I²C bus noise, an SDK race, or a chip quirk. A
+  // consensus read costs ~1 ms extra per poll (poll runs ~1 Hz) and
+  // bulletproofs the hot reader path.
+  auto raw_read = [](int32_t* out) -> bool {
+    Wire1.beginTransmission(DS3231_I2C_ADDR);
+    Wire1.write(REG_TIME);
+    if (Wire1.endTransmission(false) != 0) return false;
+    if (Wire1.requestFrom(static_cast<uint8_t>(DS3231_I2C_ADDR),
+                          static_cast<uint8_t>(7)) != 7) return false;
+    uint8_t raw[7];
+    for (int i = 0; i < 7; ++i) raw[i] = static_cast<uint8_t>(Wire1.read());
 
-  const uint8_t sec = bcd2dec(raw[0] & 0x7F);
-  const uint8_t min = bcd2dec(raw[1] & 0x7F);
-  // We assume 24h mode (chip default). If bit 6 is ever set we'd have
-  // to do the 12h dance (HARDWARE.md notes); easier to just keep the
-  // chip in 24h forever via write().
-  const uint8_t hour = bcd2dec(raw[2] & 0x3F);
-  // raw[3] = day-of-week — recomputed on read, ignored.
-  const uint8_t day  = bcd2dec(raw[4] & 0x3F);
-  const uint8_t mon  = bcd2dec(raw[5] & 0x1F);  // bit 7 = century, ignore
-  const uint16_t yr  = 2000u + bcd2dec(raw[6]);
+    const uint8_t  sec  = bcd2dec(raw[0] & 0x7F);
+    const uint8_t  min  = bcd2dec(raw[1] & 0x7F);
+    const uint8_t  hour = bcd2dec(raw[2] & 0x3F);
+    const uint8_t  day  = bcd2dec(raw[4] & 0x3F);
+    const uint8_t  mon  = bcd2dec(raw[5] & 0x1F);
+    const uint16_t yr   = 2000u + bcd2dec(raw[6]);
 
-  const int32_t days = days_from_civil(static_cast<int32_t>(yr), mon, day);
-  const int32_t epoch = days * 86400
-                      + static_cast<int32_t>(hour) * 3600
-                      + static_cast<int32_t>(min)  * 60
-                      + static_cast<int32_t>(sec);
-  if (epoch_local) *epoch_local = epoch;
+    // Sanity-clamp obviously corrupt BCD before computing epoch — a
+    // glitched nibble like 0xFF -> bcd2dec = 165 would otherwise sail
+    // through and poison the cached state.
+    if (sec >= 60 || min >= 60 || hour >= 24 ||
+        day == 0 || day > 31 || mon == 0 || mon > 12 ||
+        yr < 2000 || yr > 2099) {
+      return false;
+    }
+
+    const int32_t days = days_from_civil(static_cast<int32_t>(yr), mon, day);
+    *out = days * 86400
+         + static_cast<int32_t>(hour) * 3600
+         + static_cast<int32_t>(min)  * 60
+         + static_cast<int32_t>(sec);
+    return true;
+  };
+
+  int32_t a = 0, b = 0;
+  if (!raw_read(&a)) return false;
+  if (!raw_read(&b)) return false;
+  // Allow a 1-second drift between the two reads (we may straddle a
+  // second tick); reject anything wider as a glitched read.
+  const int32_t delta = b - a;
+  if (delta < 0 || delta > 1) return false;
+  if (epoch_local) *epoch_local = b;
   return true;
 }
 

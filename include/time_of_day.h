@@ -46,6 +46,14 @@ void init();
 // if the read fails or the oscillator-stop flag is set (FR-9.6).
 void poll(uint32_t now_ms);
 
+// Like poll() but rejects readings that disagree with the projected
+// epoch by more than max_jump_s. Returns true on accept (cache
+// updated), false on reject (cache untouched). Use for low-cadence
+// polling where a glitched read shouldn't poison the cache for hours.
+// On the first-ever successful poll (cache previously invalid) the
+// value is always accepted regardless of jump.
+bool poll_validated(uint32_t now_ms, uint32_t max_jump_s);
+
 // MQTT correction path (Phase 5.6). Writes the supplied wall-clock
 // into the RTC, clears the oscillator-stop flag, then re-polls so
 // callers see the new value immediately. epoch_utc = Unix seconds,

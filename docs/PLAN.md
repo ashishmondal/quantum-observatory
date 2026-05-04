@@ -271,6 +271,44 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 
 ---
 
+## Phase 6.5 — Polish: Splash, RTC Hardening, Sky Background (FR-13)
+
+> Visual + reliability polish wave landed between the network MVP and
+> the first real "observatory" scenes. Driven by user-visible glitches
+> (sporadic wrong-time flashes, washed-out splash artwork) and a desire
+> to make the idle clock scene feel alive without distracting from the
+> time readout.
+
+- [x] **6.5.1 Digital-7 LCD typography for the giant clock** (FR-9.4)
+  - Converted Digital-7 TTF → GFXfont header (`include/fonts/digital_7__mono_14pt7b.h`), `#pragma once` + `static const` linkage so it can be included from multiple TUs without multiple-definition errors. Giant clock + offline scenes share the font; ghost layer ("18:88") drawn first WITH halo, live HH:MM drawn on top WITHOUT halo. Dim-green divider row + deep-amber Picopixel date strip.
+  - **Win:** clock scene reads as a real LCD wall clock across the room.
+
+- [x] **6.5.2 DS3231 reliability stack** (FR-13.5)
+  - Layered defenses: (a) `gpio_pull_up()` from `<hardware/gpio.h>` on SDA/SCL — `pinMode(INPUT_PULLUP)` was breaking the I²C alt-function and causing every read to fail (panel kept tripping into OFFLINE); (b) per-burst sanity-clamp on BCD fields; (c) two-burst consensus read in `ds3231::read()` accepting only if Δseconds ∈ [0,1]; (d) `tod::poll_validated()` rejecting any value diverging from the projected time by > 3 hours; (e) outer poll cadence = 1 hour on accept, 1s→2s→…→1h backoff on reject.
+  - **Win:** sporadic single-frame "1:03 SUN 22 JUN" flashes eliminated; serial log goes hours between successful polls with no rejections.
+
+- [x] **6.5.3 Boot splash** (FR-13.1)
+  - `assets/observatory.bmp` rendered via a dedicated `SplashScene` that owns a local `ImagePaletteBg`. New `SceneId::SPLASH` is firmware-only (NOT in `kIdMap`) and `set_splash_active()` resolves first in the dispatcher — preempts thermal/night/offline/MQTT. Latched clear on first MQTT connect; subsequent disconnects do not re-show.
+  - `Backgrounds::init_image_default()` rewritten to look up the image background by name ("starfield") instead of `kImageRegistry[0]`, so adding observatory.bmp doesn't break the clock background fallback.
+  - **Win:** branded splash on boot, clean handoff to giant clock the moment HA is reachable.
+
+- [x] **6.5.4 Gamma-correct BMP pipeline** (FR-12.8)
+  - `tools/bmp_to_header.py`: `GAMMA = 2.2` constant + `gamma_correct()` applied to each R/G/B channel before quantising to RGB565.
+  - **Win:** observatory splash and any future artwork render with perceptually correct brightness on the panel's non-linear LED response.
+
+- [x] **6.5.5 Sky background — gradient + sun** (FR-13.2, FR-13.3)
+  - NOAA low-precision solar model (`include/sun_position.h` / `src/sun_position.cpp`, ~80 lines, ±1°). Five-band altitude gradient (day / golden / civil / nautical / astronomical), per-row top→bottom lerp, smoothed top rows so deep-night doesn't show a hard near-black band at row 0.
+  - Sun: 4-tier disc (radius 4, ~9 px), each tier carrying top/bot color pair → vertical gradient pale-on-top / warm-on-bottom, intensifying near the horizon. Linear azimuth→x mapping (az 60°→0, 180°→32, 300°→63) draws a true semi-elliptical arc; sx clamped to `[4, 59]` so the disc is never cropped.
+  - Houston lat/lon + tz hardcoded in `config.h` (LOCAL_TZ_OFFSET_MIN flips for DST manually until MQTT-settable lands).
+  - Refactored into a free function `sky_bg_render::draw(matrix, utc_epoch, lat, lon)` so the timelapse can feed a synthetic epoch without mocking `tod::now()`.
+  - **Win:** giant clock now sits over a live sun-aware sky that visibly evolves through the day.
+
+- [x] **6.5.6 Sky timelapse debug scene** (FR-13.4)
+  - `SkyTimelapseScene` maps `now_ms % 10000` to a 24 h synthetic UTC sweep and feeds `sky_bg_render::draw()`. Cyan "TIMELAPSE" Picopixel label at y=31. Selectable via standard MQTT scene contract (`{"scene_id":"sky_timelapse"}`).
+  - **Win:** one full day (sun rising on the left, arcing up over centre, setting on the right, full night, repeat) every 10 s — makes tuning the gradient and sun arc trivial.
+
+---
+
 ## Phase 7 — First Real "Observatory" Scenes
 
 > One scene = one win. Pick whichever motivates you most each session.

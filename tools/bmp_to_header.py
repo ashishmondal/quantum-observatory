@@ -41,6 +41,24 @@ OUT    = ROOT / "include" / "bitmaps"
 PANEL_W, PANEL_H = 64, 32
 BG_LIMIT         = 192   # must match palette::BG_LEN in color_palette.h
 
+# Gamma applied to every channel before RGB565 quantisation. The HUB75
+# panel's perceived response is closer to gamma ~2.2-2.8, so a sRGB
+# texture with a gamma-1.0 render path looks washed out (mid-tones too
+# bright, blacks lifted). Tweak this constant if BMPs render too dark
+# (lower) or still washed out (higher).
+GAMMA = 2.2
+
+
+def gamma_correct(c: int) -> int:
+    """Apply GAMMA to a single 0..255 channel value."""
+    if c <= 0:
+        return 0
+    if c >= 255:
+        return 255
+    # Normalise → power → renormalise. Round to nearest, clamp to byte.
+    v = (c / 255.0) ** GAMMA
+    return max(0, min(255, int(round(v * 255.0))))
+
 
 class BmpError(Exception):
     pass
@@ -87,6 +105,11 @@ def parse_bmp(path: pathlib.Path):
 
 
 def rgb_to_565(r: int, g: int, b: int) -> int:
+    # Apply panel gamma BEFORE quantising to 5/6/5 — quantising first
+    # would crush the dim end of the curve into the same bucket.
+    r = gamma_correct(r)
+    g = gamma_correct(g)
+    b = gamma_correct(b)
     r5 = (r * 31 + 127) // 255
     g6 = (g * 63 + 127) // 255
     b5 = (b * 31 + 127) // 255

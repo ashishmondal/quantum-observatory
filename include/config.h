@@ -69,7 +69,7 @@
 // MQTT once 5.5.3 lands. (added in phase 5.5.1)
 #define PIN_LIGHT_SENSOR              26
 #define LIGHT_SENSOR_ADC_INPUT        0     // ADC channel 0 maps to GP26
-#define LIGHT_NIGHT_THRESHOLD_DEFAULT 3500
+#define LIGHT_NIGHT_THRESHOLD_DEFAULT 3800
 #define LIGHT_NIGHT_HYSTERESIS_DEFAULT 200
 
 // ---- DS3231 on-die temperature (FR-7.3 thermal safety) -------------------
@@ -82,3 +82,15 @@
 // live via MQTT once 5.5.3 lands. (added in phase 5.5.2)
 #define THERMAL_THRESHOLD_C_DEFAULT  50
 #define THERMAL_HYSTERESIS_C_DEFAULT  5
+
+// ---- Observer location (sun position) ------------------------------------
+// Drives the sky-gradient + sun-arc background on the giant clock.
+// Default: Houston, TX. Will become MQTT-settable in a later phase.
+// LATITUDE_DEG  +N / -S, LONGITUDE_DEG +E / -W.
+// LOCAL_TZ_OFFSET_MIN: minutes offset from UTC (Houston CST = -360,
+// CDT = -300). Currently we display RTC local time directly; the sun
+// math wants UTC, so we subtract this offset back out. Update when
+// daylight-saving flips until MQTT pushes a tz string.
+#define LATITUDE_DEG          29.7604f
+#define LONGITUDE_DEG        -95.3698f
+#define LOCAL_TZ_OFFSET_MIN  -300       // CDT (UTC-5); use -360 for CST

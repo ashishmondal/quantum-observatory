@@ -18,13 +18,14 @@
 #pragma once
 
 #include <stdio.h>
+#include <string.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/Picopixel.h>
 
 #include "backgrounds.h"
 #include "config.h"
+#include "fonts/digital_7__mono_14pt7b.h"
 #include "gfx_text.h"
 #include "scene.h"
 #include "time_of_day.h"
@@ -42,33 +43,37 @@ public:
   }
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
-    g_backgrounds.render(BgType::STARFIELD, matrix, now_ms);
+    // Same starfield bg as giant_clock_scene so the swap is visually
+    // continuous when MQTT drops/recovers.
+    g_backgrounds.render(BgType::IMAGE, matrix, now_ms);
 
-    // ── Time line (identical layout to giant_clock_scene so a swap
-    // mid-frame doesn't visibly jump if MQTT drops while the giant
-    // clock is active) ─────────────────────────────────────────────
+    // ── Time line — identical layout to giant_clock_scene ───────────
     const tod::Reading r = tod::now(now_ms);
     char hhmm[6];
     if (r.valid) {
-      snprintf(hhmm, sizeof(hhmm), "%02d:%02d",
-               static_cast<int>(r.hour), static_cast<int>(r.minute));
+      uint8_t h12 = r.hour % 12;
+      if (h12 == 0) h12 = 12;
+      snprintf(hhmm, sizeof(hhmm), "%2u:%02u",
+               static_cast<unsigned>(h12), static_cast<unsigned>(r.minute));
     } else {
       hhmm[0]='-'; hhmm[1]='-'; hhmm[2]=':';
       hhmm[3]='-'; hhmm[4]='-'; hhmm[5]='\0';
     }
-    matrix.setFont(&FreeSansBold12pt7b);
+    matrix.setFont(&digital_7__mono_14pt7b);
     matrix.setTextSize(1);
-    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, hhmm), 17,
+    gfx::draw_text_halo(matrix, /*x=*/2, /*y=*/17,
                         hhmm, 0xFFFF, 0x0000);
 
-    // ── "OFFLINE" badge ─ replaces the date strip. Picopixel keeps
-    // the strip the same height/baseline as giant_clock_scene's date
-    // line (Y=30) so the swap is positionally clean. Amber-ish ink to
-    // signal "warning, but not safety critical".
+    // ── Divider (same row as giant_clock_scene) ─────────────────────
+    matrix.drawFastHLine(0, 21, PANEL_WIDTH, 0x0010);
+
+    // ── "OFFLINE" badge — replaces the date strip, amber to read as
+    //    a soft warning rather than an error. Same baseline (Y=29) as
+    //    giant_clock_scene's date so the swap is positionally clean.
     static const char kBadge[] = "OFFLINE";
     matrix.setFont(&Picopixel);
     matrix.setTextSize(1);
-    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, kBadge), 30,
+    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, kBadge), /*y=*/29,
                         kBadge, 0xFD20 /* amber */, 0x0000);
   }
 };

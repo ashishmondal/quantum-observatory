@@ -47,6 +47,44 @@ void poll(uint32_t now_ms) {
   mutex_exit(&s_mutex);
 }
 
+bool poll_validated(uint32_t now_ms, uint32_t max_jump_s) {
+  // Read RTC outside the lock.
+  int32_t epoch = 0;
+  const bool ok  = ds3231::read(&epoch);
+  const bool osf = ds3231::oscillator_stopped();
+  if (!ok || osf) {
+    return false;
+  }
+
+  // Compute the projection from the existing cache so we can sanity-
+  // check the new value before committing it. Snapshot under lock.
+  bool     prev_valid;
+  int32_t  prev_epoch;
+  uint32_t prev_read_at_ms;
+  mutex_enter_blocking(&s_mutex);
+  prev_valid       = s_state.valid;
+  prev_epoch       = s_state.local_epoch;
+  prev_read_at_ms  = s_state.read_at_ms;
+  mutex_exit(&s_mutex);
+
+  if (prev_valid) {
+    const uint32_t delta_ms  = now_ms - prev_read_at_ms;
+    const int32_t  projected = prev_epoch + static_cast<int32_t>(delta_ms / 1000u);
+    int32_t jump = epoch - projected;
+    if (jump < 0) jump = -jump;
+    if (static_cast<uint32_t>(jump) > max_jump_s) {
+      return false;  // glitched read — keep projecting from the old cache.
+    }
+  }
+
+  mutex_enter_blocking(&s_mutex);
+  s_state.valid       = true;
+  s_state.local_epoch = epoch;
+  s_state.read_at_ms  = now_ms;
+  mutex_exit(&s_mutex);
+  return true;
+}
+
 bool set_from_mqtt(int32_t epoch_utc, int16_t tz_offset_min, uint32_t now_ms) {
   // Convert UTC -> local before persisting; the RTC stores local time
   // (Phase 3.6.3 decision) so reads need no tz state.

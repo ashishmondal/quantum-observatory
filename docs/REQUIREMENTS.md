@@ -1,7 +1,7 @@
 # Quantum Observatory — Requirements
 
 **Version:** 1.6
-**Status:** Draft — implementation in progress (P1–P3 landed; FR-12 color/background system landed)
+**Status:** Draft — implementation in progress (P1–P3 landed; FR-12 color/background system landed; FR-13 splash + sky background landed)
 **Target hardware:** Raspberry Pi Pico W + Waveshare RGB-Matrix-P3 (64×32, FM6126A driver, HUB75)
 **Stack:** C++ on PlatformIO (earlephilhower Arduino-Pico core), Adafruit Protomatter, MQTT client, Home Assistant integration
 
@@ -98,6 +98,14 @@ The device also doubles as **the only clock in the room**. The current time MUST
 - **FR-12.5** The build system SHALL include a pre-build asset import pipeline that converts `assets/*.bmp` (8-bit indexed, uncompressed BMP, exactly 64×32) into flash-resident `constexpr` headers under `include/bitmaps/`. The converter SHALL hard-fail the build if any pixel references a palette entry ≥ 192, preserving the FG-region invariant. An optional `assets/<name>.regions` sidecar text file MAY declare cycling sub-ranges (`start length speed` per line); when absent, a single static region is emitted (no animation).
 - **FR-12.6** The firmware SHALL expose a `gfx_test` scene that simultaneously demonstrates: (a) a cycling background gradient using a multi-stop BG palette (smoothness + seamless 191→20 wrap), (b) three full-width foreground brightness ramps (white / blue / amber) confirming low-end smoothness in all three star palettes, (c) a live 1-second-window FPS counter and uptime/shift readouts, and (d) a single-pixel "jitter witness" hopping each frame so frame-rate irregularity is visible by eye. The scene SHALL be selectable over MQTT via `scene_id: "gfx_test"` like any other scene.
 - **FR-12.7** Authoring constraints for `assets/*.bmp` SHALL be documented at `assets/README.md` (format, dimensions, indexed-only requirement, optional regions sidecar). The 192-index ceiling is non-negotiable: it is the contractual boundary between cycling-eligible and reserved-for-foreground palette entries.
+- **FR-12.8** The asset import pipeline (FR-12.5) SHALL apply gamma correction (γ = 2.2) when packing 8-bit RGB triples to RGB565, so artist-supplied artwork looks perceptually correct on the panel's non-linear LED response.
+
+### FR-13 Boot Splash & Sky Background
+- **FR-13.1** The firmware SHALL present a boot splash (`assets/observatory.bmp` rendered via FR-12.4 image background) from power-on until the first successful MQTT connect. The splash SHALL preempt every other scene including `night` and `thermal_safe` (highest-priority firmware override). Once cleared by the first connect, it SHALL be latched and never re-shown by subsequent disconnects.
+- **FR-13.2** The firmware SHALL provide a `sky` background that renders a sun-aware sky gradient driven by the live RTC time and a hardcoded observer latitude/longitude (Houston in v1; future MQTT-settable). Sun position SHALL use a low-precision NOAA solar model (±1°). The gradient SHALL select between five altitude bands (day / golden hour / civil / nautical / astronomical twilight) and interpolate top→bottom across the panel.
+- **FR-13.3** The sky background SHALL render the sun as a multi-tier disc (~9 px) with a vertical color gradient (pale on top, warm on bottom) that intensifies near the horizon to mimic atmospheric reddening. The sun's screen position SHALL trace a semi-elliptical arc using a linear azimuth→x mapping, clamped so the disc is never cropped at the panel edges.
+- **FR-13.4** The firmware SHALL provide a `sky_timelapse` debug scene that compresses one synthetic day into 10 seconds to allow visual validation of the FR-13.2/13.3 sky and sun rendering without waiting for real-time motion. It SHALL be selectable via the standard MQTT scene contract (FR-2).
+- **FR-13.5** The DS3231 read path (FR-9.5) SHALL include integrity defenses against transient I²C corruption: internal pull-ups via `gpio_pull_up()` (never `pinMode(INPUT_PULLUP)`, which breaks the I²C alt-function), per-burst sanity-clamp of BCD fields, two-burst consensus read (accept only if Δseconds ∈ [0,1]), and a poll-validated outer cadence that rejects any RTC value diverging from the projected time by more than 3 hours. Successful polls back off to a 1-hour cadence; rejected polls retry with exponential backoff capped at 1 hour.
 
 ---
 
@@ -201,16 +209,18 @@ Topic: `observatory/status` — JSON heartbeat every 30 s:
 | scene_id | bg_type | text_layout | notes |
 |---|---|---|---|
 | `boot` | starfield | "OBS" centered | shown at startup |
-| `clock` | starfield_dim | giant HH:MM + date line | default / idle scene (FR-9.4) |
+| `splash` | image (observatory.bmp) | — | firmware override; shown until first MQTT connect (FR-13.1) |
+| `clock` | sky | giant HH:MM + date line | default / idle scene (FR-9.4); sky bg per FR-13.2 |
 | `offline` | starfield_dim | local time | MQTT disconnect fallback |
 | `night` | black | dim HH:MM only | LDR-triggered (FR-7.2); preempts MQTT scenes |
-| `thermal_safe` | black | dim "COOL DOWN" + temperature | DS3231-triggered (FR-7.3); preempts everything |
+| `thermal_safe` | black | dim "COOL DOWN" + temperature | DS3231-triggered (FR-7.3); preempts everything except `splash` |
 | `bg_starfield` | static deep-sky | — | static field + small twinkle overlay |
 | `bg_parallax` | parallax | — | 3-level scrolling stars |
 | `bg_nebula` | nebula | — | dynamic palette-cycled clouds (FR-12.3/12.4) |
 | `bg_bitmap` | bitmap | — | procedural palette-indexed bitmap demo |
 | `bg_image` | image | — | first artist-supplied `assets/*.bmp` (FR-12.5) |
 | `gfx_test` | gradient + ramps | live FPS readout | diagnostic (FR-12.6) |
+| `sky_timelapse` | sky (synthetic time) | "TIMELAPSE" label | diagnostic (FR-13.4); 1 day per 10 s |
 | `iss_pass` | nebula | 2-line: "ISS NOW" + direction | priority 4 |
 | `moon_phase` | starfield | phase glyph + name | sticky |
 | `jupiter_visibility` | nebula | direction + time | example in §5.1 |

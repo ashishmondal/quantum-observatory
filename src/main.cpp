@@ -22,6 +22,8 @@
 #include "scenes/gfx_test_scene.h"
 #include "scenes/night_scene.h"
 #include "scenes/offline_scene.h"
+#include "scenes/sky_timelapse_scene.h"
+#include "scenes/splash_scene.h"
 #include "scenes/text_demo_scene.h"
 #include "scenes/thermal_safe_scene.h"
 uint8_t rgbPins[]  = {PIN_R1, PIN_G1, PIN_B1, PIN_R2, PIN_G2, PIN_B2};
@@ -62,8 +64,10 @@ static BackgroundScene s_bg_image   (BgType::IMAGE);
 static GiantClockScene s_giant_clock_scene; // phase 3.5.3 — default room-clock view
 static NightScene      s_night_scene;       // phase 5.5.1 — LDR-triggered override
 static OfflineScene    s_offline_scene;     // phase 6.4 — MQTT-disconnect override
+static SplashScene     s_splash_scene;      // phase 6.5+ — boot splash override
 static ThermalSafeScene s_thermal_safe_scene; // phase 5.5.2 — DS3231-triggered override
 static GfxTestScene    s_gfx_test_scene;    // graphics smoke-test (FPS, palette cycle)
+static SkyTimelapseScene s_sky_timelapse_scene; // debug: 1 day per 10 s
 
 // Single "current scene" pointer; loop() just delegates to it. Swapping
 // scenes is one assignment — no other code changes. (NFR-5.1)
@@ -88,8 +92,10 @@ static Scene* scene_for(scene_state::SceneId id) {
     case SI::BG_IMAGE:     return &s_bg_image;
     case SI::NIGHT:        return &s_night_scene;
     case SI::OFFLINE:      return &s_offline_scene;
+    case SI::SPLASH:       return &s_splash_scene;
     case SI::THERMAL_SAFE: return &s_thermal_safe_scene;
     case SI::GFX_TEST:     return &s_gfx_test_scene;
+    case SI::SKY_TIMELAPSE: return &s_sky_timelapse_scene;
   }
   return nullptr;
 }
@@ -189,6 +195,9 @@ void setup() {
   // Default idle = giant clock at the lowest priority (0) so any MQTT
   // request, even priority 1, beats it (FR-2.1, phase 6.1).
   scene_state::request(scene_state::SceneId::CLOCK, 0);  // default idle
+  // Boot splash override — preempts everything (incl. thermal_safe)
+  // until the first MQTT-connected edge in loop() clears it.
+  scene_state::set_splash_active(true);
 
   // Bring up the shared TimeOfDay state (FR-9.5). Just inits the
   // mutex; the actual time comes from the RTC via tod::poll() in
@@ -289,6 +298,7 @@ void loop() {
   {
     static bool s_was_connected = false;
     static bool s_init_done     = false;
+    static bool s_splash_cleared = false;
     const bool now_connected = mqtt_link::connected();
     if (!s_init_done || now_connected != s_was_connected) {
       scene_state::set_offline_active(!now_connected);
@@ -298,6 +308,15 @@ void loop() {
       }
       s_was_connected = now_connected;
       s_init_done     = true;
+    }
+    // Clear the boot splash on the first time MQTT comes up — the
+    // device is now fully online and the operator-facing default
+    // scene should take over. Latched: subsequent disconnects fall
+    // through the normal offline override, not back to splash.
+    if (now_connected && !s_splash_cleared) {
+      scene_state::set_splash_active(false);
+      s_splash_cleared = true;
+      Serial.println("[splash] cleared (first mqtt connect)");
     }
   }
 
@@ -314,7 +333,38 @@ void loop() {
     Serial.print("[render] fps=");
     Serial.println(static_cast<unsigned long>(g_render_fps));
 
-    tod::poll(now_ms);
+    // RTC poll cadence:
+    //   - Default: every 1 hour. DS3231 drift is ~2 ppm (≈7 s/month),
+    //     so the millis() projection in tod::now() is more than
+    //     accurate enough between hourly resyncs.
+    //   - Glitch handling: poll_validated() rejects readings that
+    //     differ from the projected wall-clock by more than 3 hours
+    //     (covers DST jumps, MQTT-driven set_from_mqtt corrections,
+    //     and outright corruption). On reject we re-try with
+    //     exponential backoff: 1 s → 2 s → 4 s → ... → 1 h, resetting
+    //     to the 1 h cadence on the first accept.
+    //   - First poll: scheduled immediately so chrome leaves "--:--"
+    //     ASAP after boot.
+    static uint32_t s_next_poll_at_ms = 0;
+    static uint32_t s_backoff_ms      = 1000u;
+    static constexpr uint32_t kPollOk_ms   = 60u * 60u * 1000u;  // 1 h
+    static constexpr uint32_t kBackoffCap  = kPollOk_ms;
+    static constexpr uint32_t kMaxJumpSec  = 3u * 60u * 60u;     // 3 h
+    if (static_cast<int32_t>(now_ms - s_next_poll_at_ms) >= 0) {
+      const bool accepted = tod::poll_validated(now_ms, kMaxJumpSec);
+      if (accepted) {
+        s_next_poll_at_ms = now_ms + kPollOk_ms;
+        s_backoff_ms      = 1000u;
+      } else {
+        s_next_poll_at_ms = now_ms + s_backoff_ms;
+        s_backoff_ms      = (s_backoff_ms >= kBackoffCap / 2u)
+                              ? kBackoffCap
+                              : (s_backoff_ms * 2u);
+        Serial.print("[time] poll rejected, retry in ms=");
+        Serial.println(static_cast<unsigned long>(s_backoff_ms));
+      }
+    }
+
     const tod::Reading r = tod::now(now_ms);
     if (r.valid) {
       char buf[16];

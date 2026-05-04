@@ -1,30 +1,35 @@
 // Giant clock scene — the device's primary "room clock" view (FR-9.4).
 //
-// Layout (64×32):
-//   rows ~3..18 : HH:MM in FreeSansBold12pt7b, centred. Largest font that
-//                 fits the panel width with room for the date strip below.
-//   rows ~22..27: "WED 01 MAY" in Picopixel, centred.
-//   bg          : starfield (the "starfield_dim" call in §6 of REQUIREMENTS
-//                 is satisfied by the existing starfield's already-low
-//                 baseline brightness; a true dim variant is a future
-//                 polish item, not a 3.5.3 blocker).
+// Layout (64×32) — modeled on a 7-segment LCD reference:
+//
+//   rows  0..17 : giant HH:MM (12-hour) in Digital-7 14pt, white
+//                 5 chars × 12 px advance = 60 px wide, x=2..61
+//   row    21   : thin horizontal divider, dim blue
+//   rows 25..29 : date "SAT 18 MAY 2024" in Picopixel amber, centred
+//   bg          : artist-supplied starfield.bmp via BG_IMAGE (FR-12.4)
+//
+// 12-hour display per user preference (FR-9.2 default is 24-hour but
+// this scene overrides it to match the LCD-clock aesthetic). AM/PM and
+// seconds are intentionally dropped — Digital-7 14pt is too chunky to
+// fit a side column at 64 px wide. Until tod is initialised the scene
+// shows "--:--" / placeholder date per FR-9.6.
 //
 // Per FR-9.3 this scene opts OUT of the corner clock chrome (it would
-// stomp on the giant readout). Until tod is initialised it shows
-// "--:--" and "--- -- ---" per FR-9.6.
+// stomp on the giant readout).
 //
-// (added in phase 3.5.3)
+// (added in phase 3.5.3; redesigned in phase 6.5+ polish)
 
 #pragma once
 
 #include <stdio.h>
+#include <string.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/Picopixel.h>
 
 #include "backgrounds.h"
 #include "config.h"
+#include "fonts/digital_7__mono_14pt7b.h"
 #include "gfx_text.h"
 #include "scene.h"
 #include "time_of_day.h"
@@ -41,44 +46,82 @@ public:
   }
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
-    g_backgrounds.render(BgType::STARFIELD, matrix, now_ms);
+    // Background: live sky gradient + sun on an arc, computed from
+    // the device's local time and the observer location in config.h.
+    g_backgrounds.render(BgType::SKY, matrix, now_ms);
 
-    // ── Time line ────────────────────────────────────────────────────
     const tod::Reading r = tod::now(now_ms);
-    char hhmm[6]; // "HH:MM" + NUL
-    if (r.valid) {
-      snprintf(hhmm, sizeof(hhmm), "%02d:%02d",
-               static_cast<int>(r.hour), static_cast<int>(r.minute));
-    } else {
-      hhmm[0]='-'; hhmm[1]='-'; hhmm[2]=':'; hhmm[3]='-'; hhmm[4]='-'; hhmm[5]='\0';
-    }
-    matrix.setFont(&FreeSansBold12pt7b);
-    matrix.setTextSize(1);
-    // FreeSansBold12pt7b caps are ~16 px tall. Baseline Y = 17 puts caps
-    // in rows ~2..17 with a 1-px halo above; clears the panel top.
-    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, hhmm), 17,
-                        hhmm, 0xFFFF, 0x0000);
 
-    // ── Date line ────────────────────────────────────────────────────
-    // "WED 01 MAY" — 10 chars × ~4 px in Picopixel ≈ 40 px wide. Baseline
-    // Y = 30 → glyphs span rows ~26..30, halo to 25..31. Within panel.
-    char date[12]; // "WWW DD MMM" + NUL = 11
+    // ── Giant HH:MM (12-hour) ────────────────────────────────────────
+    // Convert 24h → 12h for display only; scene-internal, doesn't
+    // touch the canonical tod::now() value.
+    char hhmm[6];  // "HH:MM" + NUL
+    if (r.valid) {
+      uint8_t h12 = r.hour % 12;
+      if (h12 == 0) h12 = 12;
+      snprintf(hhmm, sizeof(hhmm), "%2u:%02u",
+               static_cast<unsigned>(h12), static_cast<unsigned>(r.minute));
+    } else {
+      hhmm[0]='-'; hhmm[1]='-'; hhmm[2]=':';
+      hhmm[3]='-'; hhmm[4]='-'; hhmm[5]='\0';
+    }
+    // Digital-7 14pt: glyph 18 px tall, yOffset -17, advance 12 px.
+    // Baseline y=19 puts glyph top at y+yOffset = 2 → fits rows 2..19.
+    // 12-hour format means the leading char is always blank or '1', so
+    // the active readout is 4 chars × 12 px = 48 px wide. Anchor flush
+    // left at x=2; the leading-digit slot only ever shows '1' (for
+    // 10/11/12) and is blank otherwise.
+    matrix.setFont(&digital_7__mono_14pt7b);
+    matrix.setTextSize(1);
+
+    // ── LCD ghost layer (with halo) ──────────────────────────────────
+    // Real 7-segment LCDs show every unlit segment as a faint shadow.
+    // We mimic that by drawing "18:88" (the union of all segments that
+    // can ever light in 12-hour mode) in dim grey *with* a black halo
+    // first — the halo punches a clean hole in the starfield so the
+    // ghost reads as etched. Then the live time overlays in plain
+    // white, no halo (the ghost+halo already provides the contrast
+    // edge). Net cost: one halo pass instead of two.
+    constexpr uint16_t kDigitGhost = 0x0841;  // ~RGB(8,8,8) very dim grey
+    constexpr uint16_t kDigitHalo  = 0x0000;
+    gfx::draw_text_halo(matrix, /*x=*/2, /*y=*/19,
+                        "18:88", kDigitGhost, kDigitHalo);
+
+    // ── Live digits, no halo ────────────────────────────────────────
+    constexpr uint16_t kDigitInk = 0xFFFF;  // white
+    matrix.setTextColor(kDigitInk);
+    matrix.setCursor(2, 19);
+    matrix.print(hhmm);
+
+    // ── Divider ─────────────────────────────────────────────────────
+    // Dim warm green — same low-luminance "glow" feel as the amber
+    // date strip below, but in a complementary hue so the divider
+    // reads as a separate UI element rather than an extension of the
+    // date.
+    constexpr uint16_t kDivider = 0x0300;  // dim green
+    matrix.drawFastHLine(0, 22, PANEL_WIDTH, kDivider);
+
+    // ── Date strip ──────────────────────────────────────────────────
+    // Deep amber — RGB565 0xF940 ≈ RGB(255,80,0). Dropping green
+    // pulls the hue away from yellow toward burnt orange so it
+    // doesn't visually merge with white digits above.
+    matrix.setFont(&Picopixel);
+    matrix.setTextSize(1);
+    constexpr uint16_t kInfoInk  = 0xF940;  // deep amber
+    constexpr uint16_t kInfoHalo = 0x0000;
+    char date[16];  // "SAT 18 MAY 2024" + NUL = 16
     if (r.valid) {
       int16_t  yr;
       uint8_t  mo, d, dow;
       tod::date_from_local_epoch(r.local_epoch, &yr, &mo, &d, &dow);
-      snprintf(date, sizeof(date), "%s %02d %s",
-               tod::weekday_abbrev(dow), static_cast<int>(d),
-               tod::month_abbrev(mo));
+      snprintf(date, sizeof(date), "%s %02u %s %04d",
+               tod::weekday_abbrev(dow), static_cast<unsigned>(d),
+               tod::month_abbrev(mo), static_cast<int>(yr));
     } else {
-      // Length matches "WWW DD MMM" so centring is identical pre/post sync.
-      const char* k = "--- -- ---";
-      // 11 chars + NUL fits sizeof(date)=12.
-      for (size_t i = 0; i <= 10; ++i) date[i] = k[i];
+      strncpy(date, "--- -- --- ----", sizeof(date));
+      date[sizeof(date)-1] = '\0';
     }
-    matrix.setFont(&Picopixel);
-    matrix.setTextSize(1);
-    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, date), 30,
-                        date, 0xFFFF, 0x0000);
+    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, date), /*y=*/29,
+                        date, kInfoInk, kInfoHalo);
   }
 };
