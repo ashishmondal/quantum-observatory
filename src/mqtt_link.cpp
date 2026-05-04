@@ -18,6 +18,8 @@
 #include "scene_state.h"
 #include "secrets.h"
 #include "light_sensor.h"
+#include "iss_state.h"
+#include "moon_state.h"
 #include "thermal_monitor.h"
 #include "time_of_day.h"
 #include "wifi_link.h"
@@ -36,6 +38,8 @@ constexpr const char* kTopicClear   = "observatory/clear_sticky"; // §5.3 / FR-
 constexpr const char* kTopicNight   = "observatory/night";   // FR-7.4
 constexpr const char* kTopicThermal = "observatory/thermal"; // FR-7.4
 constexpr const char* kTopicTime    = "observatory/time";    // FR-9.5
+constexpr const char* kTopicMoon    = "observatory/moon";    // phase 7.2 follow-up
+constexpr const char* kTopicIss     = "observatory/iss";     // phase 7.1+ iss data path
 
 // §5.4 example payload is ~85 bytes serialised. NFR-2.3 → max + 25%.
 // Using 256 here gives generous headroom for future fields without
@@ -68,6 +72,10 @@ uint32_t s_threshold_msgs    = 0;  // night + thermal combined
 uint32_t s_threshold_rejects = 0;
 uint32_t s_time_msgs         = 0;
 uint32_t s_time_rejects      = 0;
+uint32_t s_moon_msgs         = 0;
+uint32_t s_moon_rejects      = 0;
+uint32_t s_iss_msgs          = 0;
+uint32_t s_iss_rejects       = 0;
 uint32_t s_clear_msgs        = 0;
 
 // Tag identifying which §5.2 threshold topic a payload arrived on.
@@ -229,6 +237,194 @@ void handle_time(char* buf, unsigned int length, uint32_t now_ms) {
   Serial.println(tz_offset_min);
 }
 
+// observatory/moon handler — phase 7.2 follow-up. Payload:
+//   {"phase":0.34,"illum_pct":68,"age_d":10,"name":"WAX GIB"}
+// `phase` is the synodic-month fraction (0..1, 0 = new, 0.5 = full).
+// `illum_pct` and `age_d` are derived but pushed by HA so its UI and
+// our panel agree to the integer. `name` is optional (the scene
+// derives one if missing). Same FR-1.3 / FR-1.4 discipline as the
+// other inbound handlers: malformed → log + drop, never crash.
+void handle_moon(char* buf, unsigned int length, uint32_t now_ms) {
+  ++s_moon_msgs;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  StaticJsonDocument<192> doc;
+#pragma GCC diagnostic pop
+  const DeserializationError err = deserializeJson(doc, buf, length);
+  if (err) {
+    ++s_moon_rejects;
+    Serial.print("[mqtt] moon parse FAILED err=");
+    Serial.print(err.c_str());
+    Serial.print(" payload=");
+    Serial.println(buf);
+    return;
+  }
+
+  if (!doc["phase"].is<float>() && !doc["phase"].is<int>()) {
+    ++s_moon_rejects;
+    Serial.print("[mqtt] moon missing phase payload=");
+    Serial.println(buf);
+    return;
+  }
+  const float phase     = doc["phase"].as<float>();
+  const int   illum_pct = doc["illum_pct"] | -1;
+  const int   age_d     = doc["age_d"]     | -1;
+  const char* name      = doc["name"]      | static_cast<const char*>(nullptr);
+
+  if (phase < 0.0f || phase >= 1.0f
+   || illum_pct < 0 || illum_pct > 100
+   || age_d     < 0 || age_d     > 30) {
+    ++s_moon_rejects;
+    Serial.print("[mqtt] moon out-of-range phase=");
+    Serial.print(phase);
+    Serial.print(" illum=");
+    Serial.print(illum_pct);
+    Serial.print(" age=");
+    Serial.println(age_d);
+    return;
+  }
+
+  moon_state::set_from_mqtt(phase,
+                            static_cast<uint8_t>(illum_pct),
+                            static_cast<uint16_t>(age_d),
+                            name, now_ms);
+  Serial.print("[mqtt] moon applied phase=");
+  Serial.print(phase);
+  Serial.print(" illum=");
+  Serial.print(illum_pct);
+  Serial.print(" age=");
+  Serial.print(age_d);
+  Serial.print(" name=");
+  Serial.println(name ? name : "(derived)");
+}
+
+// observatory/iss handler — phase 7.1++ raw HA pass-through.
+//
+// HA does NO logic — it just polls public APIs and re-emits the
+// fields verbatim through a Jinja template. Wire payload:
+//   { "lat_deg": 50.11, "lon_deg": 118.07,
+//     "altitude_km": 408, "sunlit": true,
+//     "seconds_until_next": 12345,
+//     "crew_count": 7 }
+//
+// • lat_deg/lon_deg/altitude_km/sunlit come from
+//   wheretheiss.at /v1/satellites/25544 (.latitude, .longitude,
+//   .altitude rounded, .visibility=="daylight").
+// • seconds_until_next comes from open-notify iss-pass.json
+//   (next response[0].risetime − now()).
+// • crew_count is optional (open-notify astros.json filtered to
+//   craft=="ISS"); HA may not have polled it yet on cold boot.
+//
+// All observer-relative geometry (is the station above MY horizon,
+// which way to look, am I in darkness) is computed on-device every
+// frame in the iss_pass scene from this snapshot + config.h
+// LATITUDE_DEG/LONGITUDE_DEG + sun::compute(). Per FR-1.3 / FR-1.4
+// any malformed/out-of-range payload is logged and dropped.
+void handle_iss(char* buf, unsigned int length, uint32_t now_ms) {
+  ++s_iss_msgs;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  StaticJsonDocument<256> doc;
+#pragma GCC diagnostic pop
+  const DeserializationError err = deserializeJson(doc, buf, length);
+  if (err) {
+    ++s_iss_rejects;
+    Serial.print("[mqtt] iss parse FAILED err=");
+    Serial.print(err.c_str());
+    Serial.print(" payload=");
+    Serial.println(buf);
+    return;
+  }
+
+  // Required fields. Without lat/lon/alt we can't compute look
+  // angles; without sunlit we can't decide visibility; without
+  // seconds_until_next the countdown is meaningless. Drop the
+  // payload entirely if any are missing — the scene falls back to
+  // the previous fresh snapshot or "WAIT".
+  if (!doc["lat_deg"].is<float>() ||
+      !doc["lon_deg"].is<float>() ||
+      !doc["altitude_km"].is<int>() ||
+      !doc["sunlit"].is<bool>() ||
+      !doc["seconds_until_next"].is<long>()) {
+    ++s_iss_rejects;
+    Serial.print("[mqtt] iss missing required fields payload=");
+    Serial.println(buf);
+    return;
+  }
+  const float lat_deg            = doc["lat_deg"].as<float>();
+  const float lon_deg            = doc["lon_deg"].as<float>();
+  const long  altitude_km_in     = doc["altitude_km"].as<long>();
+  const bool  sunlit             = doc["sunlit"].as<bool>();
+  const long  seconds_until_next = doc["seconds_until_next"].as<long>();
+
+  // Range checks. ISS altitude lives near 400 km; cap at 999 to fit
+  // our uint16 + 3-glyph render slot. seconds_until_next caps at one
+  // week — pass predictions further out are almost certainly an HA
+  // template bug.
+  if (lat_deg < -90.0f || lat_deg > 90.0f ||
+      lon_deg < -180.0f || lon_deg > 180.0f) {
+    ++s_iss_rejects;
+    Serial.print("[mqtt] iss lat/lon out-of-range lat=");
+    Serial.print(lat_deg);
+    Serial.print(" lon=");
+    Serial.println(lon_deg);
+    return;
+  }
+  if (altitude_km_in < 0 || altitude_km_in > 999) {
+    ++s_iss_rejects;
+    Serial.print("[mqtt] iss altitude_km out-of-range=");
+    Serial.println(altitude_km_in);
+    return;
+  }
+  constexpr long kMaxSecondsUntil = 7L * 24L * 60L * 60L;  // 604800
+  if (seconds_until_next < 0 || seconds_until_next > kMaxSecondsUntil) {
+    ++s_iss_rejects;
+    Serial.print("[mqtt] iss out-of-range seconds_until_next=");
+    Serial.println(seconds_until_next);
+    return;
+  }
+
+  // Optional crew_count. Out-of-range demotes to "absent" (renders
+  // "?") without rejecting the rest of the payload — FR-1.3 spirit:
+  // drop the bad bit, keep the good bits.
+  bool    have_crew  = false;
+  uint8_t crew_count = 0;
+  if (doc["crew_count"].is<int>()) {
+    const long crew = doc["crew_count"].as<long>();
+    if (crew >= 0 && crew <= 99) {
+      have_crew  = true;
+      crew_count = static_cast<uint8_t>(crew);
+    } else {
+      Serial.print("[mqtt] iss crew_count out-of-range=");
+      Serial.println(crew);
+    }
+  }
+
+  iss_state::set_from_mqtt(lat_deg, lon_deg,
+                           static_cast<uint16_t>(altitude_km_in),
+                           sunlit,
+                           static_cast<uint32_t>(seconds_until_next),
+                           have_crew, crew_count,
+                           now_ms);
+  Serial.print("[mqtt] iss applied lat=");
+  Serial.print(lat_deg);
+  Serial.print(" lon=");
+  Serial.print(lon_deg);
+  Serial.print(" alt_km=");
+  Serial.print(altitude_km_in);
+  Serial.print(" sunlit=");
+  Serial.print(sunlit ? 1 : 0);
+  Serial.print(" seconds_until_next=");
+  Serial.print(seconds_until_next);
+  if (have_crew) {
+    Serial.print(" crew=");
+    Serial.print(crew_count);
+  }
+  Serial.println();
+}
+
 // PubSubClient inbound callback. Runs on Core 0 from inside
 // PubSubClient::loop() (called from poll()) — same thread as the rest
 // of mqtt_link, so no locking needed against our own static state.
@@ -265,6 +461,14 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
     // PubSubClient::loop() on Core 0, the same thread that owns tod's
     // smoothing baseline.
     handle_time(buf, length, millis());
+    return;
+  }
+  if (strcmp(topic, kTopicMoon) == 0) {
+    handle_moon(buf, length, millis());
+    return;
+  }
+  if (strcmp(topic, kTopicIss) == 0) {
+    handle_iss(buf, length, millis());
     return;
   }
   if (strcmp(topic, kTopicClear) == 0) {
@@ -489,7 +693,7 @@ void poll(uint32_t now_ms) {
         // doesn't remember non-persistent sessions across our outages.
         // All three subscriptions go through the same on_mqtt_message
         // dispatcher, which routes by topic.
-        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime };
+        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss };
         for (const char* t : topics) {
           if (s_client.subscribe(t)) {
             Serial.print("[mqtt] sub ");

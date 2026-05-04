@@ -13,8 +13,10 @@ A network-connected 64×32 RGB matrix display that renders curated astronomical 
 
 The device also doubles as **the only clock in the room**. The current time MUST be visible at all times — every scene carries a small clock readout, and a dedicated giant-clock scene serves as the default "nothing else to show" view.
 
+**Audience:** the dashboard targets teenagers — roughly 80% astronomy interest (planets, the Moon, ISS passes, what's visible tonight) and 20% astrophysics interest (scale, orbits, light-years, deep-sky context). Scene copy, scene selection, and visual priorities SHALL favour the observable-sky framing first; astrophysics framing is a flavor layer, not the headline.
+
 **In scope:** scene rendering engine, MQTT scene contract, dual-core orchestration, OTA scene registry, offline fallback, always-on clock readout, dedicated clock/date scene.
-**Out of scope:** raw pixel streaming, server-side layout, touchscreen/input handling, audio.
+**Out of scope:** raw pixel streaming, server-side layout, touchscreen/input handling, audio, weather/meteorological alerts (this is an *astronomy* dashboard; HA already surfaces weather elsewhere in the home).
 
 ---
 
@@ -78,7 +80,7 @@ The device also doubles as **the only clock in the room**. The current time MUST
 - **FR-9.6** Until the RTC has been read at least once after boot (or its oscillator-stop flag is set, indicating loss of backup power), the clock readout SHALL render `--:--` rather than a wrong time. Scenes still render normally; only the readout is masked.
 
 ### FR-10 Audible Alerts (on-board buzzer)
-- **FR-10.1** The firmware SHALL drive the on-board buzzer (GP27, active-high) for short attention chirps tied to high-priority scenes (priority ≥ 4, e.g. `weather_alert`, `iss_pass`).
+- **FR-10.1** The firmware SHALL drive the on-board buzzer (GP27, active-high) for short attention chirps tied to high-priority scenes (priority ≥ 4, e.g. `iss_pass`).
 - **FR-10.2** Buzzer behaviour (mute / chirp pattern) SHALL be remotely controllable via MQTT (e.g. `observatory/buzzer`, payload = `{"mode": "off"|"chirp"|"siren", "count": N}`). HA owns the policy; firmware owns the timing.
 - **FR-10.3** A firmware mute switch SHALL hard-cap any chirp to ≤ 200 ms ON / ≥ 800 ms OFF and ≤ 3 chirps per scene activation, regardless of MQTT command, to avoid runaway noise from a malformed payload.
 - **FR-10.4** The buzzer SHALL default to off after boot. A boot-time self-test chirp is allowed but MUST be ≤ 50 ms.
@@ -221,10 +223,9 @@ Topic: `observatory/status` — JSON heartbeat every 30 s:
 | `bg_image` | image | — | first artist-supplied `assets/*.bmp` (FR-12.5) |
 | `gfx_test` | gradient + ramps | live FPS readout | diagnostic (FR-12.6) |
 | `sky_timelapse` | sky (synthetic time) | "TIMELAPSE" label | diagnostic (FR-13.4); 1 day per 10 s |
-| `iss_pass` | nebula | 2-line: "ISS NOW" + direction | priority 4 |
+| `iss_pass` | nebula | typewriter ALT/CREW/VIS | priority 4; on-device look-angle + visibility derivation per FR-14 |
 | `moon_phase` | starfield | phase glyph + name | sticky |
 | `jupiter_visibility` | nebula | direction + time | example in §5.1 |
-| `weather_alert` | red_pulse | 2-line warning | priority 5 (max), triggers buzzer chirp (FR-10.1) |
 
 All scenes above (except possibly `boot` during the splash window) carry the standard small clock readout per FR-9.2.
 

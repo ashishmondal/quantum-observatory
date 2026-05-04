@@ -53,6 +53,22 @@ If Step 3 made no PLAN.md edits (the common case), skip this step silently.
 
 If Step 3.5 aborted, you never reach this step.
 
+## Step 3.7 — Verify MQTT topic doc ↔ source-code alignment
+
+Read [docs/MQTT_TOPICS.md](../../docs/MQTT_TOPICS.md). Cross-check it against `src/mqtt_link.cpp`:
+
+- Every `kTopic*` constant subscribed/published in `mqtt_link.cpp` MUST have a section in MQTT_TOPICS.md.
+- Every topic listed in MQTT_TOPICS.md MUST appear as a `kTopic*` constant in `mqtt_link.cpp`.
+- Spot-check that the payload field names + validation ranges in the doc match the corresponding `handle_*()` functions (e.g. if the doc says `phase` is required and `0..<1`, the handler should reject `phase < 0.0f || phase >= 1.0f`).
+
+If you find drift:
+- **Doc-only fix (small, additive — e.g. missing topic row, wrong range bound):** edit MQTT_TOPICS.md to match the code, then commit it as a separate doc-only commit (`docs: sync MQTT_TOPICS.md with mqtt_link.cpp`) before starting code work in Step 6. Same rationale as Step 3.6.
+- **Structural mismatch (handler missing entirely, contradictory contract):** stop and report — the user disambiguates whether the doc or the code is canonical.
+
+If aligned: proceed silently.
+
+If the current step itself adds or modifies an MQTT topic, MQTT_TOPICS.md MUST be updated in the same commit as the code change (not a separate doc commit) — the doc is part of the wire contract, not a side-note.
+
 ## Step 4 — Identify the next step
 
 Find the **first** step in PLAN.md marked `[ ]` (not started) or `[~]` (in progress), reading top to bottom. That is your task.

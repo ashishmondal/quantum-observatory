@@ -13,6 +13,8 @@
 #include "time_of_day.h"
 #include "wifi_link.h"
 #include "mqtt_link.h"
+#include "iss_state.h"
+#include "moon_state.h"
 #include "scenes/scene.h"
 #include "scenes/background_scene.h"
 #include "scenes/boot_scene.h"
@@ -22,6 +24,8 @@
 #include "scenes/gfx_test_scene.h"
 #include "scenes/night_scene.h"
 #include "scenes/offline_scene.h"
+#include "scenes/iss_pass_scene.h"
+#include "scenes/moon_phase_scene.h"
 #include "scenes/sky_timelapse_scene.h"
 #include "scenes/splash_scene.h"
 #include "scenes/text_demo_scene.h"
@@ -68,6 +72,8 @@ static SplashScene     s_splash_scene;      // phase 6.5+ — boot splash overri
 static ThermalSafeScene s_thermal_safe_scene; // phase 5.5.2 — DS3231-triggered override
 static GfxTestScene    s_gfx_test_scene;    // graphics smoke-test (FPS, palette cycle)
 static SkyTimelapseScene s_sky_timelapse_scene; // debug: 1 day per 10 s
+static IssPassScene    s_iss_pass_scene;    // phase 7.1 — "ISS NOW" callout
+static MoonPhaseScene  s_moon_phase_scene;  // phase 7.2 — sticky moon disc + phase
 
 // Single "current scene" pointer; loop() just delegates to it. Swapping
 // scenes is one assignment — no other code changes. (NFR-5.1)
@@ -96,6 +102,8 @@ static Scene* scene_for(scene_state::SceneId id) {
     case SI::THERMAL_SAFE: return &s_thermal_safe_scene;
     case SI::GFX_TEST:     return &s_gfx_test_scene;
     case SI::SKY_TIMELAPSE: return &s_sky_timelapse_scene;
+    case SI::ISS_PASS:     return &s_iss_pass_scene;
+    case SI::MOON_PHASE:   return &s_moon_phase_scene;
   }
   return nullptr;
 }
@@ -204,6 +212,16 @@ void setup() {
   // loop(). Stays invalid ("--:--") until the first successful poll
   // against an RTC with the oscillator-stop flag clear (FR-9.6).
   tod::init();
+
+  // Lunar-state IPC for the moon_phase scene's MQTT data path
+  // (observatory/moon). Falls back to local synodic-month math when
+  // no fresh value has been pushed.
+  moon_state::init();
+
+  // ISS-pass IPC for the iss_pass scene's MQTT data path
+  // (observatory/iss). Falls back to a "WAIT" placeholder when
+  // no fresh value has been pushed.
+  iss_state::init();
 
   // DS3231 RTC bring-up (FR-9.5). Battery-backed authoritative time
   // source — every reader (chrome, giant clock, future scenes) goes

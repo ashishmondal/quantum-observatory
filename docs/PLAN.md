@@ -313,10 +313,9 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 
 > One scene = one win. Pick whichever motivates you most each session.
 
-- [ ] **7.1** `iss_pass` — "ISS NOW" header + direction
-- [ ] **7.2** `moon_phase` — phase glyph + name (sticky)
+- [x] **7.1** `iss_pass` — typewriter ALT/CREW/VIS, on-device look-angle + visibility derivation (FR-14)
+- [x] **7.2** `moon_phase` — phase glyph + name (sticky)
 - [ ] **7.3** `jupiter_visibility` — direction + time
-- [ ] **7.4** `weather_alert` — red-pulse background, 2-line warning (priority 5)
 - [ ] **7.5** Home Assistant automations & sensors that publish them
 
 ---

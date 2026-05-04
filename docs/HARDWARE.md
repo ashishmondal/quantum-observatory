@@ -152,8 +152,8 @@ incidental cleanup, not required for ADC. We already init Serial in our
 
 ## Buzzer (GP27, active-high)
 
-**Why we care:** audible alerts. Could front-end FR-1 priority-5 scenes
-(e.g. weather alerts) with a chirp without needing a separate device.
+**Why we care:** audible alerts. Could front-end FR-1 priority-≥4 scenes
+(e.g. an ISS pass overhead) with a chirp without needing a separate device.
 
 ### Wiring
 

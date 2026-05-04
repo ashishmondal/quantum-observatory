@@ -228,6 +228,8 @@ constexpr IdMapping kIdMap[] = {
   { "bg_image",     SceneId::BG_IMAGE     },
   { "gfx_test",      SceneId::GFX_TEST      },
   { "sky_timelapse", SceneId::SKY_TIMELAPSE },
+  { "iss_pass",      SceneId::ISS_PASS      },
+  { "moon_phase",    SceneId::MOON_PHASE    },
 };
 }  // namespace
 
