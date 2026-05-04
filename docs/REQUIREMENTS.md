@@ -1,7 +1,7 @@
 # Quantum Observatory — Requirements
 
-**Version:** 1.5
-**Status:** Draft — pre-implementation
+**Version:** 1.6
+**Status:** Draft — implementation in progress (P1–P3 landed; FR-12 color/background system landed)
 **Target hardware:** Raspberry Pi Pico W + Waveshare RGB-Matrix-P3 (64×32, FM6126A driver, HUB75)
 **Stack:** C++ on PlatformIO (earlephilhower Arduino-Pico core), Adafruit Protomatter, MQTT client, Home Assistant integration
 
@@ -36,8 +36,9 @@ The device also doubles as **the only clock in the room**. The current time MUST
 - **FR-3.1** The device SHALL maintain a target frame rate of **20–30 FPS** during normal operation.
 - **FR-3.2** The renderer SHALL composite three layers: Ambient (background), Information (text), Transition (effects).
 - **FR-3.3** Text SHALL be drawn with a destructive halo / bounding box to remain legible over animated backgrounds.
-- **FR-3.4** The device SHALL support at minimum the following ambient backgrounds: 3-level parallax starfield, Perlin-noise nebula.
+- **FR-3.4** The device SHALL support at minimum the following ambient backgrounds: 3-level parallax starfield, animated nebula (palette-cycled), static deep-sky starfield, palette-indexed bitmap (procedural), palette-indexed image (artist-supplied .bmp).
 - **FR-3.5** The device SHALL support at minimum the following transitions: instant cut, dissolve, warp.
+- **FR-3.6** The renderer SHALL provide a `gfx_test` diagnostic scene (FR-12.6) that exercises the smooth-gradient path and palette cycling and reports live FPS, so visual regressions can be caught with one MQTT command.
 
 ### FR-4 Typography
 - **FR-4.1** The device SHALL render text using `Silkscreen` (5×7) for data and `Space Mono Bold` (or equivalent compact bold) for headers.
@@ -87,6 +88,17 @@ The device also doubles as **the only clock in the room**. The current time MUST
 - **FR-11.2** When MQTT is connected, button presses SHALL be published to HA (e.g. `observatory/button`, payload = `"menu"|"down"|"up"`) so HA can drive scene response. Local behaviour SHALL be a no-op in this mode (Director still owns intent).
 - **FR-11.3** When MQTT is disconnected, the buttons SHALL provide a minimal local fallback: MENU cycles between `clock` and `offline` scenes; UP/DOWN reserved for future local actions (no firmware-managed brightness in v1).
 
+### FR-12 Color & Background System
+- **FR-12.1** The renderer SHALL use a split-layout palette table to deliver smooth gradients at the panel's 5-bit-per-channel depth. Every palette is exactly 256 RGB565 entries divided as **0..191 = background region (cyclic)** and **192..255 = foreground region (linear brightness ramp)**. (The split is documented at the API surface as `palette::BG_LEN = 192`, `palette::FG_BASE = 192`, `palette::FG_LEN = 64`.)
+- **FR-12.2** Palettes SHALL be built once at boot from compact stop-list definitions (linear interpolation between stops, round-to-nearest RGB565 packing), and read-only thereafter. No per-frame palette computation.
+- **FR-12.3** Background regions SHALL support **palette cycling** without re-computing pixels: a renderer animates by walking a per-frame shift index modulo 192. A background MAY define multiple disjoint sub-ranges (`Region {start, length, speed}`, max 4), each cycling at its own signed speed, so different parts of one image can flow at different rates and directions.
+- **FR-12.4** The renderer SHALL support two background flavors:
+  - **Dynamic** — computes pixels every frame (e.g. starfield, parallax, nebula).
+  - **Palette-indexed bitmap** — a 64×32 array of 1-byte palette indices (BG region only, indices 0..191) plus a per-image 192-entry palette and region table. Pixels are computed once at init (procedural) or imported from artist-supplied artwork (FR-12.5); cycling is then "free."
+- **FR-12.5** The build system SHALL include a pre-build asset import pipeline that converts `assets/*.bmp` (8-bit indexed, uncompressed BMP, exactly 64×32) into flash-resident `constexpr` headers under `include/bitmaps/`. The converter SHALL hard-fail the build if any pixel references a palette entry ≥ 192, preserving the FG-region invariant. An optional `assets/<name>.regions` sidecar text file MAY declare cycling sub-ranges (`start length speed` per line); when absent, a single static region is emitted (no animation).
+- **FR-12.6** The firmware SHALL expose a `gfx_test` scene that simultaneously demonstrates: (a) a cycling background gradient using a multi-stop BG palette (smoothness + seamless 191→20 wrap), (b) three full-width foreground brightness ramps (white / blue / amber) confirming low-end smoothness in all three star palettes, (c) a live 1-second-window FPS counter and uptime/shift readouts, and (d) a single-pixel "jitter witness" hopping each frame so frame-rate irregularity is visible by eye. The scene SHALL be selectable over MQTT via `scene_id: "gfx_test"` like any other scene.
+- **FR-12.7** Authoring constraints for `assets/*.bmp` SHALL be documented at `assets/README.md` (format, dimensions, indexed-only requirement, optional regions sidecar). The 192-index ceiling is non-negotiable: it is the contractual boundary between cycling-eligible and reserved-for-foreground palette entries.
+
 ---
 
 ## 3. Non-Functional Requirements
@@ -112,6 +124,7 @@ The device also doubles as **the only clock in the room**. The current time MUST
 ### NFR-5 Maintainability
 - **NFR-5.1** Adding a new scene SHALL require only: (a) one entry in the Scene Registry, (b) one `render_*()` function. No changes to MQTT, dispatch, or core split logic.
 - **NFR-5.2** Pin assignments and panel geometry SHALL be centralized in a single `config.h`.
+- **NFR-5.3** Adding a new artist-supplied background image SHALL require only dropping `assets/<name>.bmp` (and optionally `<name>.regions`) into the repo. The asset import pipeline (FR-12.5) SHALL pick it up on the next build with no source-code edits.
 
 ---
 
@@ -192,6 +205,12 @@ Topic: `observatory/status` — JSON heartbeat every 30 s:
 | `offline` | starfield_dim | local time | MQTT disconnect fallback |
 | `night` | black | dim HH:MM only | LDR-triggered (FR-7.2); preempts MQTT scenes |
 | `thermal_safe` | black | dim "COOL DOWN" + temperature | DS3231-triggered (FR-7.3); preempts everything |
+| `bg_starfield` | static deep-sky | — | static field + small twinkle overlay |
+| `bg_parallax` | parallax | — | 3-level scrolling stars |
+| `bg_nebula` | nebula | — | dynamic palette-cycled clouds (FR-12.3/12.4) |
+| `bg_bitmap` | bitmap | — | procedural palette-indexed bitmap demo |
+| `bg_image` | image | — | first artist-supplied `assets/*.bmp` (FR-12.5) |
+| `gfx_test` | gradient + ramps | live FPS readout | diagnostic (FR-12.6) |
 | `iss_pass` | nebula | 2-line: "ISS NOW" + direction | priority 4 |
 | `moon_phase` | starfield | phase glyph + name | sticky |
 | `jupiter_visibility` | nebula | direction + time | example in §5.1 |
@@ -237,6 +256,8 @@ All scenes above (except possibly `boot` during the splash window) carry the sta
 7. **Night-mode threshold defaults** (FR-7.2 / FR-7.6): the vendor demo uses `adc_read() - 700` as a dark-floor offset; we should re-baseline raw photoresistor values in our actual enclosure and pick a sensible default + hysteresis before shipping FR-7.
 8. **Thermal threshold default** (FR-7.3): DS3231 on-die temperature is internal silicon, not panel surface — needs a one-time correlation against an IR thermometer reading on the panel itself to pick a meaningful threshold (the DS3231 will read cooler than the LEDs).
 9. **Buzzer pattern vocabulary** (FR-10.2): just `off`/`chirp`/`siren`, or a richer pattern grammar? Start minimal; extend if HA needs it.
+10. **Image selection over MQTT** (FR-12.5): today `bg_image` always shows the first registered `assets/*.bmp`. When the asset library grows past 1, do we extend the Scene Contract with an `image_id` override, add per-image scene IDs, or expose a separate `observatory/image` topic? Defer until the second image lands.
+11. **Runtime asset upload** (FR-12.5 extension): currently images are flash-resident at compile time. Should we support pushing new images over MQTT into LittleFS so HA can refresh artwork without a reflash? (Tied to OQ #2 and the OTA strategy.)
 
 ---
 

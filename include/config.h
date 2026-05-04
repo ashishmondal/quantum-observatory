@@ -34,12 +34,15 @@
 // ---- Panel geometry -------------------------------------------------------
 #define PANEL_WIDTH      64
 #define PANEL_HEIGHT     32
-// Bit depth = bits per RGB channel (Protomatter halves this for the 6-bit
-// green). Higher = more brightness levels at the cost of SRAM (buffer
-// scales linearly) and a tiny refresh-rate hit. 6 gives 64 levels per
-// channel, which is what AA/trail fade math needs to not collapse to 0
-// at low weights. (raised from 4 in phase 2.3 motion-blur work)
-#define PANEL_BIT_DEPTH  6
+// Bit depth = bits per RGB channel. Higher = more brightness levels but
+// LOWER refresh rate (BCM total period scales as 2^N). On RP2040 + 64x32:
+//   4 -> ~280 Hz   (16 levels/ch)
+//   5 -> ~190 Hz   (32 levels/ch)
+//   6 -> ~110 Hz   (64 levels/ch — borderline visible flicker)
+// Dropped 6 -> 5 to eliminate a perceptible shimmer. Trail/AA fade math
+// still works at 32 levels; only the dimmest 1–2 steps collapse, which
+// the gamma curve in starfield_bg.h already compensates for.
+#define PANEL_BIT_DEPTH  5
 #define PANEL_CHAINS     1
 #define PANEL_ADDR_LINES 4   // 1/16 scan
 // Double-buffer the panel: scenes draw into a back buffer; show() swaps it

@@ -32,6 +32,7 @@ constexpr uint32_t kStatusIntervalMs  = 30000u;    // §5.4 heartbeat cadence
 
 constexpr const char* kTopicStatus  = "observatory/status";
 constexpr const char* kTopicScene   = "observatory/scene";   // FR-1.1
+constexpr const char* kTopicClear   = "observatory/clear_sticky"; // §5.3 / FR-2.2
 constexpr const char* kTopicNight   = "observatory/night";   // FR-7.4
 constexpr const char* kTopicThermal = "observatory/thermal"; // FR-7.4
 constexpr const char* kTopicTime    = "observatory/time";    // FR-9.5
@@ -67,6 +68,7 @@ uint32_t s_threshold_msgs    = 0;  // night + thermal combined
 uint32_t s_threshold_rejects = 0;
 uint32_t s_time_msgs         = 0;
 uint32_t s_time_rejects      = 0;
+uint32_t s_clear_msgs        = 0;
 
 // Tag identifying which §5.2 threshold topic a payload arrived on.
 // Drives the right setter + range validation in handle_thresholds().
@@ -265,6 +267,16 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
     handle_time(buf, length, millis());
     return;
   }
+  if (strcmp(topic, kTopicClear) == 0) {
+    // §5.3: payload is empty by spec. Don't validate it — a non-empty
+    // payload is harmless noise and rejecting it would just give the
+    // Director a footgun. clear_sticky() is itself a no-op when no
+    // sticky scene is active (FR-2.2).
+    ++s_clear_msgs;
+    scene_state::clear_sticky();
+    Serial.println("[mqtt] clear_sticky");
+    return;
+  }
   if (strcmp(topic, kTopicScene) != 0) {
     return;  // defensive; we only subscribed to the topics above
   }
@@ -305,8 +317,8 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
 
   // Phase 5.4: resolve to a SceneId and hand to the cross-core
   // dispatcher. Unknown ids are logged and dropped (FR-1.3) — the
-  // active scene keeps rendering. Priority/duration/sticky are still
-  // logged but not enforced; that's Phase 6.
+  // active scene keeps rendering. Phase 6.1 enforces FR-2.1 priority
+  // preemption; Phase 6.2 wires duration/sticky into the lifecycle.
   scene_state::SceneId id;
   if (!scene_state::id_from_string(scene_id, &id)) {
     ++s_scene_rejects;
@@ -320,14 +332,37 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
     Serial.println(sticky ? 1 : 0);
     return;
   }
-  scene_state::request(id);
+  // Clamp priority to the FR-2.1 range (0..5) before handing off;
+  // negatives become 0 (lowest), >5 becomes 5 (highest). The Director
+  // shouldn't send out-of-range values but FR-1.3 says we don't trust
+  // the wire.
+  uint8_t prio_u8;
+  if      (priority < 0) prio_u8 = 0;
+  else if (priority > 5) prio_u8 = 5;
+  else                   prio_u8 = static_cast<uint8_t>(priority);
+  // Same defensive clamp on duration: negative → default, >3600 →
+  // capped (the hard TTL is 1 h anyway, FR-2.4).
+  uint16_t dur_u16;
+  if      (duration <= 0)   dur_u16 = 30;     // FR-2.3 default
+  else if (duration > 3600) dur_u16 = 3600;
+  else                      dur_u16 = static_cast<uint16_t>(duration);
+
+  const bool accepted = scene_state::request(id, prio_u8, dur_u16, sticky);
+  if (!accepted) {
+    ++s_scene_rejects;
+    Serial.print("[mqtt] scene preempted id=");
+    Serial.print(scene_id);
+    Serial.print(" prio=");
+    Serial.println(prio_u8);
+    return;
+  }
 
   Serial.print("[mqtt] scene id=");
   Serial.print(scene_id);
   Serial.print(" prio=");
-  Serial.print(priority);
+  Serial.print(prio_u8);
   Serial.print(" dur=");
-  Serial.print(duration);
+  Serial.print(dur_u16);
   Serial.print(" sticky=");
   Serial.println(sticky ? 1 : 0);
 }
@@ -454,7 +489,7 @@ void poll(uint32_t now_ms) {
         // doesn't remember non-persistent sessions across our outages.
         // All three subscriptions go through the same on_mqtt_message
         // dispatcher, which routes by topic.
-        const char* const topics[] = { kTopicScene, kTopicNight, kTopicThermal, kTopicTime };
+        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime };
         for (const char* t : topics) {
           if (s_client.subscribe(t)) {
             Serial.print("[mqtt] sub ");

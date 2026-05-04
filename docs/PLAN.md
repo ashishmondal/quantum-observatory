@@ -130,6 +130,53 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 
 ---
 
+## Phase 3.7 — Color & Background System (FR-12)
+
+> Goal: smooth gradients on a 5-bit panel, palette cycling for free animation,
+> and a drop-in artwork pipeline so non-coders can author backgrounds.
+> Landed out of order — driven by visible flicker + banding while exercising
+> Phase 5 scenes.
+
+- [x] **3.7.1 Flicker fix — Serial off Core 1 + bit depth tune**
+  - Symptom: visible per-row flicker even on static scenes. Root causes: (1) `Serial.print` on Core 1 was preempting Protomatter's PIO/DMA refresh; (2) `PANEL_BIT_DEPTH=6` left refresh rate too low (~110 Hz) for the eye on this panel.
+  - Fix: all logging moved to Core 0; Core 1 publishes `volatile uint32_t g_render_fps` for Core 0 to print. `PANEL_BIT_DEPTH` lowered 6→5 (refresh ~190 Hz, one fewer plane).
+  - **Win:** rock-steady frame on every scene; FPS line still printed every second.
+
+- [x] **3.7.2 Split-layout palette LUT system** (FR-12.1, FR-12.2)
+  - `include/color_palette.h` + `src/color_palette.cpp`. 256-entry palette tables built once at boot from compact stop lists; `BG_LEN=192` cyclic + `FG_LEN=64` linear. APIs: `palette::bg(Id, idx, shift)`, `palette::fg(Id, br6)`, `palette::init_all()`. Round-to-nearest RGB565 packing; **no gamma encoding** — stops are perceptual sRGB-ish (the powf(x,2.2) collapsed the dim end on this panel).
+  - Ids: STAR_WHITE / STAR_BLUE / STAR_AMBER / NIGHT_SKY (FG); NEBULA_CLOUDS (BG).
+  - **Win:** smooth full-width brightness ramps with no banding from index 0 upward.
+
+- [x] **3.7.3 Static deep-sky starfield + twinkle overlay**
+  - Replaced animated starfield with a static field (seed 0xC0FFEE, 90 dust / 28 small / 10 medium / 4 hero) over a dim navy floor (`palette::fg(NIGHT_SKY, 28)`); 6 twinkles cycle in/out (trapezoidal envelope, 1.8–5.5 s lifetimes, brightness cap FG 48). Tuned to user reference image.
+  - **Win:** looks like the night sky, not a screensaver.
+
+- [x] **3.7.4 Palette-cycled nebula** (FR-12.3)
+  - NebulaBg now indexes into `palette::bg(NEBULA_CLOUDS, idx, m_palette_shift)`; shift advances `dt>>4`. Pixels themselves are unchanged frame-to-frame in the cyclic baseline; the palette walks.
+  - **Win:** clouds drift with zero per-pixel work beyond the bilinear sample.
+
+- [x] **3.7.5 BitmapBg (procedural palette-indexed)** (FR-12.4)
+  - `src/backgrounds/bitmap_bg.h`. 2 KB owned RAM (1 byte/pixel), `Region {start, length, speed}` table (max 4, signed steps/sec). `init_generated(fn, pal, regions, count)` for procedural fills; demo cycles two bands in opposite directions.
+  - **Win:** proves multi-region cycling on one image at independent speeds.
+
+- [x] **3.7.6 ImagePaletteBg (flash-resident, zero RAM copy)** (FR-12.4)
+  - `src/backgrounds/image_palette_bg.h`. Three flash pointers — per-image 192-entry palette, 2 KB pixel array, region table. `set(palette, pixels, regions, region_count)`. Same cyclic shift as BitmapBg.
+  - **Win:** images cost ~2.4 KB flash each, 0 bytes of RAM beyond the pointers.
+
+- [x] **3.7.7 BMP → header asset pipeline** (FR-12.5, FR-12.7, NFR-5.3)
+  - `tools/bmp_to_header.py` (stdlib only): validates 8-bit indexed uncompressed 64×32 BMP, **hard-rejects any pixel index ≥ 192**, optional `assets/<name>.regions` sidecar (`start length speed` per line; default static `{0, max(idx)+1, 0}`).
+  - Emits `include/bitmaps/<name>.h` with `k<Name>Palette[192]` / `k<Name>Pixels[64*32]` / `k<Name>Regions[]` and always-rebuilt `include/bitmaps/_index.h` with `kImageRegistry[]` of `ImageEntry`.
+  - `tools/pre_build.py` PlatformIO hook (`extra_scripts = pre:tools/pre_build.py`) runs the converter on every build.
+  - `assets/README.md` documents the GIMP/Photoshop indexed-BMP authoring path.
+  - **Win:** drop `assets/foo.bmp` into the repo, hit Build, `bg_image` shows it. No source edits.
+
+- [x] **3.7.8 Scene wiring — BG_BITMAP, BG_IMAGE, GFX_TEST** (FR-12.6)
+  - SceneId additions; `id_from_string` map updated (`bg_bitmap`, `bg_image`, `gfx_test`). `Backgrounds::init_image_default()` points the image bg at `kImageRegistry[0]` if any.
+  - `src/scenes/gfx_test_scene.h`: cycling nebula gradient + 3 FG ramps (white/blue/amber) + Picopixel FPS/SHIFT/uptime + 1-pixel red "jitter witness" hopping each frame; `wants_clock_chrome=false`; self-contained 1 s window FPS sampler.
+  - **Win:** `mosquitto_pub ... '{"scene_id":"gfx_test"}'` brings up the diagnostic; visible regressions show up immediately.
+
+---
+
 ## Phase 4 — Dual-Core Split
 
 > Goal: network noise can't stutter the render.
@@ -166,7 +213,7 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
   - Incoming `scene_id` updates the shared struct; Core 1 picks it up.
   - **Win:** publishing `{"scene_id":"boot"}` switches the panel.
 
-- [ ] **5.5 Night & thermal-safe modes (FR-7 end to end)**
+- [x] **5.5 Night & thermal-safe modes (FR-7 end to end)**
 
   Split into three sub-steps mirroring the natural work boundaries — LDR
   hardware → temperature hardware → MQTT tuning. Each lands a visible
@@ -191,7 +238,7 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
     - Subscribe to `observatory/night` and `observatory/thermal`, both `{"threshold":N,"hysteresis":M}`. Same FR-1.4 validation pattern as `observatory/scene`. Apply atomically to the live thresholds.
     - **Win:** publishing `observatory/night '{"threshold":2000,"hysteresis":150}'` makes the panel trip into night mode in normal room light; restoring saner values reverts.
 
-- [ ] **5.6 Subscribe to `observatory/time` (RTC correction path)**
+- [x] **5.6 Subscribe to `observatory/time` (RTC correction path)**
   - Parse epoch UTC + tz offset minutes; call `ds3231::write(...)` to persist into the RTC; the next `tod` background poll picks it up naturally. MQTT is the *correction* path, never the *read* path (FR-9.5).
   - Depends on Phase 3.6 — without the RTC driver, nothing to write to.
   - **Win:** publishing a stale time to `observatory/time`, then power-cycling the device, comes back up displaying the corrected time from the RTC with no MQTT needed.
@@ -200,25 +247,25 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 
 ## Phase 6 — Scene Lifecycle & Resilience
 
-- [ ] **6.1 Priority preemption**
+- [x] **6.1 Priority preemption**
   - Reject incoming scenes with lower priority than current.
   - **Win:** spam of priority-1 scenes can't override an active priority-5.
 
-- [ ] **6.2 Duration & TTL expiry**
+- [x] **6.2 Duration & TTL expiry**
   - Non-sticky scenes auto-revert to default after `duration` seconds; all scenes hard-cap at 1 h.
   - Default scene SHALL be `clock` (FR-9.4), not `boot`. `boot` is one-shot at startup only.
   - **Win:** test scene fades back to the giant clock on schedule.
 
-- [ ] **6.3 Sticky + clear_sticky**
+- [x] **6.3 Sticky + clear_sticky**
   - Sticky scenes survive duration; `observatory/clear_sticky` resets them.
   - **Win:** moon phase scene stays until cleared.
 
-- [ ] **6.4 Offline fallback**
+- [x] **6.4 Offline fallback**
   - On MQTT disconnect, switch to "offline" scene (clock + dim starfield).
   - Auto-reconnect with exponential backoff.
   - **Win:** unplug router → panel shows offline scene → replug → recovers.
 
-- [ ] **6.5 Watchdog**
+- [x] **6.5 Watchdog**
   - 8-second WDT on both cores.
   - **Win:** deliberately stalling Core 1 reboots the device.
 
@@ -247,7 +294,7 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 
 ## Phase 9 — Hardening (final)
 
-- [ ] **9.1 Memory audit** — log free heap; confirm ≥ 32 KB headroom under all scenes
+- [ ] **9.1 Memory audit** — log free heap; confirm ≥ 32 KB headroom under all scenes; also flash budget — each `assets/*.bmp` costs ~2.4 KB; track total registry size
 - [ ] **9.2 Fuzz MQTT input** — random bytes, oversized payloads, malformed JSON
 - [ ] **9.3 24 h soak test** — leave running with cycling scenes; check FPS, heap, reconnects
 - [ ] **9.4 Thermal check** — IR thermometer on panel after 1 h running the brightest production scene; correlate against DS3231 reading and tune the FR-7.3 threshold

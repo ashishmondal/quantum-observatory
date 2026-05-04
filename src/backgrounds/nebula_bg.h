@@ -9,6 +9,7 @@
 
 #include <Adafruit_Protomatter.h>
 
+#include "color_palette.h"
 #include "config.h"
 #include "fixed_point.h"
 
@@ -37,6 +38,11 @@ public:
     if (dt > 100u) dt = 100u;
     m_last_ms = now_ms;
     m_t += static_cast<uint8_t>(dt >> 3);
+
+    // Palette-cycle phase: walks the 192-entry NEBULA_CLOUDS BG ramp,
+    // wrapping seamlessly because the ramp's last stop matches its first.
+    // (dt >> 4) is ~6 steps/sec at 100 ms ticks — slow, dreamy drift.
+    m_palette_shift += (dt >> 4);
 
     uint8_t cell[GRID_W * GRID_H];
     for (int i = 0; i < GRID_W * GRID_H; ++i) {
@@ -73,20 +79,18 @@ public:
         const int bot = v01 * wx0 + v11 * wx1;
         const int v   = (top * wy0 + bot * wy1) >> 4;
 
-        matrix.drawPixel(px, py, intensity_to_nebula(static_cast<uint8_t>(v)));
+        // Map intensity 0..255 → BG ramp index 0..191, then offset by
+        // the global palette shift. Animation is FREE: the per-cell
+        // bilinear pattern stays the same frame-to-frame, only the
+        // palette cycles, but the eye perceives flowing color motion.
+        const uint16_t idx = static_cast<uint16_t>((v * (palette::BG_LEN - 1)) >> 8);
+        matrix.drawPixel(px, py,
+            palette::bg(palette::Id::NEBULA_CLOUDS, idx, m_palette_shift));
       }
     }
   }
 
 private:
-  static uint16_t intensity_to_nebula(uint8_t v) {
-    const uint16_t vc = static_cast<uint16_t>(v >> 1);
-    const uint16_t r = static_cast<uint16_t>((vc * 12) >> 7);
-    const uint16_t g = 0;
-    const uint16_t b = static_cast<uint16_t>(2 + ((vc * 18) >> 7));
-    return static_cast<uint16_t>((r << 11) | ((g & 0x3F) << 5) | (b & 0x1F));
-  }
-
   static constexpr int GRID_W = 16;
   static constexpr int GRID_H = 8;
 
@@ -94,4 +98,5 @@ private:
   uint8_t  m_phase[GRID_W * GRID_H]{};
   uint8_t  m_t       = 0;
   uint32_t m_last_ms = 0;
+  uint16_t m_palette_shift = 0;
 };

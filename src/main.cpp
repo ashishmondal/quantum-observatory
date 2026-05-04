@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include "backgrounds.h"
+#include "color_palette.h"
 #include "ds3231.h"
 #include "fixed_point.h"
 #include "gfx_text.h"
@@ -18,7 +19,9 @@
 #include "scenes/clock_scene.h"
 #include "scenes/color_cycle_scene.h"
 #include "scenes/giant_clock_scene.h"
+#include "scenes/gfx_test_scene.h"
 #include "scenes/night_scene.h"
+#include "scenes/offline_scene.h"
 #include "scenes/text_demo_scene.h"
 #include "scenes/thermal_safe_scene.h"
 uint8_t rgbPins[]  = {PIN_R1, PIN_G1, PIN_B1, PIN_R2, PIN_G2, PIN_B2};
@@ -53,10 +56,14 @@ Adafruit_Protomatter matrix(
 static BackgroundScene s_bg_starfield(BgType::STARFIELD);
 static BackgroundScene s_bg_parallax(BgType::PARALLAX);
 static BackgroundScene s_bg_nebula  (BgType::NEBULA);
+static BackgroundScene s_bg_bitmap  (BgType::BITMAP);
+static BackgroundScene s_bg_image   (BgType::IMAGE);
 [[maybe_unused]] static TextDemoScene s_text_demo_scene;
 static GiantClockScene s_giant_clock_scene; // phase 3.5.3 — default room-clock view
 static NightScene      s_night_scene;       // phase 5.5.1 — LDR-triggered override
+static OfflineScene    s_offline_scene;     // phase 6.4 — MQTT-disconnect override
 static ThermalSafeScene s_thermal_safe_scene; // phase 5.5.2 — DS3231-triggered override
+static GfxTestScene    s_gfx_test_scene;    // graphics smoke-test (FPS, palette cycle)
 
 // Single "current scene" pointer; loop() just delegates to it. Swapping
 // scenes is one assignment — no other code changes. (NFR-5.1)
@@ -77,8 +84,12 @@ static Scene* scene_for(scene_state::SceneId id) {
     case SI::BG_STARFIELD: return &s_bg_starfield;
     case SI::BG_PARALLAX:  return &s_bg_parallax;
     case SI::BG_NEBULA:    return &s_bg_nebula;
+    case SI::BG_BITMAP:    return &s_bg_bitmap;
+    case SI::BG_IMAGE:     return &s_bg_image;
     case SI::NIGHT:        return &s_night_scene;
+    case SI::OFFLINE:      return &s_offline_scene;
     case SI::THERMAL_SAFE: return &s_thermal_safe_scene;
+    case SI::GFX_TEST:     return &s_gfx_test_scene;
   }
   return nullptr;
 }
@@ -141,6 +152,23 @@ ProtomatterStatus g_status = PROTOMATTER_ERR_PINS;
 // SceneState + mutex_t. (added in phase 4.1)
 static volatile bool s_core0_ready = false;
 
+// Core 1 → Core 0 FPS report. Written by loop1() once per second,
+// read by loop() to print. Single naturally-aligned uint32_t write,
+// reader tolerates a slightly stale value (it's a diagnostic), so no
+// mutex needed. Keeping ALL Serial output on Core 0 avoids USB CDC
+// interrupts disrupting Protomatter's PIO/DMA timing on Core 1 — the
+// otherwise-unexplained "subtle once-per-second flicker".
+static volatile uint32_t g_render_fps = 0;
+
+// Core 1 → Core 0 liveness heartbeat for the NFR-3.2 watchdog.
+// loop1() writes millis() every iteration (cheap — even when frame-
+// capped). loop() compares against now and only feeds the WDT when
+// the heartbeat is fresh, so a Core 1 stall ≥ kRenderStallMs ends in
+// a chip reset. Sentinel 0 = "Core 1 hasn't published yet"; Core 0
+// keeps feeding the WDT during the boot window so the chip doesn't
+// kill itself before setup1() runs. (added in phase 6.5)
+static volatile uint32_t g_render_alive_ms = 0;
+
 void setup() {
   Serial.begin(115200);
 
@@ -149,11 +177,18 @@ void setup() {
   // for s_core0_ready before reading it.
   fp::sin_cos_lut_init();
 
+  // Build the gamma-corrected color palettes (color_palette.h). Same
+  // lifecycle as the trig LUT: built once on Core 0, then read-only
+  // from Core 1's render path.
+  palette::init_all();
+
   // Cross-core scene IPC — must be live before either core touches
   // scene_state. Default current/pending = BOOT; loop1() will resolve
   // that to whatever scene_for(BOOT) returns at startup. (phase 4.2)
   scene_state::init();
-  scene_state::request(scene_state::SceneId::CLOCK);  // default idle
+  // Default idle = giant clock at the lowest priority (0) so any MQTT
+  // request, even priority 1, beats it (FR-2.1, phase 6.1).
+  scene_state::request(scene_state::SceneId::CLOCK, 0);  // default idle
 
   // Bring up the shared TimeOfDay state (FR-9.5). Just inits the
   // mutex; the actual time comes from the RTC via tod::poll() in
@@ -197,6 +232,16 @@ void setup() {
   Serial.println("[boot] core0 ready, releasing core1");
   s_core0_ready = true;
 
+  // NFR-3.2 watchdog. RP2040 has a single hardware WDT — max ~8.3 s
+  // on this core. Both cores' liveness must keep it fed: Core 0
+  // calls wdt_reset() from loop(), but only when Core 1's heartbeat
+  // (g_render_alive_ms) is fresh. So a stall on either core trips a
+  // reset. Begin AFTER s_core0_ready so the boot path itself can't
+  // race the WDT, but BEFORE network init so any non-blocking radio
+  // bring-up is also covered.
+  rp2040.wdt_begin(8000);
+  Serial.println("[wdt] enabled timeout=8000ms");
+
   // Kick off Wi-Fi after the cross-core handshake so any radio init
   // serial chatter doesn't race the [boot] line. Non-blocking — the
   // state machine in wifi_link::poll() takes it from here. (FR-5.2)
@@ -235,8 +280,40 @@ void loop() {
     scene_state::set_thermal_active(thermal_monitor::is_hot());
   }
 
+  // Phase 6.4: MQTT-disconnect override (FR-5.1). Edge-detect on
+  // mqtt_link::connected() so we only wake the renderer when the
+  // link state actually flips. set_offline_active() itself is
+  // already a same-state no-op, but the explicit edge keeps the log
+  // single-line per transition. The 1 s loop cadence puts us well
+  // under FR-5.1's 5 s switch-to-offline budget.
+  {
+    static bool s_was_connected = false;
+    static bool s_init_done     = false;
+    const bool now_connected = mqtt_link::connected();
+    if (!s_init_done || now_connected != s_was_connected) {
+      scene_state::set_offline_active(!now_connected);
+      if (s_init_done) {
+        Serial.print("[mqtt] link ");
+        Serial.println(now_connected ? "online" : "offline");
+      }
+      s_was_connected = now_connected;
+      s_init_done     = true;
+    }
+  }
+
+  // Phase 6.2: drive scene-lifecycle expiry (FR-2.3 duration revert,
+  // FR-2.4 hard 1 h TTL). Cheap when nothing is due; on expiry,
+  // reverts to the default CLOCK at priority 0.
+  scene_state::tick(now_ms);
+
   if (now_ms - last_print_ms >= 1000u) {
     last_print_ms = now_ms;
+
+    // Render FPS — sourced from Core 1 via g_render_fps to keep all
+    // Serial output on Core 0 (Protomatter timing protection).
+    Serial.print("[render] fps=");
+    Serial.println(static_cast<unsigned long>(g_render_fps));
+
     tod::poll(now_ms);
     const tod::Reading r = tod::now(now_ms);
     if (r.valid) {
@@ -304,6 +381,24 @@ void loop() {
   }
 #endif
 
+  // NFR-3.2 watchdog feed. Two states:
+  //   (a) Boot window — Core 1 hasn't published a heartbeat yet
+  //       (g_render_alive_ms == 0). Always feed so the WDT can't
+  //       fire while setup1() is still running FM6126A init.
+  //   (b) Steady state — only feed if Core 1's heartbeat is within
+  //       kRenderStallMs. Past that, stop feeding and let the chip
+  //       reset (~8 s timeout per rp2040.wdt_begin in setup()).
+  // Core 0 itself is also covered: anything in this loop() that
+  // blocks longer than the WDT timeout simply never reaches this
+  // call → reset.
+  {
+    static constexpr uint32_t kRenderStallMs = 4000u;  // half the WDT timeout
+    const uint32_t alive = g_render_alive_ms;
+    if (alive == 0u || (now_ms - alive) < kRenderStallMs) {
+      rp2040.wdt_reset();
+    }
+  }
+
   delay(10);
 }
 
@@ -342,8 +437,26 @@ void loop1() {
   // Integer math only (NFR-1.3) — no float in the render loop.
   static uint32_t frames = 0;
   static uint32_t last_report_ms = 0;
+  static uint32_t last_show_ms   = 0;
+
+  // Frame pacing — fixes a "subtle flicker" caused by calling
+  // matrix.show() as fast as the loop runs. RP2040 Protomatter swaps
+  // the back/front buffer on the next bit-plane boundary; if show()
+  // arrives at random offsets within the BCM refresh cycle, the
+  // perceived per-pixel on-time jitters and the eye sees brightness
+  // wobble. Capping at PANEL_TARGET_FPS_MS gives the panel a stable
+  // cadence well within FR-3.1 (20–30 FPS target). Render-time slack
+  // (we were running at hundreds of FPS) absorbs the cap with no
+  // visible motion penalty.
+  static constexpr uint32_t kFrameIntervalMs = 42;  // ~24 FPS (FR-3.1)
 
   const uint32_t now_ms = millis();
+
+  // NFR-3.2: publish liveness on EVERY iteration, before the frame
+  // cap can early-return. Core 0 reads this to decide whether to feed
+  // the hardware watchdog. Single naturally-aligned 32-bit write —
+  // atomic on RP2040, no mutex needed (same rationale as g_render_fps).
+  g_render_alive_ms = now_ms;
 
   // Phase 4.2: consume any pending scene change requested by Core 0.
   // take_pending() returns true exactly once per request(), so we only
@@ -365,6 +478,13 @@ void loop1() {
   }
 
   if (g_status == PROTOMATTER_OK && g_current_scene != nullptr) {
+    // Frame cap: skip this iteration if we're ahead of schedule.
+    // Wrap-safe (NFR §2 time math).
+    if (static_cast<int32_t>(now_ms - last_show_ms) < static_cast<int32_t>(kFrameIntervalMs)) {
+      return;
+    }
+    last_show_ms = now_ms;
+
     // 1. Scene draws background + foreground but does NOT call show().
     //    (FR-9.3 / phase 3.5.2 — chrome must overlay before flip.)
     g_current_scene->render(matrix, now_ms);
@@ -377,17 +497,16 @@ void loop1() {
 
     // 3. Single show() per frame.
     matrix.show();
+
+    frames++;
   }
 
-  frames++;
-
+  // Publish FPS to Core 0 once per second WITHOUT printing here —
+  // Serial output on Core 1 contends with Protomatter's PIO/DMA timing
+  // and produces a once-per-second flicker. Core 0's loop() reads
+  // g_render_fps and logs it instead.
   if (now_ms - last_report_ms >= 1000u) {
-    Serial.print("[render] fps=");
-    Serial.print(frames);
-    Serial.print(" scene=");
-    Serial.print(g_current_scene ? g_current_scene->name() : "none");
-    Serial.print(" protomatter_status=");
-    Serial.println((int)g_status);
+    g_render_fps = frames;
     frames = 0;
     last_report_ms = now_ms;
   }

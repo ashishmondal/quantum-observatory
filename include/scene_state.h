@@ -47,15 +47,43 @@ enum class SceneId : uint8_t {
   BG_NEBULA     = 6,
   NIGHT         = 7,   // dim room-clock — firmware override (FR-7.2)
   THERMAL_SAFE  = 8,   // dim cool-down — firmware override (FR-7.3)
+  GFX_TEST      = 9,   // smoke-test pattern: gradients + palette cycle + FPS
+  BG_BITMAP     = 10,  // bitmap-backed background with palette cycling
+  BG_IMAGE      = 11,  // direct RGB565 image from assets/*.bmp (no animation)
+  OFFLINE       = 12,  // MQTT-disconnect fallback — firmware override (FR-5.1)
 };
 
 // One-time mutex init. Call from setup() before either core spins.
 void init();
 
-// Writer (Core 0). Records the Director's desired scene. No-op if
-// already the current Director intent. The effective scene Core 1
-// renders may differ — see take_pending() resolution rule.
-void request(SceneId id);
+// Writer (Core 0). Records the Director's desired scene plus its
+// priority (FR-2.1, 0..5; values are clamped) and lifecycle hints
+// (FR-2.3 duration / FR-2.4 hard TTL).
+//
+// Drops the request if the new priority is strictly less than the
+// active scene's priority — see CODING_PRACTICES §3 "priority
+// preemption". Returns true when accepted, false when dropped.
+//
+// duration_s: revert-to-default delay for non-sticky scenes, in
+//   seconds (FR-2.3, default 30). Ignored when sticky.
+// sticky:     when true, scene only ends via clear_sticky, the FR-2.4
+//   hard 1 h TTL, or another sticky preempting it.
+//
+// All scenes are capped by a hard kHardTtlSec (1 h, FR-2.4) regardless
+// of duration / sticky.
+//
+// Equal-priority requests are accepted (latest-wins, REQUIREMENTS §9
+// default). No-op (returns true) when id + priority + sticky already
+// match the current Director intent.
+bool request(SceneId id, uint8_t priority = 1,
+             uint16_t duration_s = 30, bool sticky = false);
+
+// Writer (Core 0). Drives FR-2.3/FR-2.4 expiry. Call once per
+// loop() iteration with millis(); cheap when no deadline is pending.
+// On expiry the active Director scene is reverted to the default
+// (CLOCK at priority 0, per FR-9.4). Firmware overrides are
+// untouched — they have their own lifecycles.
+void tick(uint32_t now_ms);
 
 // Writer (Core 0). Sets the FR-7.2 firmware override. While true,
 // take_pending() resolves to NIGHT regardless of request(). Falling
@@ -67,6 +95,21 @@ void set_night_active(bool active);
 // (FR-7.5). Falling edge re-exposes whatever the lower-priority
 // resolution would otherwise pick. (added in phase 5.5.2)
 void set_thermal_active(bool active);
+
+// Writer (Core 0). FR-2.2 / §5.3 `observatory/clear_sticky` handler.
+// If the active Director scene is sticky, reverts to the default
+// (CLOCK @ priority 0, FR-9.4). No-op when nothing sticky is active —
+// non-sticky scenes already auto-expire via tick(). (added in phase 6.3)
+void clear_sticky();
+
+// Writer (Core 0). FR-5.1 firmware override — driven by mqtt_link's
+// connected() state. While active, take_pending() resolves to OFFLINE
+// regardless of the Director's last request, but is preempted by both
+// safety overrides (thermal_safe > night > offline > director). The
+// Director's last request is preserved across the outage and naturally
+// reappears when MQTT reconnects (same pattern as night/thermal).
+// (added in phase 6.4)
+void set_offline_active(bool active);
 
 // Reader (Core 1). Atomically returns true + writes the *resolved*
 // scene id into *out exactly once per effective-state change. On
