@@ -93,26 +93,31 @@ inline void draw(Adafruit_Protomatter& matrix, int32_t utc_epoch,
   const sun::Position p =
       sun::compute(utc_epoch, latitude_deg, longitude_deg);
 
+  // Gradient bands are intentionally dim — the panel runs hours per
+  // day on the daytime band, so we trade vibrant blue for ~half the
+  // sustained current draw. The sun (drawn on top) stays bright so it
+  // still pops against the muted sky.
   uint16_t top, bot;
   if (p.altitude_deg > 10.0f) {
-    top = rgb565(  5,  30,  80);
-    bot = rgb565(135, 180, 220);
+    // Day: deep navy → dusty mid-blue (was vivid sky-blue).
+    top = rgb565(  2,  10,  30);
+    bot = rgb565( 40,  70, 110);
   } else if (p.altitude_deg > 0.0f) {
-    top = rgb565( 30,  60, 120);
-    bot = rgb565(255, 160,  60);
+    // Golden hour: muted indigo → warm amber.
+    top = rgb565( 12,  25,  55);
+    bot = rgb565(120,  70,  25);
   } else if (p.altitude_deg > -6.0f) {
-    top = rgb565( 10,  10,  60);
-    bot = rgb565(180,  60,  30);
+    // Civil twilight: dim violet → dim red-orange.
+    top = rgb565(  6,   6,  35);
+    bot = rgb565( 90,  30,  15);
   } else if (p.altitude_deg > -12.0f) {
-    // Smoothed nautical twilight: top no longer near-black so the
-    // first row doesn't pop against the rest of the gradient.
-    top = rgb565(  5,   5,  35);
-    bot = rgb565( 35,  20,  70);
+    // Nautical twilight.
+    top = rgb565(  4,   4,  25);
+    bot = rgb565( 25,  15,  50);
   } else {
-    // Deep night: keep top dark but not pure black, and bring bottom
-    // closer so the lerp across 32 rows reads as a smooth wash.
-    top = rgb565(  2,   2,  12);
-    bot = rgb565( 10,  10,  35);
+    // Astronomical / deep night.
+    top = rgb565(  2,   2,  10);
+    bot = rgb565(  8,   8,  28);
   }
 
   for (int y = 0; y < PANEL_HEIGHT; ++y) {
