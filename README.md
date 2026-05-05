@@ -15,6 +15,7 @@ Home Assistant is the **Director** — owns data, scheduling, and intent. The Pi
 - [docs/PLAN.md](docs/PLAN.md) — phased implementation roadmap; one small demoable win per step.
 - [docs/CODING_PRACTICES.md](docs/CODING_PRACTICES.md) — rules every code change must follow (memory, numeric, concurrency discipline).
 - [docs/HARDWARE.md](docs/HARDWARE.md) — pin map, on-board peripherals, wiring notes.
+- [docs/THEME.md](docs/THEME.md) — retro sci-fi theming system: five themes (Apollo / Nostromo / Vectrex / Blade Runner / LCARS), MQTT contract, asset authoring rules (FR-15).
 
 ## Build & flash
 

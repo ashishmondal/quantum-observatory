@@ -25,6 +25,27 @@ A `image_id` selector can be added later when there's more than one.
 - Compression must be off (`BI_RGB`). Most tools do this by default for
   8-bit BMPs.
 
+## Theming (FR-15.6)
+
+Images are **themable by default**: the firmware retones them at runtime
+when a non-default theme is active by mapping each palette entry's
+luminance through a 4-stop ramp the theme declares. The default theme
+(`apollo_amber`) passes through unchanged. See [../docs/THEME.md](../docs/THEME.md) §6.
+
+Implications for authoring:
+
+- Author in whatever colors you want. The default-theme look is exactly
+  what you put in the BMP.
+- For best results under non-default themes, make sure your image's
+  **luminance** reads well — a green-CRT or amber-phosphor retoning
+  preserves brightness relationships, not hues. A quick sanity check:
+  desaturate the image to grayscale; if it still reads, it will retone
+  cleanly.
+- To opt a single image out of retoning entirely (it always shows in its
+  original palette regardless of theme), drop an empty sidecar file:
+  `assets/<name>.notheme`. Use this only when color carries information
+  the theme would erase.
+
 ## Star catalog (constellation_now scene)
 
 The constellation scene's data is generated from two files:

@@ -330,6 +330,25 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 
 ---
 
+## Phase T — Retro Sci-Fi Theming System (FR-15)
+
+Full design in [THEME.md](THEME.md). Five themes (`apollo_amber` default,
+`nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`); each
+bundles inks + fonts + brackets + layout hints + a duotone BG ramp.
+Scenes consume `theme::*`, never hardcode color/font/brackets.
+
+- [x] **T.1 Docs** — THEME.md drafted; FR-15 added to REQUIREMENTS; README link; assets/README.md authoring note (FR-15.6 runtime duotone).
+- [ ] **T.2 `theme.h` / `theme.cpp` skeleton** — APOLLO_AMBER only, exact same colors / fonts / brackets as today. `theme::set/current/ink/font/has/bracket_open/bracket_close/bg_palette_for`. Atomic `uint8_t` active id. Built and called from one no-op site (e.g. `gfx_test`) to prove the API. **Exit:** firmware builds, runs, looks pixel-identical to today.
+- [ ] **T.3 Scene refactor** — replace every hardcoded RGB565 / `setFont(&...)` / bracket literal under `src/scenes/` with `theme::ink()` / `theme::font()` / `theme::bracket_*()`. Mechanical, every scene file touched. **Exit:** `grep -nE '0x[0-9A-Fa-f]{4}|setFont\\(' src/scenes/` returns nothing meaningful; visual diff = zero.
+- [ ] **T.4 MQTT theme topic** — subscribe `observatory/theme` `{"id":"<theme_id>"}` in `mqtt_link.cpp`; persist active theme in `scene_state` (no flash); add `theme` to `observatory/status` heartbeat; add HA `select.observatory_theme` in `homeassistant/setup_mqtt.py`. **Exit:** publishing the topic with `apollo_amber` is a no-op; unknown ids logged + ignored.
+- [ ] **T.5 NOSTROMO_GREEN** — second theme: green CRT inks, scanlines hint, cursor-block hint. Reuses existing fonts (no new TTFs yet). First *visible* theme switch from MQTT. **Exit:** publishing `nostromo_green` flips the dashboard end-to-end inside one frame.
+- [ ] **T.6 Font roster** — convert and bundle Silkscreen, VT323, Pixel Operator, Pixel Operator Bold, Press Start 2P, Vector Battle to GFXfont headers under `include/fonts/`. Update Apollo header to Press Start 2P (closes FR-4.1 placeholder). License attribution stubs in each header. **Exit:** all six headers compile; PROGMEM cost ≤ 20 KB total.
+- [ ] **T.7 Remaining themes** — VECTREX_NEON (vector-glow halo), BLADE_RUNNER (cyan/orange + frame border), LCARS_TOS (block bars, no brackets). Each adds at least one new layout hint primitive in `gfx_text.h`. **Exit:** all five themes selectable; each visually distinct at a glance.
+- [ ] **T.8 BG duotone runtime** — `tools/bmp_to_header.py` emits per-image `lum[192]` + reads `assets/<name>.notheme` sidecar → `themeable` flag. Boot-time 256-entry ramp LUT per non-default theme. Per-image double-buffered runtime palette (~3.8 KB SRAM). Theme switch ≤ 5 ms. APOLLO stays passthrough. **Exit:** switching to NOSTROMO retones every themable BMP green; switching back restores original colors; no torn frames.
+- [ ] **T.9 `gfx_test` coverage** — extend the diagnostic scene to cycle every `theme::Ink` role and every `Hint` overlay on a fixed cadence so one capture covers all themes (FR-15.8). **Exit:** running `gfx_test` for 60 s exercises every theme at least once.
+
+---
+
 ## Phase 9 — Hardening (final)
 
 - [ ] **9.1 Memory audit** — log free heap; confirm ≥ 32 KB headroom under all scenes; also flash budget — each `assets/*.bmp` costs ~2.4 KB; track total registry size

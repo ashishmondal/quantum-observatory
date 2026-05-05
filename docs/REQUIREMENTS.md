@@ -1,7 +1,7 @@
 # Quantum Observatory — Requirements
 
-**Version:** 1.6
-**Status:** Draft — implementation in progress (P1–P3 landed; FR-12 color/background system landed; FR-13 splash + sky background landed)
+**Version:** 1.7
+**Status:** Draft — implementation in progress (P1–P3 landed; FR-12 color/background system landed; FR-13 splash + sky background landed; FR-15 theming system designed, implementation pending)
 **Target hardware:** Raspberry Pi Pico W + Waveshare RGB-Matrix-P3 (64×32, FM6126A driver, HUB75)
 **Stack:** C++ on PlatformIO (earlephilhower Arduino-Pico core), Adafruit Protomatter, MQTT client, Home Assistant integration
 
@@ -108,6 +108,18 @@ The device also doubles as **the only clock in the room**. The current time MUST
 - **FR-13.3** The sky background SHALL render the sun as a multi-tier disc (~9 px) with a vertical color gradient (pale on top, warm on bottom) that intensifies near the horizon to mimic atmospheric reddening. The sun's screen position SHALL trace a semi-elliptical arc using a linear azimuth→x mapping, clamped so the disc is never cropped at the panel edges.
 - **FR-13.4** The firmware SHALL provide a `sky_timelapse` debug scene that compresses one synthetic day into 10 seconds to allow visual validation of the FR-13.2/13.3 sky and sun rendering without waiting for real-time motion. It SHALL be selectable via the standard MQTT scene contract (FR-2).
 - **FR-13.5** The DS3231 read path (FR-9.5) SHALL include integrity defenses against transient I²C corruption: internal pull-ups via `gpio_pull_up()` (never `pinMode(INPUT_PULLUP)`, which breaks the I²C alt-function), per-burst sanity-clamp of BCD fields, two-burst consensus read (accept only if Δseconds ∈ [0,1]), and a poll-validated outer cadence that rejects any RTC value diverging from the projected time by more than 3 hours. Successful polls back off to a 1-hour cadence; rejected polls retry with exponential backoff capped at 1 hour.
+
+### FR-15 Theming System
+Full design lives in [THEME.md](THEME.md); these are the contractual bullets.
+
+- **FR-15.1** The firmware SHALL ship at least five named themes drawn from canonical retro sci-fi reference points: `apollo_amber` (default), `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`. Each theme SHALL bundle its own ink palette, font selection, bracket convention, and layout hints — themes are not color-only swaps.
+- **FR-15.2** The active theme SHALL be selectable via MQTT topic `observatory/theme`, payload `{"id": "<theme_id>"}` (string id). Unknown ids SHALL be ignored and logged (FR-1.3 spirit). The firmware SHALL boot to `apollo_amber` and accept the Director's choice on connect; the active theme is not persisted across reboots (no flash wear).
+- **FR-15.3** Scenes SHALL NOT hardcode ink colors, font selections, or bracket strings. All theme-affected rendering SHALL go through a `theme::*` API that resolves the active theme on every call. CI / code review SHALL flag literal RGB565 constants and `setFont(&...)` calls inside `src/scenes/`.
+- **FR-15.4** A theme switch SHALL take effect at the next-frame boundary with no torn frames and no scene re-init. The active scene SHALL continue rendering, simply consulting the new theme's values starting from the next `render()` call.
+- **FR-15.5** The firmware-owned safety overrides (`THERMAL_SAFE`, `NIGHT`, `OFFLINE`, `SPLASH`) SHALL preserve the active theme — they affect brightness and message, not theme identity. The dim variants of these scenes SHALL consult `theme::ink(...)` and render at the low end of the FG ramp.
+- **FR-15.6** Background renderers (`STARFIELD`, `PARALLAX`, `NEBULA`, `BITMAP`, `IMAGE`) SHALL consult `theme::bg_palette_for(...)` for the active palette, never a hardcoded `palette::Id`. The default theme (`apollo_amber`) SHALL pass through each image's original baked palette so the as-shipped look is preserved bit-for-bit. Non-default themes SHALL declare `BG_HIGHLIGHT` and `BG_SHADOW` (with optional `BG_BLACK` / `BG_WHITE` anchor overrides) and the firmware SHALL synthesize a per-image runtime palette at theme-switch time by mapping each source-palette entry's luminance (BT.601, build-time-precomputed and histogram-stretched per image) through the 4-stop ramp `BG_BLACK → BG_SHADOW → BG_HIGHLIGHT → BG_WHITE`. Runtime palettes SHALL be double-buffered with an atomic active-index byte to avoid torn frames during the rebuild. Theme-switch wall time (MQTT message arrival to first frame in new theme) SHALL be ≤ 5 ms for the v1 asset set. Individual images MAY opt out via an `assets/<name>.notheme` sidecar (empty file); opted-out images render in their original palette under every theme. The asset import pipeline (FR-12.5) SHALL emit a `uint8_t lum[192]` luminance table next to each themable image's palette and SHALL set the registry's `themeable` flag from the sidecar's presence.
+- **FR-15.7** The `observatory/status` heartbeat (§5.4) SHALL include the active theme id so HA can confirm the device's state without round-tripping the theme topic.
+- **FR-15.8** The `gfx_test` scene (FR-12.6) SHALL be extended to exercise every `theme::Ink` role and every layout `Hint` so visual regressions in the theming layer are caught with one MQTT command. Theme cycling within `gfx_test` SHALL be on a fixed cadence so a single capture covers all themes.
 
 ---
 
@@ -228,7 +240,7 @@ Topic: `observatory/status` — JSON heartbeat every 30 s:
 | `jupiter_visibility` | nebula | direction + time | example in §5.1 |
 | `constellation_now` | starfield | constellation art + name | sticky; HA picks current overhead constellation by date + observer lat/lon — see [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 1 |
 
-All scenes above (except possibly `boot` during the splash window) carry the standard small clock readout per FR-9.2.
+All scenes above (except possibly `boot` during the splash window) carry the standard small clock readout per FR-9.2. All `bg_type` values in this table are subject to FR-15.6 — the actual palette used at render time is whatever `theme::bg_palette_for()` returns for the active theme.
 
 ---
 
@@ -282,3 +294,4 @@ All scenes above (except possibly `boot` during the splash window) carry the sta
 - **Sticky**: a scene that does not auto-expire on `duration`.
 - **TTL**: hard maximum lifetime for any scene (default 1 hour).
 - **Destructive Overlay**: drawing technique where text writes opaque halo pixels into the background layer to guarantee legibility.
+- **Theme**: a bundle of inks, fonts, brackets, and layout hints that gives the device a distinct retro sci-fi identity (Apollo MOCR, Nostromo CRT, Vectrex, Blade Runner, LCARS). Selectable over MQTT (FR-15).
