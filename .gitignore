@@ -16,3 +16,6 @@ assets/hygdata_v40.csv
 assets/hygdata_v3.csv
 assets/hygdata.csv
 assets/hip_main.dat
+
+# Python bytecode (HA pyscript dev cache, etc.)
+__pycache__/

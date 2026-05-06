@@ -1,0 +1,7 @@
+# Auto-installed by pyscript on reload. See:
+#   https://hacs-pyscript.readthedocs.io/en/latest/reference.html#advanced-topics
+#
+# Pin a specific version: pyscript will not re-install if the
+# installed version differs from HASS's own dependency tree, but a
+# pinned line documents what we tested against. Bump deliberately.
+skyfield==1.49

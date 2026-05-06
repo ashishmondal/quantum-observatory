@@ -1,0 +1,361 @@
+# Quantum Observatory — Home Assistant package
+# =============================================
+# Target: HA Core ≥ 2026.2.2  (HA OS ≥ 17.1)
+#
+# This file uses the modern automation syntax that became canonical
+# in 2024.10 / 2024.8:
+#   * `triggers:` / `conditions:` / `actions:` (plural list keys)
+#   * `trigger: <type>` instead of `platform: <type>`
+#   * `action: <domain.service>` instead of `service: <domain.service>`
+# The legacy singular forms still parse in 2026.2 but emit deprecation
+# warnings on every reload — sticking to the new shape keeps the logs
+# clean and is required when 2027.x removes the legacy aliases.
+#
+# Drop this file into your HA config at:
+#     <ha-config>/packages/quantum_observatory.yaml
+#
+# and ensure the top of your configuration.yaml contains:
+#     homeassistant:
+#       packages: !include_dir_named packages
+#
+# Prerequisites in your HA install:
+#   1. The standard `mqtt:` integration is configured and pointing at
+#      the same broker the Pico W connects to.
+#   2. A `home` zone is set with your real latitude/longitude — these
+#      are read at runtime via `zone.home`. The firmware was compiled
+#      with its own LATITUDE_DEG / LONGITUDE_DEG in include/config.h;
+#      keep those in sync with `zone.home` for ISS pass-pointing math
+#      to make sense.
+#   3. The built-in `sun` and `moon` integrations are enabled
+#      (default in any modern HA). `moon` gives us the 8-bucket phase
+#      string used by `observatory/moon`.
+#
+# What this package publishes:
+#
+#   observatory/time          hourly  — RTC correction (FR-9.5)
+#   observatory/iss           30 s    — wheretheiss + open-notify pass-through
+#   observatory/scene         rotates priority-2 scenes during evening hours
+#
+# Three more topics are published from pyscript (NOT this file):
+#
+#   observatory/jupiter       15 min  — real az/el/mag from skyfield
+#   observatory/moon          6 h     — exact phase from skyfield
+#   observatory/constellation 1 h     — what's actually overhead now
+#
+# See ../pyscript/observatory_publisher.py. Those three were YAML
+# stubs in earlier revisions of this file; they're now commented
+# out below (search for "SUPERSEDED BY PYSCRIPT") with explanatory
+# headers so you can re-enable them if you uninstall pyscript.
+#
+# All publishes use retain=false on purpose. The firmware caches every
+# inbound payload for 1–24 h (per topic's `kFreshMs`), so a retained
+# message would only matter at first connect — and the automations
+# below all run on `homeassistant_started` so we cover that case
+# explicitly. Setting retain=true would also leak stale data after
+# any HA outage.
+
+# ---------------------------------------------------------------------
+# observatory/time — hourly RTC correction (FR-9.5)
+# ---------------------------------------------------------------------
+
+automation observatory_time:
+  - id: observatory_time
+    alias: "Observatory — push UTC epoch + tz once an hour"
+    description: "Keeps the DS3231 within ±1 s of HA's clock."
+    # HA 2026.2 syntax: `triggers/conditions/actions` (plural),
+    # `trigger:` for trigger-type, `action:` for service call.
+    triggers:
+      # On HA start (also covers reconnect after HA reboots), then
+      # every hour at :00. The firmware's outer RTC poll cadence is
+      # also 1 h — overlapping schedules are harmless because the
+      # write/read paths are independent.
+      - trigger: homeassistant
+        event: start
+      - trigger: time_pattern
+        minutes: 0
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: observatory/time
+          # epoch_utc range per the doc: 2020-01-01..2100-01-01.
+          # tz_offset_min: minutes east of UTC, signed. HA `now()` is
+          # tz-aware by default (returns the configured local tz).
+          payload: >-
+            {{ {
+              "epoch_utc": as_timestamp(utcnow()) | int,
+              "tz_offset_min": (now().utcoffset().total_seconds() / 60) | int
+            } | tojson }}
+
+# ---------------------------------------------------------------------
+# observatory/moon — SUPERSEDED BY PYSCRIPT (see pyscript/observatory_publisher.py)
+# ---------------------------------------------------------------------
+#
+# Was: a Jinja lookup that mapped HA's 8-bucket `sensor.moon` string
+# to the wire fields. Accurate to ~1.5 days — fine for a dashboard,
+# but pyscript+skyfield gives us the exact synodic phase, so we
+# moved it. To re-enable this stub (e.g. if you uninstall pyscript),
+# uncomment the block below AND delete the `publish_moon` function in
+# observatory_publisher.py to avoid two publishers fighting over the
+# same topic every 6 h.
+#
+# automation observatory_moon:
+#   - id: observatory_moon
+#     alias: "Observatory — push moon state every 6 h"
+#     triggers:
+#       - trigger: homeassistant
+#         event: start
+#       - trigger: time_pattern
+#         hours: "/6"
+#     variables:
+#       moon_lookup:
+#         new_moon:        { phase: 0.00, illum_pct:   0, age_d:  0, name: "NEW" }
+#         waxing_crescent: { phase: 0.13, illum_pct:  25, age_d:  4, name: "WAX CRES" }
+#         first_quarter:   { phase: 0.25, illum_pct:  50, age_d:  7, name: "FIRST QTR" }
+#         waxing_gibbous:  { phase: 0.38, illum_pct:  75, age_d: 11, name: "WAX GIB" }
+#         full_moon:       { phase: 0.50, illum_pct: 100, age_d: 15, name: "FULL" }
+#         waning_gibbous:  { phase: 0.63, illum_pct:  75, age_d: 19, name: "WAN GIB" }
+#         last_quarter:    { phase: 0.75, illum_pct:  50, age_d: 22, name: "LAST QTR" }
+#         waning_crescent: { phase: 0.88, illum_pct:  25, age_d: 26, name: "WAN CRES" }
+#       bucket: "{{ states('sensor.moon') | default('full_moon') }}"
+#       payload: "{{ moon_lookup.get(bucket, moon_lookup.full_moon) }}"
+#     actions:
+#       - action: mqtt.publish
+#         data:
+#           topic: observatory/moon
+#           payload: "{{ payload | tojson }}"
+
+# ---------------------------------------------------------------------
+# observatory/iss — REST sensors + 30 s push
+# ---------------------------------------------------------------------
+#
+# Three public REST endpoints (all free, no key required):
+#   * api.wheretheiss.at  — current sub-satellite lat/lon/altitude/sunlit
+#                           (rate limit ~1 req/s — we poll every 30 s)
+#   * api.open-notify.org/iss-pass — next pass risetime (we send
+#     the same lat/lon the firmware was compiled with, via zone.home)
+#   * api.open-notify.org/astros  — current ISS crew count
+#
+# All three are wrapped in HA `rest` sensors so the polling cadence is
+# explicit and HA caches the values. The automation below builds the
+# observatory/iss payload from those cached values every 30 s.
+
+rest:
+  # Live ISS sub-satellite point (poll every 30 s).
+  - resource: https://api.wheretheiss.at/v1/satellites/25544
+    scan_interval: 30
+    sensor:
+      - name: "ISS Position"
+        unique_id: observatory_iss_position
+        # Compact value_template — HA truncates long ones in the UI.
+        # The full payload lives in attributes for the automation.
+        value_template: "{{ value_json.latitude | round(2) }}"
+        json_attributes:
+          - latitude
+          - longitude
+          - altitude
+          - visibility   # WTIA's misleadingly-named field — really
+                         # means "is the satellite itself sunlit"
+
+  # Next visible pass risetime for the configured location.
+  # open-notify is occasionally flaky — `scan_interval: 600` (10 min)
+  # is plenty since pass times don't shift second-to-second.
+  - resource_template: >-
+      http://api.open-notify.org/iss-pass.json?lat={{ state_attr('zone.home','latitude')
+      }}&lon={{ state_attr('zone.home','longitude') }}&n=1
+    scan_interval: 600
+    sensor:
+      - name: "ISS Next Pass"
+        unique_id: observatory_iss_next_pass
+        value_template: "{{ value_json.response[0].risetime | default(0) | int }}"
+        json_attributes_path: "$.response[0]"
+        json_attributes:
+          - risetime
+          - duration
+
+  # Current ISS crew count.
+  - resource: http://api.open-notify.org/astros.json
+    scan_interval: 3600
+    sensor:
+      - name: "ISS Crew Count"
+        unique_id: observatory_iss_crew_count
+        value_template: >-
+          {{ value_json.people | selectattr('craft','eq','ISS') | list | count }}
+
+automation observatory_iss:
+  - id: observatory_iss
+    alias: "Observatory — push ISS state every 30 s"
+    description: >-
+      Combines the three REST sensors into the firmware's
+      observatory/iss contract (see docs/MQTT_TOPICS.md). The firmware
+      computes look-angles + visibility on-device from the sub-satellite
+      lat/lon and the configured observer location (FR-14).
+    triggers:
+      - trigger: time_pattern
+        seconds: "/30"
+      - trigger: homeassistant
+        event: start
+    # Skip the publish entirely if the live position sensor hasn't yet
+    # cached a value (cold boot, first 30 s) — the firmware shows
+    # `WAIT` until fresh data arrives, which is exactly the right UX.
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ states('sensor.iss_position') not in ['unknown','unavailable'] }}
+    variables:
+      lat:  "{{ state_attr('sensor.iss_position', 'latitude')  | float(0) }}"
+      lon:  "{{ state_attr('sensor.iss_position', 'longitude') | float(0) }}"
+      alt:  "{{ state_attr('sensor.iss_position', 'altitude')  | float(408) | round(0) | int }}"
+      vis:  "{{ state_attr('sensor.iss_position', 'visibility') | default('eclipsed') }}"
+      # `seconds_until_next` = max(0, risetime - now). Floor at 0 so a
+      # late HA poll never publishes a negative.
+      rise: "{{ states('sensor.iss_next_pass') | int(0) }}"
+      now_s: "{{ as_timestamp(utcnow()) | int }}"
+      sec_to_next: "{{ [rise - now_s, 0] | max }}"
+      crew: "{{ states('sensor.iss_crew_count') | int(7) }}"
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: observatory/iss
+          payload: >-
+            {{ {
+              "lat_deg": lat,
+              "lon_deg": lon,
+              "altitude_km": alt,
+              "sunlit": (vis == "daylight"),
+              "seconds_until_next": sec_to_next,
+              "crew_count": crew
+            } | tojson }}
+
+# ---------------------------------------------------------------------
+# observatory/jupiter — SUPERSEDED BY PYSCRIPT (see pyscript/observatory_publisher.py)
+# ---------------------------------------------------------------------
+#
+# Was: a stub that published "BELOW horizon" every 15 min because HA
+# ships no planetary ephemeris. Pyscript + skyfield gives real az/el/
+# mag/distance, so the stub is gone. To re-enable for an HA-only
+# install, uncomment the block below AND delete the `publish_jupiter`
+# function in observatory_publisher.py.
+#
+# automation observatory_jupiter:
+#   - id: observatory_jupiter
+#     alias: "Observatory — push Jupiter state every 15 min (STUB)"
+#     triggers:
+#       - trigger: homeassistant
+#         event: start
+#       - trigger: time_pattern
+#         minutes: "/15"
+#     actions:
+#       - action: mqtt.publish
+#         data:
+#           topic: observatory/jupiter
+#           payload: >-
+#             {{ {
+#               "bearing_deg": 90,
+#               "elevation_deg": -30
+#             } | tojson }}
+
+# ---------------------------------------------------------------------
+# observatory/constellation — SUPERSEDED BY PYSCRIPT (see pyscript/observatory_publisher.py)
+# ---------------------------------------------------------------------
+#
+# Was: a fixed monthly lookup table that picked one famous
+# constellation per calendar month at northern mid-latitudes.
+# Pyscript + skyfield publishes whichever constellation is actually
+# at the observer's zenith RIGHT NOW, refreshed hourly — a strict
+# upgrade. To re-enable the monthly stub, uncomment below AND delete
+# `publish_constellation` from observatory_publisher.py.
+#
+# automation observatory_constellation:
+#   - id: observatory_constellation
+#     alias: "Observatory — push featured constellation once a day"
+#     triggers:
+#       - trigger: homeassistant
+#         event: start
+#       - trigger: time
+#         at: "18:00:00"
+#     variables:
+#       monthly_index:
+#         1:  59  # Jan — Orion       (winter king)
+#         2:   9  # Feb — Canis Major (Sirius)
+#         3:  37  # Mar — Gemini
+#         4:  46  # Apr — Leo
+#         5:  85  # May — Virgo
+#         6:   8  # Jun — Bootes
+#         7:  39  # Jul — Hercules
+#         8:  51  # Aug — Lyra        (Vega)
+#         9:  30  # Sep — Cygnus      (Northern Cross)
+#         10: 61  # Oct — Pegasus
+#         11:  0  # Nov — Andromeda
+#         12: 16  # Dec — Cassiopeia
+#       idx: "{{ monthly_index[now().month] }}"
+#     actions:
+#       - action: mqtt.publish
+#         data:
+#           topic: observatory/constellation
+#           payload: >-
+#             {{ {"index": idx, "highlight_star": 0} | tojson }}
+
+# ---------------------------------------------------------------------
+# observatory/scene — evening rotation
+# ---------------------------------------------------------------------
+#
+# Defaults: clock during the day, rotate the four real "observatory"
+# scenes during prime sky-watching hours (sunset to bedtime), then
+# the LDR night scene takes over automatically (FR-7.2) once the
+# room dims.
+#
+# Priorities (per FR-2.1):
+#   - 1 = passive demo (nothing else asking for attention)
+#   - 2 = scheduled featured scene (evening rotation, this file)
+#   - 3 = sticky featured (e.g. moon_phase override from a button)
+#   - 4 = breaking event (ISS visible, default for `iss_pass`)
+# We push at priority 2 so a real-time `iss_pass` push from
+# `observatory/iss` (priority 4 inside the firmware) still preempts.
+#
+# `duration` matches the rotation cadence so each scene auto-expires
+# back to the firmware default just as the next push arrives — a
+# missed publish therefore degrades gracefully to the giant clock
+# instead of leaving a stale scene up.
+
+automation observatory_evening_rotation:
+  - id: observatory_evening_rotation
+    alias: "Observatory — rotate evening scenes (sunset → 22:30)"
+    description: >-
+      Cycles featured scenes every 5 minutes during prime sky-
+      watching hours. Halts before bedtime so the LDR-driven night
+      mode (FR-7.2) takes over cleanly.
+    triggers:
+      - trigger: time_pattern
+        minutes: "/5"
+    conditions:
+      # `sun.sun` is below the horizon (= evening or later) AND we're
+      # before 22:30 local. Daylight hours show the giant clock; the
+      # late-night cutoff keeps us out of LDR-night's way.
+      - condition: state
+        entity_id: sun.sun
+        state: below_horizon
+      - condition: template
+        value_template: "{{ now().hour < 22 or (now().hour == 22 and now().minute < 30) }}"
+    variables:
+      # Walk a 5-step cycle: clock → moon → jupiter → iss → constellation.
+      # `tick` is "minutes since midnight / 5", giving a stable rotation
+      # that doesn't reset on HA restart.
+      scenes:
+        - clock
+        - moon_phase
+        - jupiter_visibility
+        - iss_pass
+        - constellation_now
+      tick: "{{ ((now().hour * 60 + now().minute) // 5) % (scenes | length) }}"
+      scene_id: "{{ scenes[tick] }}"
+    actions:
+      - action: mqtt.publish
+        data:
+          topic: observatory/scene
+          payload: >-
+            {{ {
+              "scene_id": scene_id,
+              "priority": 2,
+              "duration": 300,
+              "sticky": false
+            } | tojson }}
