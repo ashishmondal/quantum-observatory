@@ -8,6 +8,13 @@
 #include <Fonts/Picopixel.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 
+// Arduino's <Arduino.h> (pulled in transitively) defines `bit(b)` as a
+// macro, which collides with our local `bit(Hint)` helper below. Undef
+// it here — we don't use the Arduino macro in this TU.
+#ifdef bit
+#undef bit
+#endif
+
 #include "backgrounds.h"        // BgType
 #include "color_palette.h"
 #include "fonts/digital_7__mono_14pt7b.h"

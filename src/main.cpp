@@ -19,6 +19,7 @@
 #include "constellation_state.h"
 #include "moon_state.h"
 #include "scenes/scene.h"
+#include "scenes/layer.h"
 #include "scenes/background_scene.h"
 #include "scenes/boot_scene.h"
 #include "scenes/clock_scene.h"
@@ -85,6 +86,69 @@ static ConstellationNowScene  s_constellation_now_scene;  // phase 7.4 — dynam
 // Single "current scene" pointer; loop() just delegates to it. Swapping
 // scenes is one assignment — no other code changes. (NFR-5.1)
 static Scene* g_current_scene = &s_giant_clock_scene;
+
+// ─── Compositor layer adapters (FR-16.1, phase D.1) ──────────────────
+//
+// loop1() now walks a fixed `Layer*` array each frame instead of calling
+// g_current_scene->render() directly. For D.1 the only inhabitants are
+// adapters around the existing scene + chrome path, so the visual output
+// is unchanged. Future steps fill the empty overlay slots:
+//   D.2 crossfade  → installs a CrossfadeLayer in OVERLAY_TRANSITION
+//   D.3 overrides  → installs Night/Thermal/Offline/Splash overlays in
+//                    OVERLAY_SAFETY (replacing today's preempting SceneIds)
+//   D.8 toasts     → pushes ephemeral Layers into OVERLAY_TRANSITION
+//
+// Slot ordering is the compositor draw order (back-to-front).
+enum LayerSlot : uint8_t {
+  LAYER_FG = 0,           // active scene draws bg+fg here (legacy path)
+  LAYER_OVERLAY_SAFETY,   // night / thermal / offline / splash (D.3)
+  LAYER_OVERLAY_TRANSITION, // crossfades (D.2), toasts (D.8)
+  LAYER_CHROME,           // shared HH:MM readout, future micro-indicators
+  LAYER_COUNT
+};
+
+// Foreground adapter — delegates to whatever Scene g_current_scene points
+// at. Lets the compositor treat the scene as just another Layer without
+// every Scene having to inherit from Layer (NFR-5.1: adding a scene stays
+// "registry entry + render function", no new base class).
+class SceneFgLayer final : public Layer {
+public:
+  const char* name() const override {
+    return g_current_scene ? g_current_scene->name() : "fg/none";
+  }
+  void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
+    if (g_current_scene != nullptr) {
+      g_current_scene->render(matrix, now_ms);
+    }
+  }
+};
+
+// Chrome adapter — the always-on HH:MM readout (FR-9.2). Honours the
+// active scene's wants_clock_chrome() opt-out so the giant clock isn't
+// defaced. Future D.8/D.9 work (link-health dot, sun arc) layers in
+// here; keeping it as a Layer means those additions don't touch loop1().
+class ChromeLayer final : public Layer {
+public:
+  const char* name() const override { return "chrome"; }
+  void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
+    if (g_current_scene != nullptr && g_current_scene->wants_clock_chrome()) {
+      gfx::draw_clock_chrome(matrix, now_ms);
+    }
+  }
+};
+
+static SceneFgLayer s_layer_fg;
+static ChromeLayer  s_layer_chrome;
+
+// Compositor stack. Indexed by LayerSlot. Null entries are skipped.
+// File-scope so D.2/D.3/D.8 can install/remove layers from setter
+// functions without re-plumbing loop1().
+static Layer* g_layers[LAYER_COUNT] = {
+  &s_layer_fg,    // LAYER_FG
+  nullptr,        // LAYER_OVERLAY_SAFETY     (D.3)
+  nullptr,        // LAYER_OVERLAY_TRANSITION (D.2 / D.8)
+  &s_layer_chrome // LAYER_CHROME
+};
 
 // Phase 4.2 dispatcher — maps a stable SceneId to one of the file-scope
 // Scene instances above. Returns nullptr for unknown ids (defensive
@@ -582,17 +646,18 @@ void loop1() {
     }
     last_show_ms = now_ms;
 
-    // 1. Scene draws background + foreground but does NOT call show().
-    //    (FR-9.3 / phase 3.5.2 — chrome must overlay before flip.)
-    g_current_scene->render(matrix, now_ms);
-
-    // 2. Shared chrome on top. Currently just the always-on HH:MM clock
-    //    readout (FR-9.2). Scenes opt out via wants_clock_chrome().
-    if (g_current_scene->wants_clock_chrome()) {
-      gfx::draw_clock_chrome(matrix, now_ms);
+    // Compositor walk (FR-16.1, phase D.1). Back-to-front, skipping
+    // empty slots. The fg slot draws background+foreground (legacy
+    // Scene contract); the chrome slot adds the always-on HH:MM
+    // overlay (FR-9.2) honouring wants_clock_chrome(). Overlay slots
+    // are unused in D.1 — D.2/D.3/D.8 will populate them.
+    for (uint8_t i = 0; i < LAYER_COUNT; ++i) {
+      if (g_layers[i] != nullptr) {
+        g_layers[i]->render(matrix, now_ms);
+      }
     }
 
-    // 3. Single show() per frame.
+    // Single show() per frame. (FR-9.3 — chrome must overlay before flip.)
     matrix.show();
 
     frames++;

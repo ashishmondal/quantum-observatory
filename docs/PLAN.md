@@ -338,7 +338,7 @@ bundles inks + fonts + brackets + layout hints + a duotone BG ramp.
 Scenes consume `theme::*`, never hardcode color/font/brackets.
 
 - [x] **T.1 Docs** — THEME.md drafted; FR-15 added to REQUIREMENTS; README link; assets/README.md authoring note (FR-15.6 runtime duotone).
-- [ ] **T.2 `theme.h` / `theme.cpp` skeleton** — APOLLO_AMBER only, exact same colors / fonts / brackets as today. `theme::set/current/ink/font/has/bracket_open/bracket_close/bg_palette_for`. Atomic `uint8_t` active id. Built and called from one no-op site (e.g. `gfx_test`) to prove the API. **Exit:** firmware builds, runs, looks pixel-identical to today.
+- [x] **T.2 `theme.h` / `theme.cpp` skeleton** — APOLLO_AMBER only, exact same colors / fonts / brackets as today. `theme::set/current/ink/font/has/bracket_open/bracket_close/bg_palette_for`. Atomic `uint8_t` active id. Built and called from one no-op site (e.g. `gfx_test`) to prove the API. Build fixes during D.1: `GFXfont` is a typedef'd anonymous struct in Adafruit_GFX, can't be forward-declared, so theme.h pulls `<gfxfont.h>` directly; theme.cpp `#undef`s Arduino's `bit(b)` macro before defining `theme::bit(Hint)`. **Exit:** firmware builds, runs, looks pixel-identical to today.
 - [ ] **T.3 Scene refactor** — replace every hardcoded RGB565 / `setFont(&...)` / bracket literal under `src/scenes/` with `theme::ink()` / `theme::font()` / `theme::bracket_*()`. Mechanical, every scene file touched. **Exit:** `grep -nE '0x[0-9A-Fa-f]{4}|setFont\\(' src/scenes/` returns nothing meaningful; visual diff = zero.
 - [ ] **T.4 MQTT theme topic** — subscribe `observatory/theme` `{"id":"<theme_id>"}` in `mqtt_link.cpp`; persist active theme in `scene_state` (no flash); add `theme` to `observatory/status` heartbeat; add HA `select.observatory_theme` in `homeassistant/setup_mqtt.py`. **Exit:** publishing the topic with `apollo_amber` is a no-op; unknown ids logged + ignored.
 - [ ] **T.5 NOSTROMO_GREEN** — second theme: green CRT inks, scanlines hint, cursor-block hint. Reuses existing fonts (no new TTFs yet). First *visible* theme switch from MQTT. **Exit:** publishing `nostromo_green` flips the dashboard end-to-end inside one frame.
@@ -346,6 +346,137 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
 - [ ] **T.7 Remaining themes** — VECTREX_NEON (vector-glow halo), BLADE_RUNNER (cyan/orange + frame border), LCARS_TOS (block bars, no brackets). Each adds at least one new layout hint primitive in `gfx_text.h`. **Exit:** all five themes selectable; each visually distinct at a glance.
 - [ ] **T.8 BG duotone runtime** — `tools/bmp_to_header.py` emits per-image `lum[192]` + reads `assets/<name>.notheme` sidecar → `themeable` flag. Boot-time 256-entry ramp LUT per non-default theme. Per-image double-buffered runtime palette (~3.8 KB SRAM). Theme switch ≤ 5 ms. APOLLO stays passthrough. **Exit:** switching to NOSTROMO retones every themable BMP green; switching back restores original colors; no torn frames.
 - [ ] **T.9 `gfx_test` coverage** — extend the diagnostic scene to cycle every `theme::Ink` role and every `Hint` overlay on a fixed cadence so one capture covers all themes (FR-15.8). **Exit:** running `gfx_test` for 60 s exercises every theme at least once.
+
+---
+
+## Phase D — Dual-Core Compositor & Idle-Slack Utilization (FR-16)
+
+> Goal: graduate Core 1 from "single-scene renderer with idle slack" to
+> "compositor + ambient sky simulator + speculative pre-render", and
+> tighten the cross-core data path so Core 0's network jitter cannot
+> perturb the frame. Each step is a small demoable win with a visible
+> or measurable outcome — no flag-day rewrites. Order matters: D.1
+> must land before D.2/D.3 (it builds the layer plumbing they consume),
+> and D.4 must land before D.6 (seqlock is needed before sky-model
+> snapshots cross cores at high frequency).
+
+- [x] **D.1 Layer stack scaffolding** (FR-16.1, FR-16.10)
+  - Introduced a `Layer` interface (`render(matrix, now_ms)`, `name()`,
+    optional `prepare()`) in [src/scenes/layer.h](../src/scenes/layer.h).
+    Refactored `loop1()` to walk a fixed `Layer*` array indexed by
+    `LayerSlot` enum `[FG, OVERLAY_SAFETY, OVERLAY_TRANSITION, CHROME]`
+    instead of calling `g_current_scene->render()` directly. Two
+    file-scope adapters in [src/main.cpp](../src/main.cpp): `SceneFgLayer`
+    delegates to whatever `g_current_scene` points at (so adding a
+    scene stays "registry entry + render function" — NFR-5.1
+    preserved); `ChromeLayer` honours `wants_clock_chrome()` for the
+    giant-clock opt-out. Overlay slots start `nullptr` for D.2/D.3/D.8
+    to fill without touching `loop1()`.
+  - **Win:** zero visual change; firmware builds clean (RAM 30.1%,
+    Flash 25.5%); one layer of indirection now exists so D.2/D.3/D.6
+    are local edits.
+
+- [ ] **D.2 Crossfade transitions** (FR-16.3)
+  - On `take_pending()`, instead of swapping `g_current_scene` instantly,
+    install a `CrossfadeLayer` in `LAYER_OVERLAY_TRANSITION` that owns
+    the outgoing scene + incoming scene + a 250 ms integer alpha ramp.
+    Both scenes render to scratch; the layer blends per pixel using a
+    Q8.8 alpha. After the ramp, `g_current_scene` becomes the incoming
+    scene and the crossfade layer self-removes. Hard-cut remains
+    available as a per-scene opt-out.
+  - **Win:** publishing two `observatory/scene` messages back-to-back
+    produces a visible 250 ms fade between scenes instead of a hard cut.
+
+- [ ] **D.3 Safety overrides as overlays** (FR-16.2)
+  - Convert `NIGHT`, `OFFLINE`, `THERMAL_SAFE`, `SPLASH` from
+    dispatcher-preempting `SceneId`s into compositor overlay layers
+    (in `LAYER_OVERLAY_SAFETY`) with their own fade-in/fade-out
+    envelope (~200 ms). The dispatcher's "active scene" is unaffected
+    by override engagement; it remains whatever the Director or default
+    policy chose. `scene_state` setters (`set_night_active`,
+    `set_thermal_active`, `set_offline_active`, `set_splash_active`)
+    flip overlay-layer visibility instead of forcing scene swaps.
+    FR-7.5 priority preserved (THERMAL > SPLASH > OFFLINE > NIGHT >
+    none).
+  - **Win:** cover the LDR mid-`ConstellationNow` reveal, then
+    uncover — the constellation animation continues from where it was,
+    no restart. Same for thermal/offline/splash transitions.
+
+- [ ] **D.4 Seqlock cross-core snapshots** (FR-16.7)
+  - Introduce `seq_snapshot<T>` helper (single producer Core 0, single
+    consumer Core 1, retry on torn read). Migrate the `scene_state`
+    read path Core 1 uses each frame off `mutex_t` and onto seqlock.
+    Keep the mutex for write-write coordination on Core 0 (MQTT
+    callback vs. `scene_state::tick`). Generalizes the pattern already
+    proven for `g_render_alive_ms` / `g_render_fps`.
+  - **Win:** `[render] fps=` line stays flat under the existing
+    `CORE0_STRESS` build flag *and* a new `CORE0_MQTT_FLOOD` test that
+    hammers `observatory/scene` at 20 msg/s. No mutex contention in
+    Core 1's hot path.
+
+- [ ] **D.5 Idle-slack instrumentation** (FR-16.9)
+  - Measure per-frame `kFrameIntervalMs − render_time` on Core 1.
+    Maintain a 32-frame rolling average; publish to Core 0 via a
+    `volatile uint32_t g_render_slack_ms`. Add `render_slack_ms` to
+    the `observatory/status` heartbeat. Define `kSlackFloorMs`
+    (default 8) below which D.6/D.7 work skips for the frame.
+  - **Win:** HA shows a live `render_slack_ms` sensor; idle scenes
+    report ~30 ms slack, heavy scenes report < 10 ms — quantifies how
+    much budget D.6/D.7 actually have.
+
+- [ ] **D.6 Continuous sky-model on Core 1** (FR-16.5)
+  - Run the `sun_position` computation + a moon-phase calculation +
+    (if available) the cached ISS look-angle once per second on Core 1
+    during a slack window, regardless of active scene. Publish into a
+    `sky_snapshot` struct via the FR-16.7 seqlock. Sky-aware scenes
+    (`clock`+sky bg, `moon_phase`, `iss_pass`, `jupiter_visibility`)
+    read the snapshot instead of recomputing; the chrome layer gains
+    a 1-pixel sun-arc indicator along the top edge driven from it.
+  - **Win:** swapping from `clock` to `moon_phase` shows the moon disc
+    immediately on the first frame (no stall); the chrome arc visibly
+    marches across the day in `sky_timelapse`.
+
+- [ ] **D.7 Speculative `Scene::prepare()`** (FR-16.4)
+  - Add an optional `Scene::prepare(now_ms)` hook (default no-op).
+    During Core 1 slack windows (gated by D.5 floor), call `prepare()`
+    on the most likely next scene — heuristic: if there's a pending
+    request, prep that; else prep the default. `ConstellationNow`
+    pre-packs the next constellation's line-art bitmap;
+    `ImagePaletteBg` pre-builds its themed runtime palette.
+  - **Win:** instrument the first-frame render time after a swap;
+    pre-prepared scenes show a measurable drop (e.g. `ConstellationNow`
+    first frame goes from ~25 ms to < 10 ms). FPS uninterrupted.
+
+- [ ] **D.8 Toast / banner overlay** (FR-16.6)
+  - Add `observatory/toast` topic, payload `{"text": "...", "ms": N,
+    "priority": P}`. Core 0 validates (FR-1.4 pattern), pushes into a
+    small SPSC ring (capacity 3). Core 1's compositor picks up new
+    toasts each frame and installs them as a `LAYER_OVERLAY_TRANSITION`
+    layer with a bounded lifetime, drawn in `theme::ink(INK_ALERT)`
+    with halo and a slide-in/fade-out envelope. Stacks up to 3; oldest
+    expires first.
+  - **Win:** `mosquitto_pub -t observatory/toast -m '{"text":"ISS NOW",
+    "ms":3000}'` flashes a banner over whatever scene is active without
+    interrupting it.
+
+- [ ] **D.9 Link-health "breathing" chrome dot** (FR-16.8)
+  - Chrome layer reads Core 0's MQTT keep-alive timestamp, renders a
+    ≤ 2 px dot in a fixed corner with a slow brightness sin-wave when
+    fresh, fades to dim when stale (> 5 s), and disappears entirely
+    when the OFFLINE overlay has engaged (avoids redundancy). Themed
+    via `theme::ink(INK_OK)`.
+  - **Win:** unplug the router → the dot fades over ~5 s before the
+    OFFLINE overlay (FR-5.1) takes over. Plug back in → the dot
+    brightens immediately, well before the next status heartbeat.
+
+- [ ] **D.10 Compositor coverage in `gfx_test`** (FR-16.10)
+  - Extend the diagnostic scene to cycle, on a fixed cadence, every
+    overlay (toast, night, thermal, offline) and the crossfade
+    transition, so one capture validates the entire compositor path.
+    Print per-layer render times and slack to serial.
+  - **Win:** running `gfx_test` for 30 s exercises every layer; serial
+    log shows a per-layer timing table; visual regressions in any
+    layer are caught with one MQTT command.
 
 ---
 

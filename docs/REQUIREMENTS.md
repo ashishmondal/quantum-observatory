@@ -121,6 +121,104 @@ Full design lives in [THEME.md](THEME.md); these are the contractual bullets.
 - **FR-15.7** The `observatory/status` heartbeat (§5.4) SHALL include the active theme id so HA can confirm the device's state without round-tripping the theme topic.
 - **FR-15.8** The `gfx_test` scene (FR-12.6) SHALL be extended to exercise every `theme::Ink` role and every layout `Hint` so visual regressions in the theming layer are caught with one MQTT command. Theme cycling within `gfx_test` SHALL be on a fixed cadence so a single capture covers all themes.
 
+### FR-16 Dual-Core Compositor & Idle-Slack Utilization
+
+The Phase 4 dual-core split (FR §4.1) treats Core 1 as a single-scene
+renderer that frame-caps at ~24 FPS and idles between `show()` calls.
+That residual headroom is a first-class resource. FR-16 graduates Core 1
+from "render the active scene" to "compose layers, simulate the sky,
+and pre-stage the next scene", and tightens the cross-core data path
+so Core 0's network jitter cannot perturb the frame.
+
+- **FR-16.1 Layered compositor.** The render pipeline (NFR §4.3) SHALL be
+  reframed as an ordered layer stack — `[background] [scene foreground]
+  [overlays...] [chrome]` — composited every frame. Each layer SHALL own
+  its own animation clock and SHALL NOT depend on a "current scene"
+  re-init to advance. Adding a layer SHALL NOT require touching the
+  scene dispatcher or `scene_for()`.
+
+- **FR-16.2 Safety overrides as overlays.** `NIGHT`, `OFFLINE`,
+  `THERMAL_SAFE`, and `SPLASH` SHALL be implemented as compositor
+  overlays (with fade-in / fade-out envelopes) layered on top of the
+  underlying scene, NOT as full scene preemptions. The underlying scene
+  SHALL continue to render and animate behind the overlay so that on
+  override clear, the user sees a fade rather than a scene restart
+  (e.g. `ConstellationNow`'s slow reveal SHALL NOT restart when NIGHT
+  lifts). The dispatcher's "active scene" SHALL remain the
+  Director-requested or default scene at all times; only the overlay
+  bit changes. FR-7.5 priority semantics (which overlay wins when two
+  are simultaneously active) are preserved.
+
+- **FR-16.3 Scene crossfade transitions.** Scene swaps via
+  `take_pending()` SHALL render through a configurable transition
+  (default: alpha crossfade, ~250 ms, integer-only blend; see also FR-3.5
+  warp/dissolve catalog). Both the outgoing and incoming scenes SHALL
+  render to scratch state during the transition window; the compositor
+  SHALL blend per pixel. Hard-cut SHALL remain available as a transition
+  type for cases where pre-render is too expensive (FR-16.4 fallback).
+
+- **FR-16.4 Speculative pre-render.** During the frame-cap idle window
+  on Core 1, the renderer SHALL invoke a `Scene::prepare(uint32_t now_ms)`
+  hook on the most likely next scene (heuristic: highest-priority pending
+  request, else default). `prepare()` SHALL be idempotent and SHALL NOT
+  draw to the live framebuffer; its purpose is to amortize one-shot work
+  (constellation line packing, image palette LUT rebuilds, sky-model
+  pre-roll) so that the first post-swap frame is not visibly slower than
+  steady-state. Scenes that cannot benefit from pre-render SHALL leave
+  `prepare()` at its default no-op.
+
+- **FR-16.5 Continuous sky-model on Core 1.** A 1 Hz background sky
+  simulation SHALL run on Core 1 between frames, computing sun
+  altitude/azimuth (per FR-13.2/13.3), moon phase + altitude, and ISS
+  position regardless of which scene is active. Results SHALL be
+  published into a shared snapshot readable by any scene and by the
+  chrome layer. Rationale: scene swaps to sky-aware scenes become
+  instant (no first-frame stall), and the chrome layer can carry
+  ambient micro-indicators (e.g. a 1-pixel sun arc along the top edge
+  showing day progress, a moon-phase pip in the corner) without
+  burdening Core 0 alongside MQTT.
+
+- **FR-16.6 Toast / banner overlays.** The compositor SHALL support
+  ephemeral overlay layers ("toasts") with a bounded lifetime (≤ 10 s),
+  triggerable by Core 0 from MQTT (e.g. `observatory/toast`, payload
+  `{"text": "...", "ms": 3000, "priority": N}`) without inventing a new
+  scene. Toasts SHALL stack up to a small fixed cap (≤ 3) and SHALL
+  preserve the active scene underneath. Out of scope for v1: toast
+  styling beyond the active theme's `INK_ALERT`.
+
+- **FR-16.7 Seqlock cross-core snapshots.** The per-frame read path
+  (Core 1 reading scene state + sky-model snapshot + sensor flags) SHALL
+  use a seqlock-style sequence-counter pattern, NOT a `mutex_t`, for
+  read-mostly state. Writers (Core 0) SHALL increment an odd seq before
+  write and an even seq after; readers (Core 1) SHALL retry on torn
+  reads. This generalizes the pattern already in use for
+  `g_render_alive_ms` / `g_render_fps`. Rationale: Core 1 SHALL never
+  block on Core 0's network jitter during a frame. The existing
+  `mutex_t` SHALL remain for write-write coordination on Core 0.
+
+- **FR-16.8 Cross-core link-health indicator.** Core 1's compositor
+  SHALL render a continuous low-amplitude "breathing" indicator in
+  the chrome layer driven by Core 0's MQTT keep-alive timestamp,
+  giving the user ambient confirmation that the link is healthy
+  without firing the FR-5.1 OFFLINE override. The indicator SHALL be
+  ≤ 2 px, themed via `theme::ink(INK_OK)`, and SHALL fade to dim when
+  the keep-alive is stale (> 5 s) before the OFFLINE overlay engages.
+
+- **FR-16.9 Idle-slack budget & instrumentation.** Core 1 SHALL track
+  per-frame slack (kFrameIntervalMs minus actual render time) and
+  publish a rolling average to Core 0 for inclusion in
+  `observatory/status` (`render_slack_ms`). FR-16.4 / FR-16.5 work
+  SHALL only execute when slack ≥ a configurable floor (default 8 ms)
+  to preserve FR-3.1's frame-rate target under load. Heavy scenes
+  SHALL be allowed to spend the full frame budget on themselves.
+
+- **FR-16.10 Backwards compatibility.** The single-pointer `g_current_scene`
+  model SHALL continue to work for scenes that do not opt into the
+  compositor's per-layer hooks. The Scene Contract (§5.1) is unchanged.
+  Migration of NIGHT/OFFLINE/THERMAL/SPLASH from preemption to overlay
+  (FR-16.2) is the only behavioural change visible at the MQTT surface,
+  and only for the case where an override clears mid-scene.
+
 ---
 
 ## 3. Non-Functional Requirements
@@ -157,7 +255,7 @@ Full design lives in [THEME.md](THEME.md); these are the contractual bullets.
 | Core | Role | Responsibilities |
 |---|---|---|
 | **Core 0 — Gatekeeper** | Network & state | Wi-Fi mgmt, MQTT pub/sub, JSON parsing, Scene Registry lookup, writes to shared `SceneState` struct, watchdog feed |
-| **Core 1 — Artist** | Rendering only | Reads `SceneState`, runs render pipeline, drives Protomatter, maintains FPS |
+| **Core 1 — Artist & Compositor** | Rendering, layer composition, sky simulation, speculative pre-render | Reads `SceneState` (seqlock-snapshot per FR-16.7), composes the layer stack (FR-16.1), drives the 1 Hz sky model (FR-16.5), runs `Scene::prepare()` for the likely next scene during slack windows (FR-16.4), drives Protomatter, maintains FPS |
 
 ### 4.2 Inter-Core Communication
 - A single `SceneState` struct in shared SRAM, guarded by a `mutex_t` (Pico SDK).
@@ -213,8 +311,12 @@ Topic: `observatory/clear_sticky` — payload: empty.
 ### 5.4 Status (Pico → HA)
 Topic: `observatory/status` — JSON heartbeat every 30 s:
 ```json
-{ "scene_id": "...", "fps": 28, "rssi": -55, "uptime_s": 1234, "free_heap": 180000 }
+{ "scene_id": "...", "fps": 28, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber" }
 ```
+
+`render_slack_ms` is the rolling average per-frame idle window on Core 1
+(FR-16.9); HA can use it as a budget gauge for adding new layers / heavier
+scenes. `theme` is the active theme id (FR-15.7).
 
 ---
 
@@ -295,3 +397,6 @@ All scenes above (except possibly `boot` during the splash window) carry the sta
 - **TTL**: hard maximum lifetime for any scene (default 1 hour).
 - **Destructive Overlay**: drawing technique where text writes opaque halo pixels into the background layer to guarantee legibility.
 - **Theme**: a bundle of inks, fonts, brackets, and layout hints that gives the device a distinct retro sci-fi identity (Apollo MOCR, Nostromo CRT, Vectrex, Blade Runner, LCARS). Selectable over MQTT (FR-15).
+- **Compositor**: Core 1's per-frame layer-stack pipeline (FR-16.1). Replaces the single-scene render model with an ordered `[bg][fg][overlays][chrome]` stack so safety overrides, toasts, and chrome micro-indicators stack additively without scene re-init.
+- **Overlay**: a compositor layer drawn over the active scene, owned by the firmware (FR-16.2 safety overrides) or by Core 0 (FR-16.6 toasts). Overlays do not change the dispatcher's active scene.
+- **Idle slack**: the residual Core 1 time inside the frame cap (`kFrameIntervalMs − render_time`). FR-16.4 / FR-16.5 work executes only when slack ≥ floor so frame rate is never sacrificed.

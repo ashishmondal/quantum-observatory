@@ -35,6 +35,12 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md) and [PLAN.md](PLAN.md). These ru
 
 ## 3. Concurrency (Dual-Core)
 
+- **Dual-core is a first-class design constraint, not an afterthought.** Every new feature, scene, sensor, or subsystem MUST answer "which core owns this, and why?" *before* code is written. Default placement (per §4.1 of REQUIREMENTS):
+  - **Core 0 — Gatekeeper:** anything network-touching (Wi-Fi, MQTT, OTA), anything that parses adversarial input, sensor polling at ≤ 1 Hz, scene-lifecycle bookkeeping, watchdog feed, all `Serial` output.
+  - **Core 1 — Artist & Compositor:** rendering, layer composition, per-frame animation state, speculative pre-render (FR-16.4), continuous sky-model (FR-16.5), and any computation whose result is consumed *only* by the next frame.
+  - **Cross-core data:** read-mostly state uses the seqlock pattern (FR-16.7); edge events use `take_*()` IPC; multi-field state uses `mutex_t` with the shortest-window rule above.
+- **Idle-slack is a budget, not free time.** Core 1 frame-caps at ~24 FPS (`kFrameIntervalMs` in `loop1()`). Before adding any heavy one-shot work to Core 0, ask whether Core 1's slack window (FR-16.9) is the better home — especially for anything time-correlated with rendering (palette rebuilds, asset prep, animation lookahead). Conversely: never push network or I²C work onto Core 1; it owns Protomatter PIO/DMA timing and any blocking call there is a flicker.
+- **New code adds at minimum one log line per cross-core boundary it crosses** (writer side, on Core 0). Makes core-ownership bugs visible in the serial log instead of as mystery flicker.
 - Shared state lives **only** in the `SceneState` struct. No other globals are read by both cores.
 - All access to shared state goes through getter/setter helpers that take/release the mutex. **Never** read shared fields directly.
 - Hold the mutex for **the shortest possible window** — copy out, release, then work on the copy.

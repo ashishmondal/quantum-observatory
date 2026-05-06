@@ -26,7 +26,11 @@
 
 #include "color_palette.h"
 
-class GFXfont;          // Adafruit_GFX
+// GFXfont is `typedef struct { ... } GFXfont;` with an anonymous tag in
+// Adafruit_GFX, so it cannot be forward-declared. Pull the small header
+// directly — it has no other dependencies.
+#include <gfxfont.h>
+
 enum class BgType : uint8_t;  // backgrounds.h
 
 namespace theme {
