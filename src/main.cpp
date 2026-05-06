@@ -9,6 +9,7 @@
 #include "gfx_text.h"
 #include "light_sensor.h"
 #include "scene_state.h"
+#include "theme.h"
 #include "thermal_monitor.h"
 #include "time_of_day.h"
 #include "wifi_link.h"
@@ -203,6 +204,15 @@ void setup() {
   // lifecycle as the trig LUT: built once on Core 0, then read-only
   // from Core 1's render path.
   palette::init_all();
+
+  // Theming system (FR-15). Boots to APOLLO_AMBER per FR-15.2; HA may
+  // push a non-default theme via observatory/theme later (T.4). The
+  // explicit set() here documents intent and exercises the writer side
+  // of the API; the log line proves the reader links. Single-byte
+  // atomic store on RP2040 — no mutex (same pattern as g_render_fps).
+  theme::set(theme::Id::APOLLO_AMBER);
+  Serial.print("[theme] active id=");
+  Serial.println(static_cast<int>(theme::current()));
 
   // Cross-core scene IPC — must be live before either core touches
   // scene_state. Default current/pending = BOOT; loop1() will resolve
