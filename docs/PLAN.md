@@ -323,8 +323,8 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 
 ## Phase 8 — Polish
 
-- [ ] **8.1 Dissolve transition** between scenes
-- [ ] **8.2 Warp transition** (pixel stretch)
+- ~~**8.1 Dissolve transition** between scenes~~ — superseded by **D.2** (compositor crossfade, FR-16.3); the layered-overlay path landed in D.1 makes a pre-compositor transition implementation immediate rework. The dissolve flavour from FR-3.5 is captured by D.2's transition-type catalog.
+- ~~**8.2 Warp transition** (pixel stretch)~~ — same as 8.1: folded into the D.2 transition catalog (FR-3.5 warp). Will land as an additional transition mode after D.2 proves the layer + alpha-blend plumbing.
 - [ ] **8.3 OTA firmware update** (ArduinoOTA)
 - [ ] **8.4 Scene Registry as data, not code** — load from LittleFS so adding scenes doesn't need a flash
 
