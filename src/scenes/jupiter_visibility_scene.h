@@ -13,7 +13,10 @@
 //                                 ephemeris look-angles)
 //                 below horizon → "BELOW"
 //                 above horizon
-//                 but daylight  → "DAY"
+//                 but daylight  → "IN <IAU>" when HA pushes the
+//                                 host constellation (3-letter IAU
+//                                 code, e.g. "IN TAU"); falls back
+//                                 to "DAY" if absent
 //                 stale/no data → "WAIT"
 //   right half (x=32..63): artist-supplied jupiter.bmp.
 //
@@ -55,6 +58,7 @@
 #include "config.h"
 #include "jupiter_state.h"
 #include "scene.h"
+#include "stars.h"
 #include "sun_position.h"
 #include "time_of_day.h"
 
@@ -269,7 +273,9 @@ private:
   // Format the line-3 visibility readout into `out`. One of:
   //   "VIS BBBxEE"  — overhead + dark, pointing string
   //   "BELOW"       — Jupiter below the observer horizon
-  //   "DAY"         — above horizon but sun too high (washed out)
+  //   "IN <IAU>"    — above horizon but sun too high (washed out),
+  //                   shows the host constellation when HA provided
+  //                   one; otherwise falls back to "DAY"
   //   "WAIT"        — no fresh snapshot from HA
   static void format_visibility_line(bool fresh, VisState vis,
                                      const jupiter_state::Snapshot& jup,
@@ -295,7 +301,27 @@ private:
         break;
       }
       case VisState::BELOW: snprintf(out, cap, "BELOW"); break;
-      case VisState::DAY:   snprintf(out, cap, "DAY");   break;
+      case VisState::DAY: {
+        // Prefer the constellation readout when HA pushed one.
+        // The 3-letter IAU code lives in the firmware-side catalog
+        // (regenerated from Stellarium); upper-case it to match the
+        // rest of the dashboard's all-caps text style.
+        if (jup.have_constellation &&
+            jup.constellation_index < constellations_iau::kCatalogCount) {
+          const char* iau =
+              constellations_iau::kCatalog[jup.constellation_index].iau;
+          char up[4] = { 0, 0, 0, 0 };
+          for (int i = 0; i < 3 && iau[i] != '\0'; ++i) {
+            char c = iau[i];
+            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+            up[i] = c;
+          }
+          snprintf(out, cap, "IN %s", up);
+        } else {
+          snprintf(out, cap, "DAY");
+        }
+        break;
+      }
       case VisState::WAIT:  snprintf(out, cap, "WAIT");  break;
     }
   }

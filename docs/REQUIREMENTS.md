@@ -339,7 +339,7 @@ scenes. `theme` is the active theme id (FR-15.7).
 | `sky_timelapse` | sky (synthetic time) | "TIMELAPSE" label | diagnostic (FR-13.4); 1 day per 10 s |
 | `iss_pass` | nebula | typewriter ALT/CREW/VIS | priority 4; on-device look-angle + visibility derivation per FR-14 |
 | `moon_phase` | starfield | phase glyph + name | sticky |
-| `jupiter_visibility` | nebula | direction + time | example in §5.1 |
+| `jupiter_visibility` | nebula | direction + magnitude/distance + visibility (or host constellation when above-horizon-but-daylight) | example in §5.1; on-device daylight derivation per FR-14 |
 | `constellation_now` | starfield | constellation art + name | sticky; HA picks current overhead constellation by date + observer lat/lon — see [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 1 |
 
 All scenes above (except possibly `boot` during the splash window) carry the standard small clock readout per FR-9.2. All `bg_type` values in this table are subject to FR-15.6 — the actual palette used at render time is whatever `theme::bg_palette_for()` returns for the active theme.

@@ -11,11 +11,19 @@
 // pyephem/skyfield) and re-emits them verbatim.
 //
 // Wire fields:
-//   bearing_deg    — required, 0..359, compass azimuth (0=N, 90=E)
-//   elevation_deg  — required, -90..90, altitude above horizon
-//                    (negative = below horizon)
-//   magnitude      — optional, ~-3..+1 in practice, capped -30..30
-//   distance_au    — optional, ~4..6 AU in practice, capped 0..100
+//   bearing_deg         — required, 0..359, compass azimuth (0=N, 90=E)
+//   elevation_deg       — required, -90..90, altitude above horizon
+//                          (negative = below horizon)
+//   magnitude           — optional, ~-3..+1 in practice, capped -30..30
+//   distance_au         — optional, ~4..6 AU in practice, capped 0..100
+//   constellation_index — optional, 0..87, index into
+//                          `constellations_iau::kCatalog[]` (same
+//                          encoding as observatory/constellation).
+//                          When present + Jupiter is above the
+//                          horizon but the observer isn't dark
+//                          enough yet, the scene's line-3 readout
+//                          becomes `IN <IAU>` (e.g. `IN TAU`)
+//                          instead of the bare `DAY` placeholder.
 //
 // Unlike ISS, Jupiter is *always* sunlit (planets shine by reflected
 // light), so there is no `sunlit` field — only the observer-side
@@ -56,6 +64,8 @@ struct Snapshot {
   int16_t  magnitude_x10;    // -300..300 (i.e. -30.0..+30.0)
   bool     have_distance;
   uint16_t distance_au_x10;  // 0..1000   (i.e.   0.0..100.0)
+  bool     have_constellation;
+  uint8_t  constellation_index;  // 0..87, index into kCatalog[]
 
   uint32_t set_at_ms;        // millis() when the push was applied
 };
@@ -72,6 +82,7 @@ void init();
 void set_from_mqtt(int16_t bearing_deg, int8_t elevation_deg,
                    bool have_magnitude, int16_t magnitude_x10,
                    bool have_distance, uint16_t distance_au_x10,
+                   bool have_constellation, uint8_t constellation_index,
                    uint32_t now_ms);
 
 // Reader. Returns true with a fresh snapshot if a value has been

@@ -100,7 +100,7 @@ def _compute_jupiter(lat_deg, lon_deg):
     (docs/MQTT_TOPICS.md), or None on any skyfield error.
     """
     try:
-        from skyfield.api import wgs84, Loader
+        from skyfield.api import wgs84, Loader, load_constellation_map
         from skyfield.magnitudelib import planetary_magnitude
 
         loader = Loader(SKYFIELD_CACHE)
@@ -115,14 +115,29 @@ def _compute_jupiter(lat_deg, lon_deg):
         alt, az, dist = apparent.altaz()
         mag = float(planetary_magnitude(apparent))
 
+        # Host constellation — the IAU patch Jupiter currently sits
+        # in, used by the firmware's daylight readout ("IN TAU"
+        # instead of "DAY"). Publish as the same integer index used
+        # by the observatory/constellation topic so the firmware
+        # only needs one IAU catalog. Skipped silently if skyfield
+        # returns a code we don't know about.
+        constellation_at = load_constellation_map()
+        code = constellation_at(apparent)
+        if code in ("Ser1", "Ser2"):
+            code = "Ser"
+        con_idx = _IAU_INDEX.get(code)
+
         # Clamp to wire ranges (docs/MQTT_TOPICS.md). The firmware
         # also range-checks but a clean publish keeps logs readable.
-        return {
+        out = {
             "bearing_deg":   int(round(az.degrees)) % 360,
             "elevation_deg": max(-90, min(90, int(round(alt.degrees)))),
             "magnitude":     round(max(-30.0, min(30.0, mag)), 1),
             "distance_au":   round(max(0.0, min(100.0, dist.au)), 2),
         }
+        if con_idx is not None:
+            out["constellation_index"] = con_idx
+        return out
     except Exception as exc:  # noqa: BLE001 — log, don't crash the trigger
         return {"_error": f"{type(exc).__name__}: {exc}"}
 
@@ -291,25 +306,35 @@ def _publish(topic, payload_dict):
 # Run all three at startup so the dashboard fills in within seconds
 # of HA boot, then on each topic's natural cadence.
 
+@service
 @time_trigger("startup", "cron(*/15 * * * *)")
 def publish_jupiter(**_):
     """Jupiter — every 15 min. Firmware kFreshMs = 1 h, so we have
-    4× headroom for missed publishes."""
+    4× headroom for missed publishes.
+
+    Also exposed as service `pyscript.publish_jupiter` so
+    homeassistant/setup_mqtt.py --verify-publisher can force-call it."""
     lat, lon = _observer_lat_lon()
     _publish("observatory/jupiter", _compute_jupiter(lat, lon))
 
 
+@service
 @time_trigger("startup", "cron(0 */6 * * *)")
 def publish_moon(**_):
-    """Moon — every 6 h on the hour. Firmware kFreshMs = 12 h."""
+    """Moon — every 6 h on the hour. Firmware kFreshMs = 12 h.
+
+    Also exposed as service `pyscript.publish_moon`."""
     _publish("observatory/moon", _compute_moon())
 
 
+@service
 @time_trigger("startup", "cron(0 * * * *)")
 def publish_constellation(**_):
     """Constellation — top of every hour. Firmware kFreshMs = 24 h.
     The constellation overhead drifts ~15°/h so an hourly refresh
     gives the observatory a constellation that's actually overhead
-    most of the time, not just "what month is it"."""
+    most of the time, not just "what month is it".
+
+    Also exposed as service `pyscript.publish_constellation`."""
     lat, lon = _observer_lat_lon()
     _publish("observatory/constellation", _compute_constellation(lat, lon))
