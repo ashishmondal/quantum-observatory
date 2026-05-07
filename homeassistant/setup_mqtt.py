@@ -52,10 +52,18 @@ Pipeline switches (all default off; any combination is fine):
                            now (skip_condition=true).
   --verify-published       Read each automation's last_triggered
                            and assert it ran ≤ 60 s ago.
+  --verify-publisher       Force-call each pyscript publisher
+                           (jupiter / moon / constellation) and
+                           grep /api/error_log to confirm each
+                           one actually published. Closes the
+                           gap that --verify-published can't see
+                           (pyscript triggers aren't HA
+                           automation entities).
   --all                    Run --install → --install-publisher →
                            check_config → --reload →
                            --verify-automations → --trigger-all →
-                           --verify-published in order. If any
+                           --verify-published → --verify-publisher
+                           in order. If any
                            step fails the next is skipped.
 
 SSH knobs (only used by --install / --all):
@@ -115,6 +123,9 @@ Optional no-UI pipeline (any combination of flags, or --all):
  10.   service: automation.trigger × 3        (--trigger-all)
  11.   /api/states/<entity> last_triggered    (--verify-published)
                                               checks ≤ 60 s ago
+ 11a.  service: pyscript.publish_* × 3 +      (--verify-publisher)
+       /api/error_log grep                    proves each pyscript
+                                              topic actually pushed
 
 It deliberately does NOT try to create the MQTT integration via REST —
 HA exposes config flows only through the WebSocket API, and creating
@@ -188,6 +199,19 @@ HA_PYSCRIPT_DIR_DEST  = "/config/pyscript"
 HA_PYSCRIPT_FILES_SRC = [
     Path(__file__).parent / "pyscript" / "observatory_publisher.py",
     Path(__file__).parent / "pyscript" / "requirements.txt",
+]
+
+# Each tuple is (pyscript service name, MQTT topic the function publishes
+# on success). The service name matches the top-level `def` in
+# pyscript/observatory_publisher.py — pyscript auto-registers every
+# top-level function as `pyscript.<name>` and lets us call it via the
+# standard /api/services/pyscript/<name> endpoint. The success log line
+# we grep for is emitted by `_publish()` as:
+#   observatory_publisher: <topic> → <payload>
+PYSCRIPT_PUBLISHERS = [
+    ("publish_jupiter",       "observatory/jupiter"),
+    ("publish_moon",          "observatory/moon"),
+    ("publish_constellation", "observatory/constellation"),
 ]
 
 
@@ -770,7 +794,7 @@ def verify_automations(ha: HA) -> tuple[bool, dict[str, str]]:
     `id:` field, so we can't predict them. Instead, we list every
     `automation.*` state and match on its `id` attribute.
     """
-    step(9, "Verify all 6 Observatory automations are registered")
+    step(9, f"Verify all {len(EXPECTED_AUTOMATION_IDS)} Observatory automations are registered")
     code, body = ha.get("/api/states")
     if code != 200 or not isinstance(body, list):
         fail(f"could not list states (HTTP {code})")
@@ -865,6 +889,83 @@ def verify_published(ha: HA, found: dict[str, str], max_age_s: float = 60.0) -> 
     return all_ok
 
 
+def verify_publisher(ha: HA) -> bool:
+    """Force-call each pyscript publisher and confirm it actually published.
+
+    Pyscript auto-exposes every top-level `def` as a service in the
+    `pyscript` domain, so we can fire publish_jupiter / _moon /
+    _constellation directly — same trick as `automation.trigger` for
+    the YAML side. To prove the publish completed end-to-end (skyfield
+    loaded, mqtt.publish accepted, no exception swallowed) we then grep
+    the HA log via /api/error_log for the success line `_publish()`
+    emits:  `observatory_publisher: <topic> → <payload>`.
+
+    /api/error_log returns the live homeassistant.log as plain text.
+    First publish can take 30–60 s on a cold pyscript install while
+    skyfield pip-installs and downloads the DE421 ephemeris (~17 MB),
+    so we retry the log-grep on a backoff up to ~90 s.
+    """
+    step("11a", "Force-call pyscript publishers and verify each published")
+
+    fired: list[tuple[str, str]] = []
+    for svc, topic in PYSCRIPT_PUBLISHERS:
+        # Pyscript service calls return immediately; the function runs
+        # in a worker thread thanks to @pyscript_executor on the
+        # compute helpers, so a 30 s skyfield first-load won't block
+        # this HTTP call.
+        code, body = ha.post(f"/api/services/pyscript/{svc}", {})
+        if code in (200, 201):
+            ok(f"called pyscript.{svc}")
+            fired.append((svc, topic))
+        else:
+            fail(f"pyscript.{svc} call failed: HTTP {code} — {body!r}")
+            if code == 400 and isinstance(body, (str, dict)) and "not found" in str(body).lower():
+                print("    Service not registered. Likely causes:")
+                print("      • pyscript reload hasn't finished (try again in 30 s)")
+                print("      • observatory_publisher.py has a syntax/import error")
+                print(f"        — check {ha.url}/config/logs for the traceback")
+
+    if not fired:
+        return False
+
+    # The success log line lives inside a longer pyscript prefix; grep
+    # for the unique substring _publish() writes for each topic.
+    needles = {topic: f"observatory_publisher: {topic} →" for _, topic in fired}
+    seen: set[str] = set()
+
+    deadline = time.monotonic() + 90.0
+    backoff = 3.0
+    while time.monotonic() < deadline and len(seen) < len(needles):
+        time.sleep(backoff)
+        code, body = ha.get("/api/error_log")
+        if code != 200 or not isinstance(body, str):
+            warn(f"could not read /api/error_log (HTTP {code}); will retry")
+            backoff = min(backoff * 1.5, 15.0)
+            continue
+        for topic, needle in needles.items():
+            if topic in seen:
+                continue
+            if needle in body:
+                ok(f"{topic}: published (matched log line)")
+                seen.add(topic)
+        if len(seen) < len(needles):
+            backoff = min(backoff * 1.5, 15.0)
+
+    all_ok = True
+    for _, topic in fired:
+        if topic not in seen:
+            fail(f"{topic}: no `observatory_publisher: {topic} →` in the HA log")
+            print("      Likely causes:")
+            print("        • skyfield is still pip-installing / downloading DE421")
+            print("          (re-run --verify-publisher in a minute)")
+            print("        • observer lat/lon falls back to (0,0) — set")
+            print("          Settings → System → General → Location")
+            print("        • mqtt.publish was called but rejected —")
+            print(f"          check {ha.url}/config/logs for `[mqtt]` errors")
+            all_ok = False
+    return all_ok
+
+
 # --- entry point --------------------------------------------------------
 
 def main() -> int:
@@ -900,7 +1001,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--verify-automations", action="store_true",
-        help="Confirm all 6 automation.observatory_* entities exist.",
+        help="Confirm all automation.observatory_* entities exist.",
     )
     ap.add_argument(
         "--trigger-all", action="store_true",
@@ -911,8 +1012,13 @@ def main() -> int:
         help="Read each automation's last_triggered to prove it ran.",
     )
     ap.add_argument(
+        "--verify-publisher", action="store_true",
+        help="Force-call each pyscript publisher (jupiter/moon/constellation)"
+             " and grep /api/error_log to confirm each one actually published.",
+    )
+    ap.add_argument(
         "--all", action="store_true",
-        help="Validate → install → install-publisher → reload → verify → trigger → verify-published.",
+        help="Validate → install → install-publisher → reload → verify → trigger → verify-published → verify-publisher.",
     )
     # SSH knobs (only used by --install / --all).
     ap.add_argument("--ssh-host", default=os.environ.get("HA_SSH_HOST"),
@@ -957,6 +1063,7 @@ def main() -> int:
         do_verify_aut = args.verify_automations or args.all
         do_trigger = args.trigger_all or args.all
         do_verify_pub = args.verify_published or args.all
+        do_verify_pyscript = args.verify_publisher or args.all
 
         install_ok: bool | None = None
         pyscript_ok: bool | None = None
@@ -966,6 +1073,7 @@ def main() -> int:
         found_map: dict[str, str] = {}
         trigger_ok: bool | None = None
         published_ok: bool | None = None
+        publisher_published_ok: bool | None = None
 
         if do_install:
             ssh_host = args.ssh_host or re.sub(r"^https?://", "", args.url).split(":")[0].split("/")[0]
@@ -995,6 +1103,13 @@ def main() -> int:
             if not found_map:
                 _, found_map = verify_automations(ha)
             published_ok = verify_published(ha, found_map)
+        # Pyscript verification is independent of the YAML automations
+        # — only gate it on the publisher having been installed (or
+        # being already there from a previous run, which we can't tell
+        # without an extra round-trip; just attempt and let it fail
+        # cleanly if the services aren't registered).
+        if do_verify_pyscript and (publisher_ok is not False) and (pyscript_ok is not False):
+            publisher_published_ok = verify_publisher(ha)
     except RuntimeError as e:
         print()
         fail(str(e))
@@ -1026,17 +1141,18 @@ def main() -> int:
         if val is None:
             return f"  {label:<19}: skipped"
         return f"  {label:<19}: {'ok' if val else 'FAIL'}"
-    if any(v is not None for v in (install_ok, pyscript_ok, publisher_ok, reload_ok, automations_ok, trigger_ok, published_ok)):
+    if any(v is not None for v in (install_ok, pyscript_ok, publisher_ok, reload_ok, automations_ok, trigger_ok, published_ok, publisher_published_ok)):
         print(_line("package installed",  install_ok))
         print(_line("pyscript loaded",    pyscript_ok))
         print(_line("publisher installed", publisher_ok))
         print(_line("yaml reloaded",      reload_ok))
-        print(_line("3 automations live", automations_ok))
+        print(_line(f"{len(EXPECTED_AUTOMATION_IDS)} automations live", automations_ok))
         print(_line("trigger-all",        trigger_ok))
         print(_line("published verified", published_ok))
+        print(_line("publisher verified", publisher_published_ok))
 
     pipeline_ok = all(
-        v in (True, None) for v in (install_ok, publisher_ok, reload_ok, automations_ok, trigger_ok, published_ok)
+        v in (True, None) for v in (install_ok, publisher_ok, reload_ok, automations_ok, trigger_ok, published_ok, publisher_published_ok)
     )
     all_green = (
         integration_ok
