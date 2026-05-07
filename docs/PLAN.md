@@ -376,7 +376,7 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     Flash 25.5%); one layer of indirection now exists so D.2/D.3/D.6
     are local edits.
 
-- [ ] **D.2 Fade-through-black transitions** (FR-16.3)
+- [x] **D.2 Fade-through-black transitions** (FR-16.3)
   - On `take_pending()`, instead of swapping `g_current_scene` instantly,
     install a `FadeBlackLayer` in `LAYER_OVERLAY_TRANSITION` that runs a
     250 ms integer alpha envelope: 0→255 over the first 125 ms (outgoing
@@ -402,8 +402,9 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     policy chose. `scene_state` setters (`set_night_active`,
     `set_thermal_active`, `set_offline_active`, `set_splash_active`)
     flip overlay-layer visibility instead of forcing scene swaps.
-    FR-7.5 priority preserved (THERMAL > SPLASH > OFFLINE > NIGHT >
-    none).
+    Override priority preserved (SPLASH > THERMAL > NIGHT > OFFLINE >
+    none) — matches FR-13.1 (splash highest), FR-7.5 (thermal > night >
+    director) and FR-5.1 (offline above director, below safety).
   - **Win:** cover the LDR mid-`ConstellationNow` reveal, then
     uncover — the constellation animation continues from where it was,
     no restart. Same for thermal/offline/splash transitions.
