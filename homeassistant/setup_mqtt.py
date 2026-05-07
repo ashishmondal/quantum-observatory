@@ -20,6 +20,21 @@ Usage
     export HA_SSH_HOST=homeassistant.local
     python homeassistant/setup_mqtt.py --all
 
+    # or via a .env file (no shell exports needed). The loader looks
+    # in (in order) $CWD/.env, homeassistant/.env, and repo-root .env;
+    # first hit wins. Real env vars always beat the file. Format is
+    # plain `KEY=value` per line; `#` comments + blank lines + an
+    # optional leading `export` are tolerated.
+    cat > .env <<'EOF'
+    HA_URL=http://homeassistant.local:8123
+    HA_TOKEN=eyJ...
+    HA_SSH_HOST=homeassistant.local
+    HA_SSH_PORT=22
+    EOF
+    chmod 600 .env            # the file holds a long-lived token
+    echo .env >> .gitignore   # never commit it
+    python homeassistant/setup_mqtt.py --all
+
 CLI flags (all also available as env vars)
 ------------------------------------------
 Connection (always required):
@@ -968,7 +983,84 @@ def verify_publisher(ha: HA) -> bool:
 
 # --- entry point --------------------------------------------------------
 
+# Search order for the optional .env file (first hit wins). Lets
+# folks keep `HA_TOKEN` etc. out of shell history without depending
+# on python-dotenv. Format is the standard `KEY=value` per line, with
+# `#` comments + blank lines ignored. Values may be wrapped in
+# single or double quotes; `\n` / `\\` / `\"` / `\'` inside double
+# quotes are unescaped. Existing real env vars always win — the file
+# is a *fallback*, never an override (so a one-off
+# `HA_TOKEN=... python homeassistant/setup_mqtt.py` still beats
+# whatever's in the file).
+ENV_FILE_SEARCH_PATHS = [
+    Path.cwd() / ".env",                     # current working directory
+    Path(__file__).parent / ".env",          # homeassistant/.env
+    Path(__file__).parent.parent / ".env",   # repo root .env
+]
+
+
+def _parse_env_line(line: str) -> tuple[str, str] | None:
+    """Parse one `KEY=value` line. Returns None for blanks/comments/garbage."""
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return None
+    # Tolerate the `export FOO=bar` form people copy out of shell rc files.
+    if s.startswith("export "):
+        s = s[len("export "):].lstrip()
+    if "=" not in s:
+        return None
+    key, _, raw = s.partition("=")
+    key = key.strip()
+    if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+        return None
+    val = raw.strip()
+    # Strip a trailing inline `# comment` only when value is unquoted —
+    # quoted values may legitimately contain `#`.
+    if val and val[0] not in ("'", '"'):
+        hash_idx = val.find(" #")
+        if hash_idx >= 0:
+            val = val[:hash_idx].rstrip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+        quote = val[0]
+        val = val[1:-1]
+        if quote == '"':
+            # Minimal escape handling for double-quoted values.
+            val = (val.replace(r"\n", "\n")
+                      .replace(r"\t", "\t")
+                      .replace(r"\\", "\\")
+                      .replace(r"\"", "\""))
+    return key, val
+
+
+def load_env_file() -> Path | None:
+    """Load the first .env in ENV_FILE_SEARCH_PATHS into os.environ.
+
+    Returns the path that was loaded, or None if no .env was found.
+    Real env vars always win — the file only fills in unset keys.
+    """
+    for path in ENV_FILE_SEARCH_PATHS:
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for raw_line in text.splitlines():
+            parsed = _parse_env_line(raw_line)
+            if parsed is None:
+                continue
+            key, val = parsed
+            os.environ.setdefault(key, val)
+        return path
+    return None
+
+
 def main() -> int:
+    # Load the .env BEFORE argparse builds its defaults — every flag
+    # below uses `os.environ.get(...)` for its default, so the loader
+    # has to fire first to be picked up.
+    loaded_env = load_env_file()
+
     ap = argparse.ArgumentParser(
         description="Validate HA + MQTT setup for the Quantum Observatory firmware.",
     )
@@ -1037,6 +1129,8 @@ def main() -> int:
         ap.error("both --url and --token are required (or set HA_URL / HA_TOKEN).")
 
     print(_c("1;37", "Quantum Observatory — Home Assistant setup validator"))
+    if loaded_env is not None:
+        print(_c("2;37", f"  (loaded env from {loaded_env})"))
 
     try:
         ha = HA(args.url, args.token)

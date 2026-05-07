@@ -19,3 +19,7 @@ assets/hip_main.dat
 
 # Python bytecode (HA pyscript dev cache, etc.)
 __pycache__/
+
+# Local secrets for homeassistant/setup_mqtt.py — see its docstring.
+# Holds HA_TOKEN (a long-lived access token) and HA_SSH_* knobs.
+.env
