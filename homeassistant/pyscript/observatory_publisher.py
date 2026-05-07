@@ -116,28 +116,27 @@ def _compute_jupiter(lat_deg, lon_deg):
         mag = float(planetary_magnitude(apparent))
 
         # Host constellation — the IAU patch Jupiter currently sits
-        # in, used by the firmware's daylight readout ("IN TAU"
-        # instead of "DAY"). Publish as the same integer index used
-        # by the observatory/constellation topic so the firmware
-        # only needs one IAU catalog. Skipped silently if skyfield
-        # returns a code we don't know about.
+        # in, used by the firmware's daylight readout ("IN TAU").
+        # Required on the wire (firmware rejects the payload without
+        # it), so an unknown skyfield code aborts the publish rather
+        # than emitting a partial payload.
         constellation_at = load_constellation_map()
         code = constellation_at(apparent)
         if code in ("Ser1", "Ser2"):
             code = "Ser"
         con_idx = _IAU_INDEX.get(code)
+        if con_idx is None:
+            return {"_error": f"unknown constellation code from skyfield: {code!r}"}
 
         # Clamp to wire ranges (docs/MQTT_TOPICS.md). The firmware
         # also range-checks but a clean publish keeps logs readable.
-        out = {
-            "bearing_deg":   int(round(az.degrees)) % 360,
-            "elevation_deg": max(-90, min(90, int(round(alt.degrees)))),
-            "magnitude":     round(max(-30.0, min(30.0, mag)), 1),
-            "distance_au":   round(max(0.0, min(100.0, dist.au)), 2),
+        return {
+            "bearing_deg":         int(round(az.degrees)) % 360,
+            "elevation_deg":       max(-90, min(90, int(round(alt.degrees)))),
+            "magnitude":           round(max(-30.0, min(30.0, mag)), 1),
+            "distance_au":         round(max(0.0, min(100.0, dist.au)), 2),
+            "constellation_index": con_idx,
         }
-        if con_idx is not None:
-            out["constellation_index"] = con_idx
-        return out
     except Exception as exc:  # noqa: BLE001 — log, don't crash the trigger
         return {"_error": f"{type(exc).__name__}: {exc}"}
 

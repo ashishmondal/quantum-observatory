@@ -13,10 +13,8 @@
 //                                 ephemeris look-angles)
 //                 below horizon → "BELOW"
 //                 above horizon
-//                 but daylight  → "IN <IAU>" when HA pushes the
-//                                 host constellation (3-letter IAU
-//                                 code, e.g. "IN TAU"); falls back
-//                                 to "DAY" if absent
+//                 but daylight  → "IN <IAU>" — host constellation
+//                                 (3-letter IAU code, e.g. "IN TAU")
 //                 stale/no data → "WAIT"
 //   right half (x=32..63): artist-supplied jupiter.bmp.
 //
@@ -199,7 +197,7 @@ public:
 
     constexpr uint16_t kVisibleInk = 0x07E0;  // green — banner when overhead + dark
     constexpr uint16_t kBelowInk   = 0x630C;  // dim grey — below horizon
-    constexpr uint16_t kDayInk     = 0xFD20;  // amber — above but washed out
+    constexpr uint16_t kDayInk     = 0xFD20;  // amber — above horizon, in daylight
     constexpr uint16_t kWaitInk    = 0xC100;  // dim amber-red — no fresh data
     constexpr uint16_t kMagInk     = 0x07FF;  // cyan — apparent magnitude
     constexpr uint16_t kDistInk    = 0xFE60;  // peach — distance, echoes Jupiter's bands
@@ -273,9 +271,10 @@ private:
   // Format the line-3 visibility readout into `out`. One of:
   //   "VIS BBBxEE"  — overhead + dark, pointing string
   //   "BELOW"       — Jupiter below the observer horizon
-  //   "IN <IAU>"    — above horizon but sun too high (washed out),
-  //                   shows the host constellation when HA provided
-  //                   one; otherwise falls back to "DAY"
+  //   "IN <IAU>"    — above horizon but sun too high (washed out);
+  //                   shows the host constellation (3-letter IAU
+  //                   code) since constellation_index is required
+  //                   on the wire
   //   "WAIT"        — no fresh snapshot from HA
   static void format_visibility_line(bool fresh, VisState vis,
                                      const jupiter_state::Snapshot& jup,
@@ -302,24 +301,20 @@ private:
       }
       case VisState::BELOW: snprintf(out, cap, "BELOW"); break;
       case VisState::DAY: {
-        // Prefer the constellation readout when HA pushed one.
-        // The 3-letter IAU code lives in the firmware-side catalog
-        // (regenerated from Stellarium); upper-case it to match the
-        // rest of the dashboard's all-caps text style.
-        if (jup.have_constellation &&
-            jup.constellation_index < constellations_iau::kCatalogCount) {
-          const char* iau =
-              constellations_iau::kCatalog[jup.constellation_index].iau;
-          char up[4] = { 0, 0, 0, 0 };
-          for (int i = 0; i < 3 && iau[i] != '\0'; ++i) {
-            char c = iau[i];
-            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
-            up[i] = c;
-          }
-          snprintf(out, cap, "IN %s", up);
-        } else {
-          snprintf(out, cap, "DAY");
+        // constellation_index is required on the wire; the parser
+        // rejects payloads without it, so a fresh snapshot is
+        // guaranteed to carry a valid 0..87 index. Upper-case the
+        // 3-letter IAU code to match the dashboard's all-caps
+        // text style.
+        const char* iau =
+            constellations_iau::kCatalog[jup.constellation_index].iau;
+        char up[4] = { 0, 0, 0, 0 };
+        for (int i = 0; i < 3 && iau[i] != '\0'; ++i) {
+          char c = iau[i];
+          if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 32);
+          up[i] = c;
         }
+        snprintf(out, cap, "IN %s", up);
         break;
       }
       case VisState::WAIT:  snprintf(out, cap, "WAIT");  break;

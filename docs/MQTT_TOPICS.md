@@ -189,9 +189,9 @@ mosquitto_pub -t observatory/iss -m '{"lat_deg":-12.4,"lon_deg":42.7,"altitude_k
 | `elevation_deg` | float (°) | yes | -90..90 | Altitude above horizon. Negative = below horizon → `BELOW`. |
 | `magnitude` | float | no | -30..30 | Apparent magnitude (Jupiter ≈ -2.9 to -1.6 in practice). Stored ×10 fixed-point on-device for float-free render (NFR-1.3). Renders `MAG -2.1`, or `MAG ?` when absent. |
 | `distance_au` | float (AU) | no | 0..100 | Earth–Jupiter distance (≈ 4..6 AU in practice). Renders `DIST 5.4AU`, or `DIST ?` when absent. |
-| `constellation_index` | int | no | 0..87 (= `constellations_iau::kCatalogCount-1`) | Index into the same IAU catalog used by `observatory/constellation` (sorted `And`, `Ant`, ... `Vol`). When present + Jupiter is above the horizon but the observer isn't dark enough yet, the line-3 readout becomes `IN <IAU>` (e.g. `IN TAU`) instead of the bare `DAY` placeholder. Out-of-range demotes to "absent". |
+| `constellation_index` | int | yes | 0..87 (= `constellations_iau::kCatalogCount-1`) | Index into the same IAU catalog used by `observatory/constellation` (sorted `And`, `Ant`, ... `Vol`). When Jupiter is above the horizon but the observer isn't dark enough yet, the line-3 readout is `IN <IAU>` (e.g. `IN TAU`). Missing or out-of-range rejects the whole payload. |
 
-If either **required** field is missing, malformed, or out of range,
+If any **required** field is missing, malformed, or out of range,
 the whole payload is dropped per FR-1.3 / FR-1.4. Out-of-range
 optional fields are demoted to "absent" without rejecting the rest
 (same partial-update pattern as `observatory/iss`'s `crew_count`).
@@ -225,8 +225,7 @@ The line-3 readout is one of:
 |---|---|
 | Above horizon AND sun ≤ −6° | `VIS BBBxEE` (e.g. `VIS 090x45`) |
 | Below horizon | `BELOW` |
-| Above horizon, sun > −6°, `constellation_index` present | `IN <IAU>` (e.g. `IN TAU`) |
-| Above horizon, sun > −6°, no constellation pushed | `DAY` |
+| Above horizon, sun > −6° | `IN <IAU>` (e.g. `IN TAU`) |
 | No fresh data | `WAIT` |
 
 Snapshot is treated as fresh for **1 h** (`jupiter_state::kFreshMs`).
@@ -238,7 +237,7 @@ Director.
 
 ```bash
 mosquitto_pub -t observatory/jupiter -m '{"bearing_deg":90,"elevation_deg":45,"magnitude":-2.1,"distance_au":5.4,"constellation_index":76}'
-mosquitto_pub -t observatory/jupiter -m '{"bearing_deg":270,"elevation_deg":-12}'
+mosquitto_pub -t observatory/jupiter -m '{"bearing_deg":270,"elevation_deg":-12,"constellation_index":58}'
 ```
 
 ### `observatory/constellation` — Director-pushed selector for the `constellation_now` scene

@@ -16,8 +16,9 @@ struct State {
   bool     have_magnitude   = false;
   int16_t  magnitude_x10    = 0;
   bool     have_distance    = false;
-  uint16_t distance_au_x10  = 0;  bool     have_constellation   = false;
-  uint8_t  constellation_index  = 0;};
+  uint16_t distance_au_x10  = 0;
+  uint8_t  constellation_index  = 0;
+};
 
 State   s_state;
 mutex_t s_mutex;
@@ -31,7 +32,7 @@ void init() {
 void set_from_mqtt(int16_t bearing_deg, int8_t elevation_deg,
                    bool have_magnitude, int16_t magnitude_x10,
                    bool have_distance, uint16_t distance_au_x10,
-                   bool have_constellation, uint8_t constellation_index,
+                   uint8_t constellation_index,
                    uint32_t now_ms) {
   mutex_enter_blocking(&s_mutex);
   s_state.have                 = true;
@@ -42,8 +43,7 @@ void set_from_mqtt(int16_t bearing_deg, int8_t elevation_deg,
   s_state.magnitude_x10        = have_magnitude ? magnitude_x10   : 0;
   s_state.have_distance        = have_distance;
   s_state.distance_au_x10      = have_distance ? distance_au_x10 : 0;
-  s_state.have_constellation   = have_constellation;
-  s_state.constellation_index  = have_constellation ? constellation_index : 0;
+  s_state.constellation_index  = constellation_index;
   mutex_exit(&s_mutex);
 }
 
@@ -60,7 +60,6 @@ bool get(uint32_t now_ms, Snapshot* out) {
       out->magnitude_x10        = s_state.magnitude_x10;
       out->have_distance        = s_state.have_distance;
       out->distance_au_x10      = s_state.distance_au_x10;
-      out->have_constellation   = s_state.have_constellation;
       out->constellation_index  = s_state.constellation_index;
       out->set_at_ms            = s_state.set_at_ms;
     }

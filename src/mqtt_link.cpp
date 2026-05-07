@@ -541,30 +541,31 @@ void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
     }
   }
 
-  // Optional constellation_index — same encoding as the
+  // Required constellation_index — same encoding as the
   // observatory/constellation topic (index into the 88-entry IAU
-  // catalog in include/stars.h). When present + Jupiter is above
-  // the horizon but the observer is still in daylight, the scene's
-  // line-3 readout shows `IN <IAU>` (e.g. `IN TAU`) instead of the
-  // bare `DAY` placeholder. Out-of-range demotes to "absent".
-  bool    have_constellation  = false;
-  uint8_t constellation_index = 0;
-  if (doc["constellation_index"].is<int>()) {
-    const long ci = doc["constellation_index"].as<long>();
-    if (ci >= 0 && ci <= 87) {
-      have_constellation  = true;
-      constellation_index = static_cast<uint8_t>(ci);
-    } else {
-      Serial.print("[mqtt] jupiter constellation_index out-of-range=");
-      Serial.println(ci);
-    }
+  // catalog in include/stars.h). Drives the scene's daylight
+  // readout `IN <IAU>` (e.g. `IN TAU`). Missing or out-of-range
+  // rejects the whole payload per FR-1.3 / FR-1.4.
+  if (!doc["constellation_index"].is<int>()) {
+    ++s_jupiter_rejects;
+    Serial.print("[mqtt] jupiter missing constellation_index payload=");
+    Serial.println(buf);
+    return;
   }
+  const long ci_in = doc["constellation_index"].as<long>();
+  if (ci_in < 0 || ci_in > 87) {
+    ++s_jupiter_rejects;
+    Serial.print("[mqtt] jupiter constellation_index out-of-range=");
+    Serial.println(ci_in);
+    return;
+  }
+  const uint8_t constellation_index = static_cast<uint8_t>(ci_in);
 
   jupiter_state::set_from_mqtt(static_cast<int16_t>(b),
                                static_cast<int8_t>(e),
-                               have_magnitude,     magnitude_x10,
-                               have_distance,      distance_au_x10,
-                               have_constellation, constellation_index,
+                               have_magnitude, magnitude_x10,
+                               have_distance,  distance_au_x10,
+                               constellation_index,
                                now_ms);
   Serial.print("[mqtt] jupiter applied bearing=");
   Serial.print(b);
@@ -578,10 +579,8 @@ void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
     Serial.print(" dist_au=");
     Serial.print(distance_au_x10 / 10.0f);
   }
-  if (have_constellation) {
-    Serial.print(" con_idx=");
-    Serial.print(constellation_index);
-  }
+  Serial.print(" con_idx=");
+  Serial.print(constellation_index);
   Serial.println();
 }
 
