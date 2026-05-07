@@ -69,10 +69,12 @@ Pipeline switches (all default off; any combination is fine):
                            and assert it ran ≤ 60 s ago.
   --verify-publisher       Force-call each pyscript publisher
                            (jupiter / moon / constellation) and
-                           grep /api/error_log to confirm each
-                           one actually published. Closes the
-                           gap that --verify-published can't see
-                           (pyscript triggers aren't HA
+                           verify each one actually published by
+                           reading the witness state entity
+                           `pyscript.observatory_publisher_*` and
+                           confirming `last_changed` advanced.
+                           Closes the gap that --verify-published
+                           can't see (pyscript triggers aren't HA
                            automation entities).
   --all                    Run --install → --install-publisher →
                            check_config → --reload →
@@ -139,8 +141,8 @@ Optional no-UI pipeline (any combination of flags, or --all):
  11.   /api/states/<entity> last_triggered    (--verify-published)
                                               checks ≤ 60 s ago
  11a.  service: pyscript.publish_* × 3 +      (--verify-publisher)
-       /api/error_log grep                    proves each pyscript
-                                              topic actually pushed
+       /api/states/pyscript.observatory_*       proves each pyscript
+       last_changed advance                     topic actually pushed
 
 It deliberately does NOT try to create the MQTT integration via REST —
 HA exposes config flows only through the WebSocket API, and creating
@@ -910,17 +912,44 @@ def verify_publisher(ha: HA) -> bool:
     Pyscript auto-exposes every top-level `def` as a service in the
     `pyscript` domain, so we can fire publish_jupiter / _moon /
     _constellation directly — same trick as `automation.trigger` for
-    the YAML side. To prove the publish completed end-to-end (skyfield
-    loaded, mqtt.publish accepted, no exception swallowed) we then grep
-    the HA log via /api/error_log for the success line `_publish()`
-    emits:  `observatory_publisher: <topic> → <payload>`.
+    the YAML side.
 
-    /api/error_log returns the live homeassistant.log as plain text.
-    First publish can take 30–60 s on a cold pyscript install while
-    skyfield pip-installs and downloads the DE421 ephemeris (~17 MB),
-    so we retry the log-grep on a backoff up to ~90 s.
+    Verification reads a witness HA state entity that the publisher
+    sets on every successful publish (`pyscript.observatory_publisher_
+    <slug>`). We snapshot each entity's `last_changed` BEFORE firing,
+    then poll until it advances — proves the publish ran end-to-end
+    (skyfield loaded, mqtt.publish accepted, no exception swallowed)
+    without depending on /api/error_log (which 404s on some HA
+    configurations) or surviving log rotation. First publish can
+    take 30–60 s on a cold pyscript install while skyfield
+    pip-installs and downloads DE421 (~17 MB), so we poll up to 90 s.
     """
     step("11a", "Force-call pyscript publishers and verify each published")
+
+    # Snapshot the witness entity's last_changed BEFORE firing so we
+    # can prove the publish *advanced* it, not just that some old
+    # publish happened to be present. Missing entities (first run)
+    # snapshot as None — any timestamp counts as progress.
+    def _entity_for(topic: str) -> str:
+        # Mirror the slug rule in pyscript/observatory_publisher.py
+        # _publish(): "observatory/jupiter" → pyscript.observatory_publisher_jupiter
+        return "pyscript.observatory_publisher_" + topic.split("/", 1)[1]
+
+    def _last_changed(entity_id: str) -> datetime | None:
+        code, body = ha.get(f"/api/states/{entity_id}")
+        if code != 200 or not isinstance(body, dict):
+            return None
+        raw = body.get("last_changed")
+        if not isinstance(raw, str):
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    baseline: dict[str, datetime | None] = {}
+    for _, topic in PYSCRIPT_PUBLISHERS:
+        baseline[topic] = _last_changed(_entity_for(topic))
 
     fired: list[tuple[str, str]] = []
     for svc, topic in PYSCRIPT_PUBLISHERS:
@@ -943,40 +972,39 @@ def verify_publisher(ha: HA) -> bool:
     if not fired:
         return False
 
-    # The success log line lives inside a longer pyscript prefix; grep
-    # for the unique substring _publish() writes for each topic.
-    needles = {topic: f"observatory_publisher: {topic} →" for _, topic in fired}
-    seen: set[str] = set()
-
+    # Poll the witness entities until each one's last_changed has
+    # advanced past the baseline. First-publish skyfield install can
+    # take ~60 s; budget 90 s with a gentle backoff.
+    pending = {topic for _, topic in fired}
     deadline = time.monotonic() + 90.0
     backoff = 3.0
-    while time.monotonic() < deadline and len(seen) < len(needles):
+    while time.monotonic() < deadline and pending:
         time.sleep(backoff)
-        code, body = ha.get("/api/error_log")
-        if code != 200 or not isinstance(body, str):
-            warn(f"could not read /api/error_log (HTTP {code}); will retry")
-            backoff = min(backoff * 1.5, 15.0)
-            continue
-        for topic, needle in needles.items():
-            if topic in seen:
+        for topic in list(pending):
+            entity_id = _entity_for(topic)
+            current = _last_changed(entity_id)
+            if current is None:
                 continue
-            if needle in body:
-                ok(f"{topic}: published (matched log line)")
-                seen.add(topic)
-        if len(seen) < len(needles):
-            backoff = min(backoff * 1.5, 15.0)
+            base = baseline[topic]
+            if base is None or current > base:
+                ok(f"{topic}: {entity_id} advanced → publish succeeded")
+                pending.discard(topic)
+        backoff = min(backoff * 1.5, 15.0)
 
     all_ok = True
     for _, topic in fired:
-        if topic not in seen:
-            fail(f"{topic}: no `observatory_publisher: {topic} →` in the HA log")
+        if topic in pending:
+            entity_id = _entity_for(topic)
+            fail(f"{topic}: {entity_id} did not advance within 90 s")
             print("      Likely causes:")
             print("        • skyfield is still pip-installing / downloading DE421")
             print("          (re-run --verify-publisher in a minute)")
             print("        • observer lat/lon falls back to (0,0) — set")
             print("          Settings → System → General → Location")
-            print("        • mqtt.publish was called but rejected —")
-            print(f"          check {ha.url}/config/logs for `[mqtt]` errors")
+            print("        • observatory_publisher.py raised before _publish()")
+            print(f"          — check {ha.url}/config/logs for the traceback")
+            print("        • pyscript publisher not yet redeployed —")
+            print("          re-run with --install-publisher")
             all_ok = False
     return all_ok
 
@@ -1106,7 +1134,7 @@ def main() -> int:
     ap.add_argument(
         "--verify-publisher", action="store_true",
         help="Force-call each pyscript publisher (jupiter/moon/constellation)"
-             " and grep /api/error_log to confirm each one actually published.",
+             " and read the witness state entity to confirm each published.",
     )
     ap.add_argument(
         "--all", action="store_true",

@@ -290,15 +290,51 @@ def _observer_lat_lon():
 
 
 def _publish(topic, payload_dict):
-    """Wrapper around mqtt.publish that logs the outcome."""
+    """Wrapper around mqtt.publish that logs the outcome and writes a
+    success-witness HA state.
+
+    The state entity (`pyscript.observatory_publisher_<slug>`) carries
+    the ISO-8601 UTC timestamp of the last successful publish, with the
+    payload stashed in attributes for debugging. setup_mqtt.py's
+    --verify-publisher reads this entity's `last_changed` to prove the
+    publish actually happened end-to-end. State is more reliable than
+    log-grepping `/api/error_log` (that endpoint returns 404 in some
+    HA configurations) and survives log rotation.
+    """
+    # Slug: "observatory/jupiter" → "observatory_publisher_jupiter".
+    # Keeps every entity under one obvious prefix in Developer Tools →
+    # States so they're easy to find.
+    slug = "observatory_publisher_" + topic.split("/", 1)[1]
+    entity_id = f"pyscript.{slug}"
+
     if "_error" in payload_dict:
         log.error(f"observatory_publisher: {topic} skipped: {payload_dict['_error']}")
+        # Record the failure on the witness entity too — a stale
+        # last_changed + an _error attribute tells the operator the
+        # publisher fired but the compute failed (vs. didn't fire at all).
+        state.set(entity_id, "error", new_attributes={
+            "topic": topic,
+            "error": payload_dict["_error"],
+        })
         return
+
     payload = json.dumps(payload_dict, separators=(",", ":"))
     service.call(
         "mqtt", "publish",
         topic=topic, payload=payload, retain=False,
     )
+
+    # ISO-8601 UTC, second precision — matches HA's own datetime
+    # rendering and parses cleanly with datetime.fromisoformat() on
+    # both ends. We don't rely on this string for the freshness check
+    # (setup_mqtt reads `last_changed` from the state metadata), but
+    # it's handy in the UI.
+    from datetime import datetime, timezone
+    iso_now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    state.set(entity_id, iso_now, new_attributes={
+        "topic":   topic,
+        "payload": payload,
+    })
     log.info(f"observatory_publisher: {topic} → {payload}")
 
 
