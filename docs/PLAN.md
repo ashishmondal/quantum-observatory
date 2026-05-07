@@ -376,16 +376,22 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     Flash 25.5%); one layer of indirection now exists so D.2/D.3/D.6
     are local edits.
 
-- [ ] **D.2 Crossfade transitions** (FR-16.3)
+- [ ] **D.2 Fade-through-black transitions** (FR-16.3)
   - On `take_pending()`, instead of swapping `g_current_scene` instantly,
-    install a `CrossfadeLayer` in `LAYER_OVERLAY_TRANSITION` that owns
-    the outgoing scene + incoming scene + a 250 ms integer alpha ramp.
-    Both scenes render to scratch; the layer blends per pixel using a
-    Q8.8 alpha. After the ramp, `g_current_scene` becomes the incoming
-    scene and the crossfade layer self-removes. Hard-cut remains
-    available as a per-scene opt-out.
+    install a `FadeBlackLayer` in `LAYER_OVERLAY_TRANSITION` that runs a
+    250 ms integer alpha envelope: 0→255 over the first 125 ms (outgoing
+    fades to black via 8×8 Bayer dither), then `g_current_scene` swaps +
+    scene `init()` runs at the midpoint, then 255→0 over the next 125 ms
+    (incoming fades up). Only one scene renders per frame — no
+    off-screen scratch, no `Scene::render` signature change, no
+    framebuffer readback. The dither is a 64-byte `constexpr`
+    Bayer 8×8 matrix; each frame the layer walks the panel and writes
+    `0x0000` wherever `bayer8[x%8][y%8] < alpha`. After the envelope
+    completes, the layer self-removes. Hard-cut remains available as a
+    per-scene opt-out.
   - **Win:** publishing two `observatory/scene` messages back-to-back
-    produces a visible 250 ms fade between scenes instead of a hard cut.
+    produces a visible 250 ms fade-through-black between scenes
+    instead of a hard cut.
 
 - [ ] **D.3 Safety overrides as overlays** (FR-16.2)
   - Convert `NIGHT`, `OFFLINE`, `THERMAL_SAFE`, `SPLASH` from

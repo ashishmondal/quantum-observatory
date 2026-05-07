@@ -149,13 +149,27 @@ so Core 0's network jitter cannot perturb the frame.
   bit changes. FR-7.5 priority semantics (which overlay wins when two
   are simultaneously active) are preserved.
 
-- **FR-16.3 Scene crossfade transitions.** Scene swaps via
-  `take_pending()` SHALL render through a configurable transition
-  (default: alpha crossfade, ~250 ms, integer-only blend; see also FR-3.5
-  warp/dissolve catalog). Both the outgoing and incoming scenes SHALL
-  render to scratch state during the transition window; the compositor
-  SHALL blend per pixel. Hard-cut SHALL remain available as a transition
-  type for cases where pre-render is too expensive (FR-16.4 fallback).
+- **FR-16.3 Scene fade-through-black transitions.** Scene swaps via
+  `take_pending()` SHALL render through a fade-through-black transition
+  (~250 ms total, integer-only alpha, ~24 FPS): the *outgoing* scene
+  fades to black over the first half, then the *incoming* scene fades
+  in from black over the second half. The dispatcher swaps
+  `g_current_scene` exactly once at the half-way point; only one scene
+  renders per frame. No off-screen scratch buffers, no per-pixel cross
+  blend between two simultaneously-rendered scenes — this is the
+  v1 transition (chosen for memory and signature simplicity over a true
+  crossfade). The fade SHALL be implemented as a black overlay layer in
+  `LAYER_OVERLAY_TRANSITION` running an **8×8 ordered Bayer dither**:
+  each frame the layer walks the panel and over-writes pixels with
+  `0x0000` wherever `bayer8[x%8][y%8] < alpha_threshold` (alpha ramped
+  0..255 via integer math). This requires no framebuffer readback and
+  no `Scene::render` signature change — it draws on top of whatever
+  the active scene + chrome left in the live framebuffer. Hard-cut
+  SHALL remain available as a transition type for cases where the
+  fade-through-black aesthetic is not wanted (FR-16.4 fallback).
+  Future requirements MAY introduce additional transition types (true
+  crossfade, warp, dissolve per FR-3.5) once the off-screen rendering
+  plumbing exists.
 
 - **FR-16.4 Speculative pre-render.** During the frame-cap idle window
   on Core 1, the renderer SHALL invoke a `Scene::prepare(uint32_t now_ms)`
