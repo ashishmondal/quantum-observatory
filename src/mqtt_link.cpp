@@ -26,6 +26,11 @@
 #include "time_of_day.h"
 #include "wifi_link.h"
 
+// Core 1's render FPS, published once per second from loop1() in
+// main.cpp. Declared at file scope (NOT inside the anonymous namespace
+// below) so the symbol matches main.cpp's definition at link time.
+extern volatile uint32_t g_render_fps;
+
 namespace mqtt_link {
 
 namespace {
@@ -861,8 +866,14 @@ bool publish_status(uint32_t now_ms) {
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   StaticJsonDocument<kStatusJsonCapacity> doc;
 #pragma GCC diagnostic pop
-  doc["scene_id"]  = "n/a";  // TODO(P6): populate from scene_state::current()
-  doc["fps"]       = 0;       // TODO(P6): cross-core FPS report from Core 1
+  // Active scene id is owned by Core 1 (mark_current after a swap).
+  // The reverse-lookup table lives in scene_state alongside the
+  // forward MQTT decoder so the registry stays in one place.
+  doc["scene_id"]  = scene_state::string_from_id(scene_state::current());
+  // Render FPS is published by Core 1 every second into a single
+  // volatile uint32_t (atomic on RP2040, no mutex needed). Declared
+  // at file scope above; defined in main.cpp.
+  doc["fps"]       = static_cast<uint32_t>(g_render_fps);
   doc["rssi"]      = WiFi.RSSI();
   doc["uptime_s"]  = static_cast<uint32_t>(now_ms / 1000u);
   doc["free_heap"] = static_cast<uint32_t>(rp2040.getFreeHeap());
@@ -940,9 +951,21 @@ void poll(uint32_t now_ms) {
         // doesn't remember non-persistent sessions across our outages.
         // All three subscriptions go through the same on_mqtt_message
         // dispatcher, which routes by topic.
+        //
+        // QoS 1 (at-least-once) on every subscribe: HA publishes at
+        // qos:1 (see homeassistant/packages/quantum_observatory.yaml
+        // and pyscript/observatory_publisher.py), and effective QoS
+        // is min(publisher, subscriber). Subscribing at qos:0 would
+        // demote the broker → firmware leg back to fire-and-forget,
+        // which is exactly the failure mode we saw in the field
+        // (Jupiter screen showing stale az/el because the 15-min
+        // pyscript publish was dropped on a Wi-Fi blip). PubSubClient
+        // does not support qos:2; qos:1 is the strongest option here
+        // and the right one — duplicates are harmless because every
+        // payload handler is idempotent (replace-state semantics).
         const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicConstellation };
         for (const char* t : topics) {
-          if (s_client.subscribe(t)) {
+          if (s_client.subscribe(t, 1)) {
             Serial.print("[mqtt] sub ");
             Serial.println(t);
           } else {

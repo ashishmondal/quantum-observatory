@@ -9,15 +9,15 @@
 //   Core 1  → if (scene_state::take_pending(&id)) swap_to(id)
 //
 // take_pending() returns true exactly once per *effective* state
-// change. The effective scene is computed from two sources:
-//   1. mqtt_requested — what the Director (HA over MQTT) last asked for
-//   2. firmware-owned overrides (FR-7.5): night_active forces NIGHT
-//      regardless of mqtt_requested; thermal_active preempts even
-//      night with THERMAL_SAFE.
-// Resolution rule (firmware-owned safety > Director intent):
-//   resolved = thermal_active ? THERMAL_SAFE
-//            : night_active   ? NIGHT
-//            : mqtt_requested
+// change. Phase D.3 (FR-16.2) narrowed the meaning of "effective":
+// take_pending() now reflects only the Director's intent (the
+// `mqtt_requested` field). Firmware-owned overrides (night, thermal,
+// offline, splash) are layered as compositor overlays on top of the
+// Director scene by `SafetyOverlayLayer`, which reads the flags via
+// `read_overrides()`. The underlying scene continues to render and
+// animate while an overlay is engaged, so on override clear the user
+// sees a fade rather than a scene restart.
+//
 // Re-requesting the same scene is a no-op (no spurious re-init).
 // The "current" id is tracked separately in scene_state::current() so
 // status heartbeats (FR-5.4 territory) can report it without forcing
@@ -26,7 +26,8 @@
 // Adding a new scene id = (a) one enum value, (b) one case in the
 // dispatcher (main.cpp swap_to). Nothing in this header changes per
 // scene — keeps NFR-5.1 honest. (added in phase 4.2; night override
-// added in phase 5.5.1; thermal_safe override added in phase 5.5.2)
+// added in phase 5.5.1; thermal_safe override added in phase 5.5.2;
+// override-as-overlay model adopted in phase D.3)
 
 #pragma once
 
@@ -138,6 +139,12 @@ bool take_pending(SceneId* out);
 SceneId current();
 void    mark_current(SceneId id);  // Core 1 calls after a swap
 
+// Reader (Core 1). Snapshots all four firmware override flags under
+// a single mutex acquire, so the SafetyOverlayLayer's per-frame
+// "which override wins" decision sees a consistent view (FR-16.2).
+// Pass nullptr for any flag you don't care about. (added in phase D.3)
+void read_overrides(bool* splash, bool* thermal, bool* night, bool* offline);
+
 // Resolve a wire-format scene_id string (FR-1.2 / §6 registry) to a
 // SceneId. Returns true on hit and writes the value to *out; false
 // for unknown / empty / null strings (caller should log+drop per
@@ -145,5 +152,11 @@ void    mark_current(SceneId id);  // Core 1 calls after a swap
 // scene is one enum value + one row here + one case in the renderer
 // dispatcher (NFR-5.1 spirit). (added in phase 5.4)
 bool id_from_string(const char* s, SceneId* out);
+
+// Reverse of id_from_string — returns the wire-format string for a
+// SceneId, or "unknown" if the id isn't in the registry. Used by the
+// status heartbeat (§5.4) to report the active scene without the MQTT
+// layer needing to know about the registry table.
+const char* string_from_id(SceneId id);
 
 }  // namespace scene_state

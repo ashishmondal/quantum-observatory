@@ -393,7 +393,7 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     produces a visible 250 ms fade-through-black between scenes
     instead of a hard cut.
 
-- [ ] **D.3 Safety overrides as overlays** (FR-16.2)
+- [x] **D.3 Safety overrides as overlays** (FR-16.2)
   - Convert `NIGHT`, `OFFLINE`, `THERMAL_SAFE`, `SPLASH` from
     dispatcher-preempting `SceneId`s into compositor overlay layers
     (in `LAYER_OVERLAY_SAFETY`) with their own fade-in/fade-out
@@ -409,7 +409,7 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     uncover — the constellation animation continues from where it was,
     no restart. Same for thermal/offline/splash transitions.
 
-- [ ] **D.4 Seqlock cross-core snapshots** (FR-16.7)
+- [x] **D.4 Seqlock cross-core snapshots** (FR-16.7)
   - Introduce `seq_snapshot<T>` helper (single producer Core 0, single
     consumer Core 1, retry on torn read). Migrate the `scene_state`
     read path Core 1 uses each frame off `mutex_t` and onto seqlock.

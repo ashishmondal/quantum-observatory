@@ -319,9 +319,16 @@ def _publish(topic, payload_dict):
         return
 
     payload = json.dumps(payload_dict, separators=(",", ":"))
+    # qos=1 (at-least-once): qos:0 silently drops on any Wi-Fi blip
+    # between HA → broker → firmware, leaving the firmware stuck on
+    # the previous payload for up to `kFreshMs` of that topic (e.g.
+    # 24 h for jupiter/moon/constellation). One PUBACK round-trip per
+    # ≤hourly publish is a trivial cost for guaranteed delivery.
+    # Matches the qos:1 setting on every YAML mqtt.publish in
+    # ../packages/quantum_observatory.yaml.
     service.call(
         "mqtt", "publish",
-        topic=topic, payload=payload, retain=False,
+        topic=topic, payload=payload, retain=False, qos=1,
     )
 
     # ISO-8601 UTC, second precision — matches HA's own datetime

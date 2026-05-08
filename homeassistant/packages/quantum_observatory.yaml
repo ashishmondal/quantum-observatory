@@ -53,6 +53,19 @@
 # below all run on `homeassistant_started` so we cover that case
 # explicitly. Setting retain=true would also leak stale data after
 # any HA outage.
+#
+# All publishes use qos:1 (at-least-once). With qos:0 a transient
+# Wi-Fi blip on the firmware side or a momentary broker hiccup
+# silently drops the message; the firmware then keeps showing the
+# previous (now-stale) state for up to `kFreshMs` of that topic.
+# In the field this presented as Jupiter's screen showing the same
+# az/el long after a fresh publish was scheduled, because the 15-min
+# pyscript publish was lost in flight. qos:1 trades one PUBACK
+# round-trip for the broker actually retrying until the firmware
+# acknowledges — the right call for low-rate state topics like ours.
+# We do NOT use qos:2: the extra 4-way handshake buys nothing here
+# (idempotent state replaces idempotent state) and roughly doubles
+# broker load per message.
 
 # ---------------------------------------------------------------------
 # observatory/time — hourly RTC correction (FR-9.5)
@@ -77,6 +90,12 @@ automation observatory_time:
       - action: mqtt.publish
         data:
           topic: observatory/time
+          # qos: 1 — at-least-once. The firmware caches each topic
+          # for `kFreshMs` and falls back to a stale-data UI when no
+          # publish arrives in time, so a silently-dropped qos:0
+          # message can leave the wrong scene on screen for hours.
+          # qos:1 costs one extra PUBACK round-trip; worth it.
+          qos: 1
           # epoch_utc range per the doc: 2020-01-01..2100-01-01.
           # tz_offset_min: minutes east of UTC, signed. HA `now()` is
           # tz-aware by default (returns the configured local tz).
@@ -216,6 +235,7 @@ automation observatory_iss:
       - action: mqtt.publish
         data:
           topic: observatory/iss
+          qos: 1            # see observatory/time block for rationale
           payload: >-
             {{ {
               "lat_deg": lat,
@@ -352,6 +372,7 @@ automation observatory_evening_rotation:
       - action: mqtt.publish
         data:
           topic: observatory/scene
+          qos: 1            # see observatory/time block for rationale
           payload: >-
             {{ {
               "scene_id": scene_id,

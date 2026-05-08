@@ -1,7 +1,7 @@
 # Quantum Observatory — Requirements
 
-**Version:** 1.7
-**Status:** Draft — implementation in progress (P1–P3 landed; FR-12 color/background system landed; FR-13 splash + sky background landed; FR-15 theming system designed, implementation pending)
+**Version:** 1.8
+**Status:** Draft — implementation in progress (W1–W5 landed; FR-12 color/background system landed; FR-13 splash + sky background landed; FR-14 on-device astronomical computation landed for ISS/sun/moon; FR-15 theming system in progress (T.1–T.2 landed); FR-16 compositor in progress (D.1–D.2 landed))
 **Target hardware:** Raspberry Pi Pico W + Waveshare RGB-Matrix-P3 (64×32, FM6126A driver, HUB75)
 **Stack:** C++ on PlatformIO (earlephilhower Arduino-Pico core), Adafruit Protomatter, MQTT client, Home Assistant integration
 
@@ -35,15 +35,15 @@ The device also doubles as **the only clock in the room**. The current time MUST
 - **FR-2.4** All scenes SHALL be capped by a hard TTL (default 1 hour) to prevent permanent lock.
 
 ### FR-3 Rendering
-- **FR-3.1** The device SHALL maintain a target frame rate of **20–30 FPS** during normal operation.
-- **FR-3.2** The renderer SHALL composite three layers: Ambient (background), Information (text), Transition (effects).
+- **FR-3.1** The device SHALL maintain a target frame rate of **≥ 24 FPS** sustained during normal operation, with a per-frame budget aligned to a fixed `kFrameIntervalMs` (~41 ms).
+- **FR-3.2** The renderer SHALL composite an ordered layer stack — `[background] [scene foreground] [overlays] [chrome]` — every frame. Each layer owns its own animation clock. Detailed contract in FR-16.1; this clause is the high-level statement.
 - **FR-3.3** Text SHALL be drawn with a destructive halo / bounding box to remain legible over animated backgrounds.
-- **FR-3.4** The device SHALL support at minimum the following ambient backgrounds: 3-level parallax starfield, animated nebula (palette-cycled), static deep-sky starfield, palette-indexed bitmap (procedural), palette-indexed image (artist-supplied .bmp).
-- **FR-3.5** The device SHALL support at minimum the following transitions: instant cut, dissolve, warp.
-- **FR-3.6** The renderer SHALL provide a `gfx_test` diagnostic scene (FR-12.6) that exercises the smooth-gradient path and palette cycling and reports live FPS, so visual regressions can be caught with one MQTT command.
+- **FR-3.4** The device SHALL support at minimum the following ambient backgrounds: 3-level parallax starfield, animated nebula (palette-cycled), static deep-sky starfield, palette-indexed bitmap (procedural), palette-indexed image (artist-supplied .bmp), and sun-aware sky gradient (FR-13.2).
+- **FR-3.5** The device SHALL support at minimum the following transitions: **instant cut** and **fade-through-black** (FR-16.3, v1 default). Additional transitions (dissolve, warp, true crossfade) are reserved for future work once the off-screen rendering plumbing exists; they are not v1 requirements.
+- **FR-3.6** The renderer SHALL provide a `gfx_test` diagnostic scene (FR-12.6, FR-15.8) that exercises the smooth-gradient path, palette cycling, every theme ink/hint role, and the compositor overlay/transition layers (FR-16.10), and reports live FPS so visual regressions can be caught with one MQTT command.
 
 ### FR-4 Typography
-- **FR-4.1** The device SHALL render text using `Silkscreen` (5×7) for data and `Space Mono Bold` (or equivalent compact bold) for headers.
+- **FR-4.1** Font selection SHALL be owned by the active theme (FR-15) — scenes resolve fonts via `theme::font(role)`, never by direct `setFont(&...)`. The default theme (`apollo_amber`) SHALL ship with a compact 5×7 data font (`Silkscreen` or equivalent) and a bold header font (`Press Start 2P` or equivalent compact bold); other themes substitute as defined in [THEME.md](THEME.md).
 - **FR-4.2** Character set SHALL be ASCII 0–127, stored in flash (PROGMEM).
 - **FR-4.3** Display SHALL render at most **2 lines** of text simultaneously.
 - **FR-4.4** Text strings exceeding ~14 characters per line SHALL be truncated; truncation logic is the **Director's** responsibility, not the Pico's.
@@ -63,7 +63,7 @@ The device also doubles as **the only clock in the room**. The current time MUST
 - **FR-7.2** When the photoresistor reading drops below the configured night threshold (with hysteresis), the firmware SHALL switch to the dedicated `night` scene (low-light room-clock readout). When the reading rises back above `threshold + hysteresis`, the firmware SHALL revert to the previously active scene (or the default `clock` scene if none).
 - **FR-7.3** The firmware SHALL sample the on-board DS3231 on-die temperature register (0x11) at ≥ 0.1 Hz. When the reading exceeds the configured thermal threshold, the firmware SHALL switch to the dedicated `thermal_safe` scene (very-low-light + textual indication of overheat) until the reading drops below `threshold − hysteresis`.
 - **FR-7.4** Night and thermal thresholds SHALL be remotely tunable via MQTT — topic `observatory/night`, payload `{"threshold": N, "hysteresis": M}` (raw 12-bit ADC units for night; degrees Celsius for thermal via `observatory/thermal` with the same shape). HA owns policy; firmware owns the comparison and scene swap.
-- **FR-7.5** Mode priority (highest preempts lower): `thermal_safe` > `night` > MQTT-requested scene > default. Mode swaps SHALL bypass the FR-2 priority field — they are firmware-owned safety/ambient overrides, not Director intent.
+- **FR-7.5** Mode priority (highest preempts lower): `thermal_safe` > `night` > MQTT-requested scene > default. These modes are firmware-owned safety/ambient overrides and bypass the FR-2 Director priority field. Per FR-16.2, they SHALL be implemented as compositor overlays (not scene preemptions) so the underlying scene continues to animate behind them; the priority ordering above governs which overlay wins when multiple are simultaneously active.
 - **FR-7.6** On boot, before any successful sensor read, the firmware SHALL behave as if both modes are inactive (i.e. show the MQTT-requested or default scene). Defaults SHALL be conservative (night threshold so daylight does not trigger; thermal threshold well above ambient room temperature) and live in `config.h`.
 
 ### FR-8 Display Initialization
@@ -103,11 +103,21 @@ The device also doubles as **the only clock in the room**. The current time MUST
 - **FR-12.8** The asset import pipeline (FR-12.5) SHALL apply gamma correction (γ = 2.2) when packing 8-bit RGB triples to RGB565, so artist-supplied artwork looks perceptually correct on the panel's non-linear LED response.
 
 ### FR-13 Boot Splash & Sky Background
-- **FR-13.1** The firmware SHALL present a boot splash (`assets/observatory.bmp` rendered via FR-12.4 image background) from power-on until the first successful MQTT connect. The splash SHALL preempt every other scene including `night` and `thermal_safe` (highest-priority firmware override). Once cleared by the first connect, it SHALL be latched and never re-shown by subsequent disconnects.
+- **FR-13.1** The firmware SHALL present a boot splash (`assets/observatory.bmp` rendered via FR-12.4 image background) from power-on until the first successful MQTT connect. The splash SHALL preempt every other scene and overlay including `night` and `thermal_safe` (highest-priority firmware override). Per FR-16.2 it is implemented as a compositor overlay above all other safety overlays. Once cleared by the first connect, it SHALL be latched and never re-shown by subsequent disconnects.
 - **FR-13.2** The firmware SHALL provide a `sky` background that renders a sun-aware sky gradient driven by the live RTC time and a hardcoded observer latitude/longitude (Houston in v1; future MQTT-settable). Sun position SHALL use a low-precision NOAA solar model (±1°). The gradient SHALL select between five altitude bands (day / golden hour / civil / nautical / astronomical twilight) and interpolate top→bottom across the panel.
 - **FR-13.3** The sky background SHALL render the sun as a multi-tier disc (~9 px) with a vertical color gradient (pale on top, warm on bottom) that intensifies near the horizon to mimic atmospheric reddening. The sun's screen position SHALL trace a semi-elliptical arc using a linear azimuth→x mapping, clamped so the disc is never cropped at the panel edges.
 - **FR-13.4** The firmware SHALL provide a `sky_timelapse` debug scene that compresses one synthetic day into 10 seconds to allow visual validation of the FR-13.2/13.3 sky and sun rendering without waiting for real-time motion. It SHALL be selectable via the standard MQTT scene contract (FR-2).
 - **FR-13.5** The DS3231 read path (FR-9.5) SHALL include integrity defenses against transient I²C corruption: internal pull-ups via `gpio_pull_up()` (never `pinMode(INPUT_PULLUP)`, which breaks the I²C alt-function), per-burst sanity-clamp of BCD fields, two-burst consensus read (accept only if Δseconds ∈ [0,1]), and a poll-validated outer cadence that rejects any RTC value diverging from the projected time by more than 3 hours. Successful polls back off to a 1-hour cadence; rejected polls retry with exponential backoff capped at 1 hour.
+
+### FR-14 On-Device Astronomical Computation
+
+The Director (HA) is authoritative for *event* triggering (e.g. "ISS pass starts at 21:04:11 with max altitude 78°"), but several scenes need to evolve their visuals continuously between events without round-tripping HA every frame. Those derivations run on the device.
+
+- **FR-14.1** Sun position (altitude/azimuth) SHALL be computed on-device from the RTC time and a hardcoded observer latitude/longitude (Houston in v1; future MQTT-settable) using a low-precision NOAA solar model (±1°). This is the source for FR-13.2/13.3 and the sky-model snapshot in FR-16.5.
+- **FR-14.2** ISS look-angle (altitude/azimuth/range) and visibility classification (visible / daylight / shadow) SHALL be derived on-device for the duration of an active pass, given a pass envelope pushed by HA at pass start (TLE-derived rise/set times, max-altitude azimuth, crew count). The `iss_pass` scene consumes this derivation; HA is not polled per frame.
+- **FR-14.3** Jupiter visibility classification (above-horizon-and-dark / above-horizon-but-daylight / below-horizon) SHALL be derived on-device from Jupiter's RA/Dec (pushed by HA at low cadence — daily is sufficient), the RTC time, and the observer location. The `jupiter_visibility` scene consumes this derivation to decide between the headline framings ("Visible: East @ 9PM" vs. "Behind the Sun" vs. host constellation when above-horizon-but-daylight).
+- **FR-14.4** Moon phase (illuminated fraction, waxing/waning) SHALL be computed on-device from the RTC time using a closed-form approximation (≤ ±2% phase error). The `moon_phase` scene consumes this derivation; HA pushes only the moon's RA/Dec for altitude calculation when the scene needs "rise/set tonight" framing.
+- **FR-14.5** All FR-14 computations SHALL conform to NFR-1.3 (fixed-point math and/or precomputed LUTs; no software-emulated `float` in render loops). Trig and ephemeris work runs on Core 1 during slack windows (FR-16.5) and is published via the seqlock snapshot (FR-16.7).
 
 ### FR-15 Theming System
 Full design lives in [THEME.md](THEME.md); these are the contractual bullets.
@@ -339,11 +349,11 @@ scenes. `theme` is the active theme id (FR-15.7).
 | scene_id | bg_type | text_layout | notes |
 |---|---|---|---|
 | `boot` | starfield | "OBS" centered | shown at startup |
-| `splash` | image (observatory.bmp) | — | firmware override; shown until first MQTT connect (FR-13.1) |
+| `splash` | image (observatory.bmp) | — | firmware override; compositor overlay (FR-16.2), shown until first MQTT connect (FR-13.1) |
 | `clock` | sky | giant HH:MM + date line | default / idle scene (FR-9.4); sky bg per FR-13.2 |
-| `offline` | starfield_dim | local time | MQTT disconnect fallback |
-| `night` | black | dim HH:MM only | LDR-triggered (FR-7.2); preempts MQTT scenes |
-| `thermal_safe` | black | dim "COOL DOWN" + temperature | DS3231-triggered (FR-7.3); preempts everything except `splash` |
+| `offline` | starfield_dim | local time | MQTT disconnect fallback (FR-5.1); compositor overlay (FR-16.2) |
+| `night` | black | dim HH:MM only | LDR-triggered (FR-7.2); compositor overlay (FR-16.2), preempts MQTT scenes |
+| `thermal_safe` | black | dim "COOL DOWN" + temperature | DS3231-triggered (FR-7.3); compositor overlay (FR-16.2), preempts everything except `splash` |
 | `bg_starfield` | static deep-sky | — | static field + small twinkle overlay |
 | `bg_parallax` | parallax | — | 3-level scrolling stars |
 | `bg_nebula` | nebula | — | dynamic palette-cycled clouds (FR-12.3/12.4) |
@@ -362,13 +372,20 @@ All scenes above (except possibly `boot` during the splash window) carry the sta
 
 ## 7. Phased Roadmap
 
-| Phase | Deliverable | Exit criteria |
+The high-level roadmap below is intentionally coarse; the detailed,
+check-the-box implementation plan lives in [PLAN.md](PLAN.md) (Phases 0–9
+plus Phase T theming and Phase D compositor).
+
+| Wave | Theme | PLAN.md phases |
 |---|---|---|
-| **P1 — Dual-core split** | Core 0/1 IPC, dummy MQTT load | Starfield holds ≥ 25 FPS while Core 0 receives 5 msg/s |
-| **P2 — Graphics library** | Custom fonts, halo text, scene base class | "Hello" legible over moving stars |
-| **P2.5 — Clock substrate** | Time source, chrome clock readout, giant `clock` scene | Panel shows correct HH:MM in every scene; idle = giant clock |
-| **P3 — HA integration** | Real ISS/moon/planet sensors, MQTT topics | All registry scenes triggerable from HA |
-| **P4 — Polish** | Warp/dissolve transitions, auto-dim, OTA registry refresh | OTA scene addition without firmware reflash |
+| **W1 — Foundation & render plumbing** | Single-core scene engine, fonts, clock substrate, RTC | Phase 0–3.6 |
+| **W2 — Color & background system** | Split-palette LUT, BMP pipeline, gfx_test diagnostic | Phase 3.7 |
+| **W3 — Network MVP** | Dual-core split, Wi-Fi + MQTT, scene contract, night/thermal, RTC correction | Phase 4–5 |
+| **W4 — Scene lifecycle & resilience** | Priority preemption, TTL, sticky, offline, watchdog, splash, sky bg | Phase 6–6.5 |
+| **W5 — First real observatory scenes** | iss_pass, moon_phase, jupiter_visibility, constellation_now | Phase 7 |
+| **W6 — Theming system** | Five themes, MQTT-selectable, runtime BG duotone | Phase T |
+| **W7 — Compositor & idle-slack utilization** | Layer stack, fade transitions, overlays, sky-model on Core 1, toasts | Phase D |
+| **W8 — Polish & hardening** | OTA, registry-as-data, soak test, tag v1.0 | Phase 8–9 |
 
 ---
 

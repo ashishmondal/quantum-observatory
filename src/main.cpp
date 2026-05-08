@@ -20,6 +20,8 @@
 #include "moon_state.h"
 #include "scenes/scene.h"
 #include "scenes/layer.h"
+#include "scenes/fade_black_layer.h"
+#include "scenes/safety_overlay_layer.h"
 #include "scenes/background_scene.h"
 #include "scenes/boot_scene.h"
 #include "scenes/clock_scene.h"
@@ -139,15 +141,22 @@ public:
 
 static SceneFgLayer s_layer_fg;
 static ChromeLayer  s_layer_chrome;
+static FadeBlackLayer s_fade_black_layer;  // D.2 scene transition (FR-16.3)
+static SafetyOverlayLayer s_safety_overlay_layer;  // D.3 firmware overrides (FR-16.2)
+
+// Pending swap target stashed when a fade starts. The actual
+// g_current_scene swap is deferred to the fade midpoint so the panel
+// is fully black during init(), masking any first-frame jitter.
+static scene_state::SceneId s_fade_pending_id = scene_state::SceneId::CLOCK;
 
 // Compositor stack. Indexed by LayerSlot. Null entries are skipped.
 // File-scope so D.2/D.3/D.8 can install/remove layers from setter
 // functions without re-plumbing loop1().
 static Layer* g_layers[LAYER_COUNT] = {
-  &s_layer_fg,    // LAYER_FG
-  nullptr,        // LAYER_OVERLAY_SAFETY     (D.3)
-  nullptr,        // LAYER_OVERLAY_TRANSITION (D.2 / D.8)
-  &s_layer_chrome // LAYER_CHROME
+  &s_layer_fg,                 // LAYER_FG
+  &s_safety_overlay_layer,     // LAYER_OVERLAY_SAFETY     (D.3)
+  &s_fade_black_layer,         // LAYER_OVERLAY_TRANSITION (D.2 / D.8)
+  &s_layer_chrome              // LAYER_CHROME
 };
 
 // Phase 4.2 dispatcher — maps a stable SceneId to one of the file-scope
@@ -245,7 +254,11 @@ static volatile bool s_core0_ready = false;
 // mutex needed. Keeping ALL Serial output on Core 0 avoids USB CDC
 // interrupts disrupting Protomatter's PIO/DMA timing on Core 1 — the
 // otherwise-unexplained "subtle once-per-second flicker".
-static volatile uint32_t g_render_fps = 0;
+//
+// External linkage (NOT `static`) so mqtt_link.cpp can declare
+// `extern volatile uint32_t g_render_fps` and surface this in the
+// observatory/status heartbeat (§5.4).
+volatile uint32_t g_render_fps = 0;
 
 // Core 1 → Core 0 liveness heartbeat for the NFR-3.2 watchdog.
 // loop1() writes millis() every iteration (cheap — even when frame-
@@ -542,6 +555,36 @@ void loop() {
   }
 #endif
 
+  // Phase D.4 / FR-16.7 stress test: hammer scene_state::request() at
+  // 20 Hz alternating between two scenes, simulating a Director (or
+  // adversary) flooding observatory/scene. Validates that the seqlock
+  // read path on Core 1 (take_pending / read_overrides) doesn't stall
+  // on writer pressure \u2014 [render] fps=… should stay flat at the
+  // kFrameIntervalMs cap. Off by default; enable with
+  //   build_flags = -DCORE0_MQTT_FLOOD
+#ifdef CORE0_MQTT_FLOOD
+  {
+    static uint32_t s_flood_last_ms = 0;
+    static uint32_t s_flood_count = 0;
+    static uint32_t s_flood_log_ms = 0;
+    static bool     s_flood_toggle = false;
+    if (now_ms - s_flood_last_ms >= 50u) {  // 20 Hz
+      s_flood_last_ms = now_ms;
+      const auto id = s_flood_toggle ? scene_state::SceneId::CLOCK
+                                     : scene_state::SceneId::BG_NEBULA;
+      s_flood_toggle = !s_flood_toggle;
+      // priority 1 (default), short duration so tick() doesn't fight us.
+      scene_state::request(id, 1, 30, false);
+      ++s_flood_count;
+    }
+    if (now_ms - s_flood_log_ms >= 1000u) {
+      s_flood_log_ms = now_ms;
+      Serial.print("[flood] requests=");
+      Serial.println(static_cast<unsigned long>(s_flood_count));
+    }
+  }
+#endif
+
   // NFR-3.2 watchdog feed. Two states:
   //   (a) Boot window — Core 1 hasn't published a heartbeat yet
   //       (g_render_alive_ms == 0). Always feed so the WDT can't
@@ -591,6 +634,22 @@ void setup1() {
     Serial.print("[scene] active=");
     Serial.println(g_current_scene->name());
   }
+
+  // D.3: bind safety override scenes to the overlay layer and run
+  // their one-time init() (e.g. SplashScene resolves the observatory
+  // bitmap from the asset registry here). They render on top of the
+  // active fg scene whenever their flag is set; the dispatcher itself
+  // never points g_current_scene at them anymore.
+  if (g_status == PROTOMATTER_OK) {
+    s_splash_scene.init(matrix);
+    s_thermal_safe_scene.init(matrix);
+    s_night_scene.init(matrix);
+    s_offline_scene.init(matrix);
+    s_safety_overlay_layer.bind(&s_splash_scene,
+                                &s_thermal_safe_scene,
+                                &s_night_scene,
+                                &s_offline_scene);
+  }
 }
 
 void loop1() {
@@ -619,22 +678,48 @@ void loop1() {
   // atomic on RP2040, no mutex needed (same rationale as g_render_fps).
   g_render_alive_ms = now_ms;
 
-  // Phase 4.2: consume any pending scene change requested by Core 0.
-  // take_pending() returns true exactly once per request(), so we only
-  // re-init on actual transitions. Unknown ids leave the active scene
-  // alone (FR-1.3 spirit applied at the cross-core boundary).
-  scene_state::SceneId pending_id;
-  if (g_status == PROTOMATTER_OK && scene_state::take_pending(&pending_id)) {
-    Scene* next = scene_for(pending_id);
-    if (next != nullptr && next != g_current_scene) {
-      g_current_scene = next;
-      g_current_scene->init(matrix);
-      scene_state::mark_current(pending_id);
-      Serial.print("[scene] swap -> ");
-      Serial.println(g_current_scene->name());
-    } else if (next == nullptr) {
-      Serial.print("[scene] unknown id=");
-      Serial.println(static_cast<int>(pending_id));
+  // Phase 4.2 / D.2: consume any pending scene change requested by
+  // Core 0. With D.2 the swap is now gated by the fade-through-black
+  // envelope: if the fade is in flight, we hold off on take_pending()
+  // (so a queued request stays queued) and only actually swap
+  // g_current_scene at the envelope's midpoint, when the panel is
+  // fully black. Unknown ids leave the active scene alone (FR-1.3
+  // spirit applied at the cross-core boundary).
+  if (g_status == PROTOMATTER_OK) {
+    if (s_fade_black_layer.active()) {
+      // Mid-fade swap. ready_to_swap() returns true exactly once at
+      // the envelope midpoint, so the init() runs under fully-black
+      // panel and the new scene's first frame is invisible.
+      if (s_fade_black_layer.ready_to_swap(now_ms)) {
+        Scene* next = scene_for(s_fade_pending_id);
+        if (next != nullptr && next != g_current_scene) {
+          g_current_scene = next;
+          g_current_scene->init(matrix);
+          scene_state::mark_current(s_fade_pending_id);
+          Serial.print("[scene] swap -> ");
+          Serial.println(g_current_scene->name());
+        } else if (next == nullptr) {
+          Serial.print("[scene] unknown id=");
+          Serial.println(static_cast<int>(s_fade_pending_id));
+        }
+      }
+    } else {
+      scene_state::SceneId pending_id;
+      if (scene_state::take_pending(&pending_id)) {
+        Scene* next = scene_for(pending_id);
+        if (next != nullptr && next != g_current_scene) {
+          // Defer the actual swap to the fade midpoint. The fade
+          // layer takes over LAYER_OVERLAY_TRANSITION until the
+          // envelope completes (~250 ms).
+          s_fade_pending_id = pending_id;
+          s_fade_black_layer.start(now_ms);
+        } else if (next == nullptr) {
+          Serial.print("[scene] unknown id=");
+          Serial.println(static_cast<int>(pending_id));
+        }
+        // Same-scene re-request (next == g_current_scene): silently
+        // accepted by take_pending(); no fade, no init() rerun.
+      }
     }
   }
 
