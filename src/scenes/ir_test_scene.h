@@ -1,55 +1,57 @@
-// IR receiver POC scene.
+// IR remote learning wizard (phase IR.2).
 //
-// Diagnostic scene for phase IR.1 — turns the panel into a live readout
-// of the on-board IR receiver (GP28) so we can sit in front of the
-// device with a remote and characterise:
+// Replaces the bare phase-IR.1 logging POC. Walks the operator
+// through every button on the target Roku-style remote, captures one
+// clean NEC frame per prompt, then publishes the full capture set to
+// `observatory/debug` so the address + per-button command codes can
+// be lifted into `include/config.h` (FR-17.3) without retyping them
+// from a serial log.
 //
-//   - Does the receiver decode our remote at all? (proto / addr / cmd)
-//   - How well does it work against a bright HUB75 frame? (ghost-decode
-//     rate while no button is being pressed)
-//   - Does the AGC recover quickly between presses? (counters climb
-//     monotonically; missed presses show as a mismatch between what
-//     you press and what `decoded` increments by)
+// Selectable over MQTT via {"scene_id":"ir_test"}. wants_clock_chrome
+// is false so the chrome readout doesn't fight the prompts.
 //
-// Selectable over MQTT via {"scene_id": "ir_test"}. wants_clock_chrome
-// is false so the chrome readout doesn't fight the diagnostic text.
+// Workflow:
+//   1. init() resets ir_remote counters and the local capture table,
+//      arms a short grace period (300 ms) to flush any stale frames
+//      that arrived just before the scene came up.
+//   2. For each button in kButtons[] (HOME first, then arrows, OK,
+//      BACK, OPTIONS, REPLAY) the scene shows a "PRESS <NAME>"
+//      prompt and watches ir_remote::stats() for a single new
+//      non-repeat NEC frame with no parity/overflow flags.
+//   3. On capture: stash protocol/address/command/raw, show a brief
+//      "OK proto/addr/cmd" confirmation for ~1.2 s (which also
+//      swallows any held-down repeat frames so they don't leak into
+//      the next button), then advance.
+//   4. Once every button is captured, build a JSON payload with the
+//      address + per-button table and hand it to mqtt_link via
+//      queue_debug() (Core 1 → Core 0 SPSC, sentinel-0). The screen
+//      then sits on a "DONE — see observatory/debug" panel until the
+//      next scene swap.
 //
-// Layout (64x32):
+// Layout (64×32):
+//   row  0      brightness band (cycling nebula gradient) — kept
+//               from the IR.1 POC so we still capture EMI behaviour
+//               against a busy bright frame. Per FR-17.13 the
+//               90 %-of-30 reliability gate is met deliberately
+//               under this top-row noise + whatever scene the user
+//               flips to between learning sessions.
+//   rows  2..7  step header   "STEP n/N"  (Picopixel)
+//   rows  9..18 button name   centred in the default 5×7 GFX font
+//   rows 20..25 prompt or capture readout
+//                  prompt:  "PRESS NOW"
+//                  ok:      "P8 A055 C00A"
+//                  done:    "OK SEE MQTT"
+//   rows 27..31 progress dots (one per button) — empty/captured/
+//               current animations
 //
-//     row  0       brightness band: full-width nebula gradient cycling
-//                  left→right. Lets us watch ghost-decode rate against
-//                  a deliberately busy bright frame at the top of the
-//                  panel. (HUB75 EMI is brightness-correlated.)
-//     rows  2..6   "decoded=NNNN" big-ish (Picopixel ×1) running total
-//                  + a small 16-cell flash strip on the right edge that
-//                  blinks white on every new decode (visual "did it
-//                  fire?" for noisy environments).
-//     rows  8..12  "u=NN p=NN o=NN r=NN" — unknown / parity_failed /
-//                  overflow / repeats counters. Watch these climb on
-//                  their own with no remote pressed → that's EMI.
-//     rows 14..18  "P=NN A=XXXX C=XXXX" — most recent decode's
-//                  protocol (decode_type_t int), address, command.
-//                  P=8 = NEC (Roku family), P=9 = SONY, P=2 = RC5,
-//                  P=0 = UNKNOWN (likely noise).
-//     rows 20..24  "BITS=NN F=XX age=NNs" — bit-count, flag bitmask,
-//                  age of last decode in seconds. Age is useful for
-//                  the "is this remote even in the same room?" check.
-//     rows 26..31  health bar: green segment width = recent decode
-//                  rate, red segment width = recent unknown rate,
-//                  both relative to a 5 s rolling window. Eyeball
-//                  metric for "signal vs. noise" without reading
-//                  digits from across the room.
-//
-// All counter math reuses ir_remote::stats() — this scene is a pure
-// reader; ir_remote::poll() is still driven from main.cpp loop()
-// every iteration. The scene also calls ir_remote::reset_counters()
-// in init() so each visit starts from zero (FR-12.6 spirit: a
-// diagnostic scene's first frame should be a clean baseline).
+// All counters and last-decode reads come from ir_remote::stats();
+// the IR receiver is polled from main.cpp loop() on Core 0 as before.
 
 #pragma once
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <Adafruit_Protomatter.h>
 #include <Fonts/Picopixel.h>
@@ -57,7 +59,35 @@
 #include "color_palette.h"
 #include "config.h"
 #include "ir_remote.h"
+#include "mqtt_link.h"
 #include "scenes/scene.h"
+
+namespace ir_test_scene_detail {
+
+struct ButtonDef {
+  const char* short_name;   // shown on screen — uppercase, ≤ 8 chars
+  const char* json_key;     // emitted in observatory/debug payload
+};
+
+// FR-17.5 button mapping for the Roku-style 8-button remote, plus a
+// REPLAY button that some Roku models ship with. HOME first because
+// it's the unambiguous "anchor" press — if anything else were first
+// the operator might fumble between scene-trigger and learning.
+static constexpr ButtonDef kButtons[] = {
+    {"HOME",    "home"},
+    {"UP",      "up"},
+    {"DOWN",    "down"},
+    {"LEFT",    "left"},
+    {"RIGHT",   "right"},
+    {"OK",      "ok"},
+    {"BACK",    "back"},
+    {"OPTIONS", "options"},
+    {"REPLAY",  "replay"},
+};
+static constexpr uint8_t kButtonCount =
+    sizeof(kButtons) / sizeof(kButtons[0]);
+
+}  // namespace ir_test_scene_detail
 
 class IrTestScene : public Scene {
 public:
@@ -66,186 +96,279 @@ public:
 
   void init(Adafruit_Protomatter& matrix) override {
     (void)matrix;
-    m_init_ms          = 0;
+    using namespace ir_test_scene_detail;
+
     m_initialised      = false;
-    m_last_decoded     = 0;
-    m_flash_until_ms   = 0;
-    m_palette_shift    = 0;
+    m_init_ms          = 0;
     m_last_tick_ms     = 0;
-    // Snapshot the live counters so the on-screen "since you opened
-    // this scene" view starts at zero without losing any global
-    // history other consumers (none yet) might care about.
-    ir_remote::reset_counters();
-    // Five-second rolling window history (one slot per second).
-    for (auto& s : m_history) {
-      s.decoded_at_close = 0;
-      s.unknown_at_close = 0;
+    m_palette_shift    = 0;
+    m_current          = 0;
+    m_baseline_decoded = 0;
+    m_advance_at_ms    = 0;
+    m_published        = false;
+
+    for (uint8_t i = 0; i < kButtonCount; ++i) {
+      m_caps[i].captured = false;
+      m_caps[i].protocol = 0;
+      m_caps[i].address  = 0;
+      m_caps[i].command  = 0;
+      m_caps[i].raw      = 0;
     }
-    m_history_head        = 0;
-    m_window_open_at_ms   = 0;
-    m_window_decoded_base = 0;
-    m_window_unknown_base = 0;
+
+    // Wipe any stale decodes still in the global counters from a
+    // previous scene visit. The 300 ms grace below covers the case
+    // where a frame is mid-decode at scene-entry.
+    ir_remote::reset_counters();
   }
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
+    using namespace ir_test_scene_detail;
+
     if (!m_initialised) {
-      m_init_ms             = now_ms;
-      m_last_tick_ms        = now_ms;
-      m_window_open_at_ms   = now_ms;
-      m_initialised         = true;
+      m_init_ms          = now_ms;
+      m_last_tick_ms     = now_ms;
+      m_grace_until_ms   = now_ms + kGraceMs;
+      m_initialised      = true;
     }
 
     const ir_remote::Stats st = ir_remote::stats();
 
-    // --- Edge-detect new decodes for the flash strip ---------------------
-    // st.decoded is monotonic; on any climb, light the flash strip for
-    // a short visible window (~120 ms — long enough to see at 60 fps,
-    // short enough that a held-down repeat looks like a fast strobe).
-    if (st.decoded != m_last_decoded) {
-      m_last_decoded   = st.decoded;
-      m_flash_until_ms = now_ms + 120u;
+    // ---- Capture state machine -----------------------------------------
+    if (m_current < kButtonCount) {
+      const bool grace_done = static_cast<int32_t>(now_ms - m_grace_until_ms) >= 0;
+      const bool in_cooldown = (m_advance_at_ms != 0);
+      if (in_cooldown) {
+        // Holding the captured value on screen for kCooldownMs to (a)
+        // give the operator visual confirmation, (b) absorb any NEC
+        // repeat frames the held button is still emitting so they
+        // don't get attributed to the next prompt. Also swallow any
+        // new decodes that arrive in this window (advance baseline).
+        m_baseline_decoded = st.decoded;
+        if (static_cast<int32_t>(now_ms - m_advance_at_ms) >= 0) {
+          m_advance_at_ms = 0;
+          ++m_current;
+          // Reset baseline AGAIN at the moment we start watching for
+          // the next button — anything that arrived during the
+          // cooldown window is already absorbed above.
+          m_baseline_decoded = st.decoded;
+        }
+      } else if (grace_done && st.decoded > m_baseline_decoded) {
+        // A new decode landed since we started watching this button.
+        // FR-17.2 discipline: NEC only, no parity/overflow, ignore
+        // repeats (those are held-button artefacts, not first
+        // presses). On a reject we still bump the baseline so the
+        // next attempt is judged against this new high-water mark.
+        const auto& d = st.last;
+        const bool is_nec       = (d.protocol == /*decode_type_t::NEC*/8);
+        const bool parity_bad   = (d.flags & /*IRDATA_FLAGS_PARITY_FAILED*/0x04) != 0;
+        const bool overflowed   = (d.flags & /*IRDATA_FLAGS_WAS_OVERFLOW*/0x10) != 0;
+        const bool is_repeat    = (d.flags & /*IRDATA_FLAGS_IS_REPEAT*/0x01) != 0;
+        if (is_nec && !parity_bad && !overflowed && !is_repeat) {
+          Capture& c = m_caps[m_current];
+          c.captured = true;
+          c.protocol = d.protocol;
+          c.address  = d.address;
+          c.command  = d.command;
+          c.raw      = d.raw_data;
+          m_advance_at_ms = now_ms + kCooldownMs;
+        } else {
+          // Bad frame: bump baseline so we keep waiting for a clean
+          // one. The screen still says "PRESS <NAME>" — operator
+          // sees the press didn't take and tries again.
+          m_baseline_decoded = st.decoded;
+        }
+      } else if (!grace_done) {
+        // During the grace window, accept whatever counter value
+        // arrives so the post-grace baseline is "now" not "boot".
+        m_baseline_decoded = st.decoded;
+      }
+    } else if (!m_published) {
+      // Final state: publish exactly once. queue_debug() copies into
+      // a static buffer + arms a sentinel; Core 0's MQTT poll drains
+      // it on the next iteration. If MQTT is offline the payload is
+      // simply lost — the on-screen capture table is still readable
+      // by eye, and the operator can re-enter the scene.
+      build_and_queue_payload();
+      m_published = true;
     }
 
-    // --- Palette-cycle phase advance for the top brightness band --------
+    // ---- Top brightness band (EMI stress) ------------------------------
     const uint32_t dt = now_ms - m_last_tick_ms;
     m_last_tick_ms = now_ms;
     m_palette_shift += static_cast<uint16_t>((dt * 24u) / 1000u);
 
-    // --- 1 s window bookkeeping for the health bar ----------------------
-    while (now_ms - m_window_open_at_ms >= 1000u) {
-      m_history[m_history_head].decoded_at_close =
-          st.decoded - m_window_decoded_base;
-      m_history[m_history_head].unknown_at_close =
-          st.unknown - m_window_unknown_base;
-      m_history_head = static_cast<uint8_t>((m_history_head + 1u) % kHistoryLen);
-      m_window_open_at_ms   += 1000u;
-      m_window_decoded_base  = st.decoded;
-      m_window_unknown_base  = st.unknown;
-    }
-
-    // --- Draw -----------------------------------------------------------
     matrix.fillScreen(0x0000);
-
-    // Top brightness band — same EMI-stress trick as gfx_test, scoped
-    // to row 0 so it doesn't crowd the digits below.
     for (int x = 0; x < PANEL_WIDTH; ++x) {
       const uint16_t idx = static_cast<uint16_t>(x * 3);
       matrix.drawPixel(x, 0,
           palette::bg(palette::Id::NEBULA_CLOUDS, idx, m_palette_shift));
     }
 
+    // ---- Step header ---------------------------------------------------
     matrix.setFont(&Picopixel);
     matrix.setTextSize(1);
-
-    char line[24];
-
-    // Row of decode total + flash witness.
-    matrix.setTextColor(0xFFFF);
-    snprintf(line, sizeof(line), "dec %lu",
-             static_cast<unsigned long>(st.decoded));
-    matrix.setCursor(1, 6);
-    matrix.print(line);
-    if (now_ms < m_flash_until_ms) {
-      // Flash strip on the right — bright cyan so it pops against any
-      // residual band noise. Width scales with intensity (every
-      // PARITY_FAILED also counts as a decode, so this fires for
-      // those too — that's deliberate, the scene cares about
-      // "receiver activity" generally).
-      for (int x = PANEL_WIDTH - 8; x < PANEL_WIDTH; ++x) {
-        matrix.drawPixel(x, 5, 0x07FF);
-        matrix.drawPixel(x, 6, 0x07FF);
-      }
+    matrix.setTextColor(palette::fg(palette::Id::STAR_WHITE, 35));
+    char header[16];
+    if (m_current < kButtonCount) {
+      snprintf(header, sizeof(header), "STEP %u/%u",
+               static_cast<unsigned>(m_current + 1u),
+               static_cast<unsigned>(kButtonCount));
+    } else {
+      snprintf(header, sizeof(header), "DONE %u/%u",
+               static_cast<unsigned>(kButtonCount),
+               static_cast<unsigned>(kButtonCount));
     }
+    matrix.setCursor(1, 7);
+    matrix.print(header);
 
-    // Counter row — colour-coded to nudge the eye:
-    //   white  decoded summary (above)
-    //   amber  unknown / parity / overflow (warnings)
-    //   gray   repeats (informational, every held key spams these)
-    matrix.setTextColor(palette::fg(palette::Id::STAR_AMBER, 50));
-    snprintf(line, sizeof(line), "u%lu p%lu o%lu",
-             static_cast<unsigned long>(st.unknown),
-             static_cast<unsigned long>(st.parity_failed),
-             static_cast<unsigned long>(st.overflows));
-    matrix.setCursor(1, 12);
-    matrix.print(line);
+    // ---- Button name (default 5x7 font, large + readable) -------------
+    matrix.setFont(nullptr);
+    matrix.setTextSize(1);
+    const char* big = (m_current < kButtonCount)
+                          ? kButtons[m_current].short_name
+                          : "ALL OK";
+    const int big_w = static_cast<int>(strlen(big)) * 6;  // 5px + 1 spacing
+    int big_x = (PANEL_WIDTH - big_w) / 2;
+    if (big_x < 0) big_x = 0;
+    matrix.setTextColor(palette::fg(palette::Id::STAR_AMBER, 60));
+    matrix.setCursor(big_x, 11);
+    matrix.print(big);
 
-    matrix.setTextColor(palette::fg(palette::Id::STAR_WHITE, 30));  // dim
-    snprintf(line, sizeof(line), "rep %lu",
-             static_cast<unsigned long>(st.repeats));
-    matrix.setCursor(36, 12);
-    matrix.print(line);
-
-    // Last-decode protocol / addr / cmd. Only meaningful once we've
-    // had at least one decode this session.
+    // ---- Prompt / capture readout / done banner -----------------------
+    matrix.setFont(&Picopixel);
     matrix.setTextColor(0xFFFF);
-    if (st.decoded > 0u) {
-      snprintf(line, sizeof(line), "P%u A%04X C%04X",
-               static_cast<unsigned>(st.last.protocol),
-               static_cast<unsigned>(st.last.address),
-               static_cast<unsigned>(st.last.command));
-      matrix.setCursor(1, 18);
-      matrix.print(line);
-
-      const uint32_t age_s = (now_ms - st.last.at_ms) / 1000u;
-      snprintf(line, sizeof(line), "b%u f%02X %lus",
-               static_cast<unsigned>(st.last.num_bits),
-               static_cast<unsigned>(st.last.flags),
-               static_cast<unsigned long>(age_s));
-      matrix.setCursor(1, 24);
+    matrix.setCursor(1, 24);
+    char line[24];
+    if (m_current < kButtonCount) {
+      if (m_advance_at_ms != 0) {
+        // Cooldown: show the just-captured frame.
+        const Capture& c = m_caps[m_current];
+        snprintf(line, sizeof(line), "OK P%u A%03X C%03X",
+                 static_cast<unsigned>(c.protocol),
+                 static_cast<unsigned>(c.address) & 0xFFFu,
+                 static_cast<unsigned>(c.command) & 0xFFFu);
+        matrix.setTextColor(palette::fg(palette::Id::STAR_BLUE, 55));
+      } else {
+        snprintf(line, sizeof(line), "PRESS NOW");
+      }
       matrix.print(line);
     } else {
-      matrix.setTextColor(palette::fg(palette::Id::STAR_WHITE, 20));
-      matrix.setCursor(1, 18);
-      matrix.print("press a key");
-      matrix.setCursor(1, 24);
-      matrix.print("on remote...");
+      // Done: tell operator where to look.
+      matrix.setTextColor(palette::fg(palette::Id::STAR_AMBER, 50));
+      matrix.print("SEE observatory/debug");
     }
 
-    // Health bar — sum the rolling 5 s window. Green = good signal,
-    // red = noise. Caps at PANEL_WIDTH so a long-press repeat storm
-    // doesn't run off the panel.
-    uint32_t recent_decoded = 0;
-    uint32_t recent_unknown = 0;
-    for (const auto& s : m_history) {
-      recent_decoded += s.decoded_at_close;
-      recent_unknown += s.unknown_at_close;
-    }
-    const int green_w = clamp_to_panel(recent_decoded);
-    const int red_w   = clamp_to_panel(recent_unknown);
-    for (int y = 28; y < 31; ++y) {
-      for (int x = 0; x < green_w; ++x)               matrix.drawPixel(x, y, 0x07E0);
-      for (int x = 0; x < red_w; ++x)                 matrix.drawPixel(PANEL_WIDTH - 1 - x, y, 0xF800);
-    }
-    // Faint baseline so an empty bar is still visible.
-    for (int x = 0; x < PANEL_WIDTH; x += 4) {
-      matrix.drawPixel(x, 31, palette::fg(palette::Id::STAR_WHITE, 5));
+    // ---- Progress dots (one per button) -------------------------------
+    // 9 buttons × 6 px stride = 54 px → fits centred with margins.
+    constexpr int kDotStride = 6;
+    const int dots_w = kButtonCount * kDotStride - 2;
+    int dot_x = (PANEL_WIDTH - dots_w) / 2;
+    for (uint8_t i = 0; i < kButtonCount; ++i) {
+      uint16_t color;
+      if (m_caps[i].captured) {
+        color = palette::fg(palette::Id::STAR_BLUE, 50);  // done
+      } else if (i == m_current) {
+        // Pulse the current dot so it's clear which button is being asked for.
+        const uint8_t br = static_cast<uint8_t>(
+            20 + ((now_ms / 64u) & 0x1Fu));  // 20..51
+        color = palette::fg(palette::Id::STAR_AMBER, br);
+      } else {
+        color = palette::fg(palette::Id::STAR_WHITE, 6);  // pending
+      }
+      // 3x3 filled square for readability.
+      const int x0 = dot_x + i * kDotStride;
+      for (int dy = 0; dy < 3; ++dy) {
+        for (int dx = 0; dx < 3; ++dx) {
+          matrix.drawPixel(x0 + dx, 28 + dy, color);
+        }
+      }
     }
   }
 
 private:
-  static int clamp_to_panel(uint32_t v) {
-    return v >= static_cast<uint32_t>(PANEL_WIDTH)
-             ? PANEL_WIDTH
-             : static_cast<int>(v);
-  }
-
-  static constexpr uint8_t kHistoryLen = 5;  // 5 × 1 s windows
-  struct WindowSlot {
-    uint32_t decoded_at_close;
-    uint32_t unknown_at_close;
+  struct Capture {
+    bool     captured;
+    uint8_t  protocol;
+    uint16_t address;
+    uint16_t command;
+    uint32_t raw;
   };
 
-  bool        m_initialised        = false;
-  uint32_t    m_init_ms            = 0;
-  uint32_t    m_last_tick_ms       = 0;
-  uint16_t    m_palette_shift      = 0;
+  // Build the observatory/debug payload from the capture table and
+  // hand it to mqtt_link via the cross-core sentinel-0 buffer. Called
+  // exactly once when m_current == kButtonCount.
+  void build_and_queue_payload() {
+    using namespace ir_test_scene_detail;
 
-  uint32_t    m_last_decoded       = 0;
-  uint32_t    m_flash_until_ms     = 0;
+    // Local stack scratch — 640 B fits inside the kDebugPayloadCapacity
+    // (768 B) the publisher allocates, with margin for MQTT framing
+    // and any future extra fields.
+    static constexpr size_t kBufCap = 640;
+    char buf[kBufCap];
 
-  WindowSlot  m_history[kHistoryLen]{};
-  uint8_t     m_history_head       = 0;
-  uint32_t    m_window_open_at_ms  = 0;
-  uint32_t    m_window_decoded_base = 0;
-  uint32_t    m_window_unknown_base = 0;
+    // Top-level address = whichever capture's address shows up most
+    // often (operationally always the same, but the loop below
+    // tolerates a single misfire). Falls back to HOME's address.
+    uint16_t addr = m_caps[0].captured ? m_caps[0].address : 0;
+    int n = snprintf(buf, kBufCap,
+        "{\"event\":\"ir_learn\",\"address\":%u,\"button_count\":%u,"
+        "\"captures\":[",
+        static_cast<unsigned>(addr),
+        static_cast<unsigned>(kButtonCount));
+    if (n < 0 || n >= static_cast<int>(kBufCap)) return;
+
+    for (uint8_t i = 0; i < kButtonCount; ++i) {
+      const Capture& c = m_caps[i];
+      const int written = snprintf(
+          buf + n, kBufCap - static_cast<size_t>(n),
+          "%s{\"name\":\"%s\",\"proto\":%u,\"addr\":%u,\"cmd\":%u,\"raw\":%lu}",
+          (i == 0) ? "" : ",",
+          kButtons[i].json_key,
+          static_cast<unsigned>(c.protocol),
+          static_cast<unsigned>(c.address),
+          static_cast<unsigned>(c.command),
+          static_cast<unsigned long>(c.raw));
+      if (written < 0 || static_cast<size_t>(written) >= kBufCap - static_cast<size_t>(n)) {
+        // Truncation — bail out of the loop and close the JSON best-
+        // effort. The publish side log will still show whatever fit.
+        break;
+      }
+      n += written;
+    }
+
+    if (n + 3 < static_cast<int>(kBufCap)) {
+      buf[n++] = ']';
+      buf[n++] = '}';
+      buf[n]   = '\0';
+    } else {
+      // Worst-case overflow guard: clamp + close.
+      buf[kBufCap - 3] = ']';
+      buf[kBufCap - 2] = '}';
+      buf[kBufCap - 1] = '\0';
+    }
+
+    mqtt_link::queue_debug(buf);
+  }
+
+  // Grace period after init() before we accept input — covers the
+  // case where a frame is mid-decode at scene-entry. 300 ms = 1
+  // typical NEC frame + headroom.
+  static constexpr uint32_t kGraceMs    = 300;
+  // Time the captured-value confirmation stays on screen, also long
+  // enough to absorb any NEC repeat frames a held button is still
+  // emitting (~110 ms apart).
+  static constexpr uint32_t kCooldownMs = 1200;
+
+  bool        m_initialised      = false;
+  uint32_t    m_init_ms          = 0;
+  uint32_t    m_last_tick_ms     = 0;
+  uint16_t    m_palette_shift    = 0;
+  uint32_t    m_grace_until_ms   = 0;
+
+  Capture     m_caps[ir_test_scene_detail::kButtonCount]{};
+  uint8_t     m_current          = 0;   // index into kButtons; == count → done
+  uint32_t    m_baseline_decoded = 0;   // ir_remote::stats().decoded high-water
+  uint32_t    m_advance_at_ms    = 0;   // 0 = not in cooldown, else millis() target
+
+  bool        m_published        = false;
 };

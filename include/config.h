@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include "scene_state.h"  // SceneId — needed for kRemoteCycle[] (FR-17.6)
+
 // ---- HUB75 data pins ------------------------------------------------------
 #define PIN_R1   2
 #define PIN_G1   3
@@ -97,6 +99,53 @@
 // behaviour vs. a bright HUB75 frame is characterised, decoded events
 // will feed scene_state alongside the buttons.
 #define PIN_IR_RX  28
+
+// ---- IR remote button mapping (FR-17.3) ----------------------------------
+// Captured 2026-05 against the target Roku-style remote using the on-panel
+// IR-learning wizard (IrTestScene → observatory/debug). All eight buttons
+// share the same NEC address; the dispatch table in phase IR.3 will reject
+// any frame whose address byte doesn't match `IR_REMOTE_ADDR_EXPECTED`.
+//
+// Note: 0xC2EA is a 16-bit "extended NEC" address (the second address byte
+// is NOT the bitwise inverse of the first, so IRremote v4 reports the full
+// 16-bit pair as `decodedIRData.address` instead of an 8-bit value). The
+// FR-17.3 gate compares against the same 16-bit field, so the wider type
+// is what we want.
+//
+// REPLAY is intentionally absent — this particular Roku remote doesn't ship
+// with that key. The dispatch table in IR.3 simply omits it.
+#define IR_REMOTE_ADDR_EXPECTED  0xC2EA  // = 49898 dec
+
+#define kIrButtonHomeCmd     3
+#define kIrButtonUpCmd      25
+#define kIrButtonDownCmd    51
+#define kIrButtonLeftCmd    30
+#define kIrButtonRightCmd   45
+#define kIrButtonOkCmd      42
+#define kIrButtonBackCmd   102
+#define kIrButtonOptionsCmd 97
+
+// FR-17.6 — operator-facing scene cycle list for ▲/▼ on the IR remote.
+// Excludes firmware-owned overrides (BOOT, NIGHT, THERMAL_SAFE, OFFLINE,
+// SPLASH) and diagnostic scenes (GFX_TEST, IR_TEST) by design — these
+// shouldn't be reachable by accident from the couch. Append-only;
+// reorder = behaviour change for anyone who's memorised "▲ ▲ ▲ = Jupiter".
+//
+// Defined here (not in main.cpp) so future input modes (on-board
+// buttons FR-11, voice, etc.) can share the same list without
+// duplicating the policy. `inline constexpr` (C++17) gives the array
+// external linkage with one copy across all TUs that include this
+// header — `static constexpr` would emit a copy per .cpp.
+inline constexpr scene_state::SceneId kRemoteCycle[] = {
+    scene_state::SceneId::CLOCK,
+    scene_state::SceneId::MOON_PHASE,
+    scene_state::SceneId::JUPITER_VISIBILITY,
+    scene_state::SceneId::CONSTELLATION_NOW,
+    scene_state::SceneId::ISS_PASS,
+    scene_state::SceneId::SKY_TIMELAPSE,
+};
+inline constexpr uint8_t kRemoteCycleCount =
+    sizeof(kRemoteCycle) / sizeof(kRemoteCycle[0]);
 
 // ---- Observer location (sun position) ------------------------------------
 // Drives the sky-gradient + sun-arc background on the giant clock.

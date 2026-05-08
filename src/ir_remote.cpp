@@ -24,6 +24,15 @@ namespace {
 Stats s_stats{};
 bool  s_begun = false;
 
+// FR-17.5 dispatch table — installed by main.cpp::setup() via
+// set_dispatch(). Pointer + count + expected-address are file-static
+// so poll() can read them lock-free (Core 0 is the only writer AND
+// reader; no cross-core access).
+const DispatchEntry* s_dispatch_table   = nullptr;
+uint8_t              s_dispatch_count   = 0;
+uint16_t             s_expected_address = 0;
+bool                 s_dispatch_enabled = true;
+
 }  // namespace
 
 void begin() {
@@ -64,6 +73,43 @@ bool poll() {
     s_stats.last.flags     = d.flags;
     s_stats.last.at_ms     = millis();
 
+    // ---- FR-17.2 / FR-17.3 / FR-17.5 filter + dispatch ---------------
+    //
+    // Order matters: protocol/parity/overflow rejects come first
+    // (they're decided regardless of who's listening), then the
+    // address gate (a "this isn't my remote" signal), then the
+    // dispatch lookup (which can be disabled in-flight by the IR.2
+    // learning wizard via set_dispatch_enabled(false)).
+    const bool is_nec       = (d.protocol == NEC);
+    const bool parity_bad   = (d.flags & IRDATA_FLAGS_PARITY_FAILED) != 0;
+    const bool overflowed   = (d.flags & IRDATA_FLAGS_WAS_OVERFLOW)   != 0;
+    const bool is_repeat    = (d.flags & IRDATA_FLAGS_IS_REPEAT)      != 0;
+
+    do {
+      if (!is_nec || parity_bad || overflowed) break;  // already counted above
+      if (d.address != s_expected_address) {
+        ++s_stats.addr_rejected;
+        break;
+      }
+      if (!s_dispatch_enabled || s_dispatch_table == nullptr) break;
+
+      bool matched = false;
+      for (uint8_t i = 0; i < s_dispatch_count; ++i) {
+        const DispatchEntry& e = s_dispatch_table[i];
+        if (e.command != d.command) continue;
+        matched = true;
+        // FR-17.4: discrete actions ignore repeats so a long-press
+        // doesn't stampede. Continuous actions (none in v1) opt in.
+        if (is_repeat && !e.honour_repeats) break;
+        if (e.action != nullptr) {
+          e.action(d.address, d.command);
+        }
+        ++s_stats.accepted;
+        break;
+      }
+      if (!matched) ++s_stats.unmapped;
+    } while (false);
+
     IrReceiver.resume();   // arm for the next frame
   }
   return any;
@@ -79,8 +125,30 @@ void reset_counters() {
   s_stats.unknown        = 0;
   s_stats.parity_failed  = 0;
   s_stats.overflows      = 0;
+  s_stats.addr_rejected  = 0;
+  s_stats.unmapped       = 0;
+  s_stats.accepted       = 0;
   // Intentionally leave `last` populated so a reset between POC test
   // windows doesn't blank the most-recent-press readout.
+}
+
+void set_dispatch(const DispatchEntry* table, uint8_t count,
+                  uint16_t expected_address) {
+  if (count > kMaxDispatchEntries) count = kMaxDispatchEntries;
+  s_dispatch_table   = table;
+  s_dispatch_count   = count;
+  s_expected_address = expected_address;
+  Serial.print("[ir] dispatch installed entries=");
+  Serial.print(static_cast<int>(count));
+  Serial.print(" addr=0x");
+  Serial.println(static_cast<unsigned>(expected_address), HEX);
+}
+
+void set_dispatch_enabled(bool enabled) {
+  if (s_dispatch_enabled == enabled) return;
+  s_dispatch_enabled = enabled;
+  Serial.print("[ir] dispatch ");
+  Serial.println(enabled ? "enabled" : "disabled");
 }
 
 }  // namespace ir_remote

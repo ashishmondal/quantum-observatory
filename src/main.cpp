@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Adafruit_Protomatter.h>
+#include <WiFi.h>
 
 #include "config.h"
 #include "backgrounds.h"
@@ -23,6 +24,7 @@
 #include "scenes/scene.h"
 #include "scenes/layer.h"
 #include "scenes/fade_black_layer.h"
+#include "scenes/info_overlay_layer.h"
 #include "scenes/safety_overlay_layer.h"
 #include "scenes/background_scene.h"
 #include "scenes/boot_scene.h"
@@ -108,6 +110,7 @@ static Scene* g_current_scene = &s_giant_clock_scene;
 enum LayerSlot : uint8_t {
   LAYER_FG = 0,           // active scene draws bg+fg here (legacy path)
   LAYER_OVERLAY_SAFETY,   // night / thermal / offline / splash (D.3)
+  LAYER_OVERLAY_INFO,     // operator-triggered diagnostic overlay (IR.4)
   LAYER_OVERLAY_TRANSITION, // crossfades (D.2), toasts (D.8)
   LAYER_CHROME,           // shared HH:MM readout, future micro-indicators
   LAYER_COUNT
@@ -153,6 +156,32 @@ static SceneFgLayer s_layer_fg;
 static ChromeLayer  s_layer_chrome;
 static FadeBlackLayer s_fade_black_layer;  // D.2 scene transition (FR-16.3)
 static SafetyOverlayLayer s_safety_overlay_layer;  // D.3 firmware overrides (FR-16.2)
+static InfoOverlayLayer  s_info_overlay_layer;  // IR.4 operator diagnostic overlay (FR-17.8)
+
+// Cross-core IR.4 trigger. Core 0's action_ir_info_toggle() writes the
+// press timestamp; Core 1's InfoOverlayLayer edge-detects new values
+// and toggles the overlay envelope. Single naturally-aligned uint32 is
+// atomic on RP2040 — no mutex (CODING_PRACTICES §3, same pattern as
+// g_render_fps / g_render_alive_ms / g_first_frame_render_ms). Sentinel 0
+// = "no event ever fired" (matches the natural value at boot, so the
+// layer stays OFF until the first OK press).
+//
+// External linkage so info_overlay_layer.h can declare it via extern.
+volatile uint32_t g_info_overlay_event_ms = 0;
+
+// IR.4 diagnostic snapshot — Core 0 publishes these once per second
+// from the 1 Hz log tick; Core 1's InfoOverlayLayer reads them when
+// rendering the overlay. Published by Core 0 because the WiFi.* and
+// rp2040.getFreeHeap() entry points are not safe to call from Core 1
+// (radio SPI contention with the network stack; both cores hitting
+// the malloc subsystem). All four are naturally-aligned 32-bit
+// volatiles — atomic on RP2040 (CODING_PRACTICES §3). The four
+// values may be momentarily inconsistent across a publish boundary;
+// for a 5-second-visible diagnostic that's fine.
+volatile uint32_t g_info_ip          = 0;  // IPv4 packed: byte[0]<<0 | byte[1]<<8 | ...
+volatile int32_t  g_info_rssi_dbm    = 0;  // 0 when wifi not connected
+volatile uint32_t g_info_link_flags  = 0;  // bit 0 = wifi connected, bit 1 = mqtt connected
+volatile uint32_t g_info_free_heap_b = 0;  // bytes
 
 // Pending swap target stashed when a fade starts. The actual
 // g_current_scene swap is deferred to the fade midpoint so the panel
@@ -174,6 +203,7 @@ static volatile bool s_first_frame_pending = false;
 static Layer* g_layers[LAYER_COUNT] = {
   &s_layer_fg,                 // LAYER_FG
   &s_safety_overlay_layer,     // LAYER_OVERLAY_SAFETY     (D.3)
+  &s_info_overlay_layer,       // LAYER_OVERLAY_INFO       (IR.4)
   &s_fade_black_layer,         // LAYER_OVERLAY_TRANSITION (D.2 / D.8)
   &s_layer_chrome              // LAYER_CHROME
 };
@@ -209,6 +239,113 @@ static Scene* scene_for(scene_state::SceneId id) {
   }
   return nullptr;
 }
+
+// ─── IR remote dispatch (FR-17.5, phase IR.3) ────────────────────────
+//
+// Each accepted IR press lands in one of the action_ir_* functions
+// below via the dispatch table installed in setup(). All actions
+// route through scene_state::request() at the operator-cycle
+// priority/duration documented in FR-17.6 so a real Director-class
+// scene (e.g. iss_pass at priority 4) can still preempt.
+//
+// `kRemoteCycle` lives in config.h so any future input mode (on-board
+// buttons, voice, etc.) can share the same ordered list.
+static constexpr uint8_t  kRemoteCyclePriority = 1;     // FR-17.6
+static constexpr uint16_t kRemoteCycleDurationS = 120;  // FR-17.6
+
+// Find the cycle index of the currently-active scene. Returns
+// kRemoteCycleCount when the active scene isn't in the cycle list
+// (e.g. operator is sitting on GFX_TEST or an ISS_PASS preempt).
+static uint8_t remote_cycle_index_of_current() {
+  const scene_state::SceneId cur = scene_state::current();
+  for (uint8_t i = 0; i < kRemoteCycleCount; ++i) {
+    if (kRemoteCycle[i] == cur) return i;
+  }
+  return kRemoteCycleCount;
+}
+
+// Common backbone for ▲ (delta=+1) and ▼ (delta=-1). When the active
+// scene isn't in the cycle list, ▲ lands on entry 0 and ▼ on the last
+// entry — feels natural because the operator's mental model is "step
+// into the curated list".
+static void remote_cycle_step(int8_t delta) {
+  const uint8_t cur = remote_cycle_index_of_current();
+  uint8_t next;
+  if (cur == kRemoteCycleCount) {
+    next = (delta > 0) ? 0u : (kRemoteCycleCount - 1u);
+  } else {
+    // Modular step that handles delta=±1 without underflow on uint8_t.
+    next = static_cast<uint8_t>(
+        (cur + kRemoteCycleCount + (delta > 0 ? 1 : -1)) % kRemoteCycleCount);
+  }
+  scene_state::request(kRemoteCycle[next],
+                       kRemoteCyclePriority,
+                       kRemoteCycleDurationS,
+                       /*sticky=*/false);
+}
+
+static void action_ir_scene_next(uint16_t /*addr*/, uint16_t /*cmd*/) {
+  remote_cycle_step(+1);
+}
+static void action_ir_scene_prev(uint16_t /*addr*/, uint16_t /*cmd*/) {
+  remote_cycle_step(-1);
+}
+
+// FR-17.5 Back: clear any sticky scene + return to default CLOCK; also
+// dismiss the boot splash if it's still latched (covers a power-on
+// scenario where MQTT is unavailable and the operator wants to skip
+// the splash from the couch).
+static void action_ir_back(uint16_t /*addr*/, uint16_t /*cmd*/) {
+  scene_state::set_splash_active(false);
+  scene_state::clear_sticky();
+  // clear_sticky() is a no-op when no sticky is active — explicitly
+  // request CLOCK so non-sticky scenes also get sent home.
+  scene_state::request(scene_state::SceneId::CLOCK,
+                       kRemoteCyclePriority,
+                       kRemoteCycleDurationS,
+                       /*sticky=*/false);
+}
+
+// FR-17.5 Home: jump straight to default CLOCK without clearing any
+// sticky state. Behaves like Back for non-sticky scenes; for sticky
+// scenes (e.g. moon_phase) the sticky is preserved and a subsequent
+// scene cycle will return to it once Home's 120 s duration expires.
+static void action_ir_home(uint16_t /*addr*/, uint16_t /*cmd*/) {
+  scene_state::request(scene_state::SceneId::CLOCK,
+                       kRemoteCyclePriority,
+                       kRemoteCycleDurationS,
+                       /*sticky=*/false);
+}
+
+// FR-17.8 / IR.4 — toggle the diagnostic info overlay. Hand the press
+// timestamp to Core 1's InfoOverlayLayer via the cross-core volatile;
+// the layer's edge-detector treats any change as a toggle (visible →
+// fade out, hidden → fade in). Pin the value to >= 1 so a press at
+// millis() == 0 (impossible in practice, but defensive) doesn't look
+// like the boot sentinel. No publish-on-press — the action is
+// self-evident on the panel and IR.6 will add the chrome-flash
+// observability for mqtt-routed buttons separately.
+static void action_ir_info_toggle(uint16_t /*addr*/, uint16_t /*cmd*/) {
+  uint32_t ts = millis();
+  if (ts == 0u) ts = 1u;
+  g_info_overlay_event_ms = ts;
+}
+
+// FR-17.5 dispatch table. Pointer + count handed to ir_remote in
+// setup(); ir_remote stores the pointer (table outlives the program
+// because it's file-scope). `honour_repeats=false` everywhere because
+// every action is discrete (FR-17.4 — long-press must not stampede).
+// LEFT/RIGHT (theme cycle, IR.5) and OPTIONS (mqtt-routed, IR.6) are
+// intentionally absent — they're scheduled phases, not IR.4 scope.
+static constexpr ir_remote::DispatchEntry kIrDispatch[] = {
+    {kIrButtonUpCmd,      ir_remote::Lane::LOCAL, false, &action_ir_scene_next, "up"},
+    {kIrButtonDownCmd,    ir_remote::Lane::LOCAL, false, &action_ir_scene_prev, "down"},
+    {kIrButtonOkCmd,      ir_remote::Lane::LOCAL, false, &action_ir_info_toggle, "ok"},
+    {kIrButtonBackCmd,    ir_remote::Lane::LOCAL, false, &action_ir_back,       "back"},
+    {kIrButtonHomeCmd,    ir_remote::Lane::LOCAL, false, &action_ir_home,       "home"},
+};
+static constexpr uint8_t kIrDispatchCount =
+    sizeof(kIrDispatch) / sizeof(kIrDispatch[0]);
 
 // FM6126A / ICN2038 init sequence (required by the Waveshare P3 64x32 panel
 // before any image will appear). Ported verbatim from the working Waveshare
@@ -398,6 +535,12 @@ void setup() {
   // events are NOT yet wired into scene_state — that lands once the
   // EMI characterisation against bright HUB75 frames is complete.
   ir_remote::begin();
+  // FR-17.5 — install the local-fast dispatch table for IR.3. Each
+  // accepted press routes through scene_state::request() at priority
+  // 1 / duration 120 s so a real ISS pass (priority 4) can still
+  // preempt a couch-driven scene cycle (FR-17.6).
+  ir_remote::set_dispatch(kIrDispatch, kIrDispatchCount,
+                          IR_REMOTE_ADDR_EXPECTED);
 
   // Optional one-shot bootstrap. Define RTC_SEED_LOCAL_EPOCH (e.g. via
   // platformio.ini build_flags or secrets.h) to seed the chip with a
@@ -472,6 +615,16 @@ void loop() {
   // pending; counters surface in the 1 Hz [ir] log line below.
   ir_remote::poll();
 
+  // FR-17.5 / IR.3 — the IrTestScene learning wizard (phase IR.2)
+  // captures NEC frames directly off ir_remote::stats() and would be
+  // dragged out of its own sequence the moment a captured ▲/▼ press
+  // also fired the scene-cycle action. Disable dispatch whenever the
+  // wizard is the active scene; re-enable as soon as the operator
+  // leaves it. set_dispatch_enabled() is a same-state no-op so the
+  // per-iteration call is essentially free.
+  ir_remote::set_dispatch_enabled(
+      scene_state::current() != scene_state::SceneId::IR_TEST);
+
   // Phase 6.4: MQTT-disconnect override (FR-5.1). Edge-detect on
   // mqtt_link::connected() so we only wake the renderer when the
   // link state actually flips. set_offline_active() itself is
@@ -515,6 +668,25 @@ void loop() {
     // Serial output on Core 0 (Protomatter timing protection).
     Serial.print("[render] fps=");
     Serial.println(static_cast<unsigned long>(g_render_fps));
+
+    // IR.4 diagnostic snapshot publish (FR-17.8). Core 1's
+    // InfoOverlayLayer reads these atomically; recompute on the same
+    // 1 Hz cadence as the render-FPS log so the overlay's content is
+    // never more than a second stale. Cheap — four reads of state
+    // already in cache.
+    {
+      const IPAddress ip = WiFi.localIP();
+      g_info_ip = (static_cast<uint32_t>(ip[0])      ) |
+                  (static_cast<uint32_t>(ip[1]) <<  8) |
+                  (static_cast<uint32_t>(ip[2]) << 16) |
+                  (static_cast<uint32_t>(ip[3]) << 24);
+      g_info_rssi_dbm    = wifi_link::connected()
+                              ? static_cast<int32_t>(WiFi.RSSI())
+                              : 0;
+      g_info_link_flags  = (wifi_link::connected() ? 0x1u : 0u) |
+                           (mqtt_link::connected() ? 0x2u : 0u);
+      g_info_free_heap_b = static_cast<uint32_t>(rp2040.getFreeHeap());
+    }
 
     // FR-16.4 / phase D.7 — flush any pending first-frame timing.
     // One-shot: cleared after the print so a steady scene with no

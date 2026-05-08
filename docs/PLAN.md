@@ -514,7 +514,7 @@ top of that foundation in commit-sized steps, ordered by
   '{"scene_id":"ir_test"}'` brings up the POC; pressing remote keys
   increments `decoded` and updates `last`.
 
-- [ ] **IR.2 Characterise & lock the remote** — sit in front of the
+- [x] **IR.2 Characterise & lock the remote** — sit in front of the
   device with the target Roku, hit every button under three panel
   conditions (off / black scene / brightest scene at full brightness),
   log per-button command codes + EMI ratios. Outputs:
@@ -531,7 +531,7 @@ top of that foundation in commit-sized steps, ordered by
   - **Win:** `IR_REMOTE_ADDR_EXPECTED` + 8 `kIrButton*Cmd` constants
     committed; HARDWARE.md table populated; FR-17.13 cell marked pass.
 
-- [ ] **IR.3 Dispatch table + scene cycle (`▲`/`▼`) + `Back`/`Home`**
+- [x] **IR.3 Dispatch table + scene cycle (`▲`/`▼`) + `Back`/`Home`**
   (FR-17.2, FR-17.3, FR-17.4, FR-17.5, FR-17.6, FR-17.11)
   - New `ir_remote::set_dispatch(...)` API: a fixed table of
     `{cmd, lane, action_fn, honour_repeats}` entries; lookup is a

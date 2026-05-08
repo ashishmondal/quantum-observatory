@@ -258,9 +258,32 @@ Three HUB75-EMI failure modes the bare driver alone can't predict:
 
 POC pass criteria documented in [PLAN.md](PLAN.md) phase IR.1.
 
-### Roku remote caveat
+### Captured remote (locked 2026-05, phase IR.2)
 
-Roku ships two families:
+The target Roku-style 8-button remote was captured on the bench using the
+on-panel IR-learning wizard (`{"scene_id":"ir_test"}` → publishes to
+`observatory/debug`). All buttons share the NEC address `0xC2EA` (49898
+dec — extended NEC; the high byte is NOT the bitwise inverse of the low
+byte, so IRremote v4 reports the full 16-bit pair via
+`decodedIRData.address`). REPLAY is absent — this remote doesn't ship
+with that key.
+
+| Button   | NEC `cmd` (dec) | NEC `cmd` (hex) | `config.h` constant   |
+|----------|-----------------|-----------------|------------------------|
+| HOME     |   3             | 0x03            | `kIrButtonHomeCmd`    |
+| UP       |  25             | 0x19            | `kIrButtonUpCmd`      |
+| DOWN     |  51             | 0x33            | `kIrButtonDownCmd`    |
+| LEFT     |  30             | 0x1E            | `kIrButtonLeftCmd`    |
+| RIGHT    |  45             | 0x2D            | `kIrButtonRightCmd`   |
+| OK       |  42             | 0x2A            | `kIrButtonOkCmd`      |
+| BACK     | 102             | 0x66            | `kIrButtonBackCmd`    |
+| OPTIONS  |  97             | 0x61            | `kIrButtonOptionsCmd` |
+
+`IR_REMOTE_ADDR_EXPECTED = 0xC2EA` is the FR-17.3 gate the dispatch table
+will use in phase IR.3. Any frame whose `address` field doesn't match
+this value is dropped before reaching `action_fn`.
+
+### Roku remote caveat
 
 - **Standard IR remote** (no mic, no headphone jack) → 38 kHz NEC-ish,
   decodes fine.

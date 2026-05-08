@@ -12,6 +12,8 @@
 //
 // Publishes:
 //   observatory/status   — §5.4 heartbeat every 30 s
+//   observatory/debug    — phase IR.2 one-shot diagnostic dumps
+//                          (cross-core via queue_debug())
 //
 // All inbound payloads are validated per FR-1.3 / FR-1.4: malformed
 // JSON or out-of-range fields are logged and dropped, never
@@ -43,5 +45,17 @@ void poll(uint32_t now_ms);
 
 // True iff the broker session is up.
 bool connected();
+
+// Cross-core one-shot publish to `observatory/debug`. Safe to call
+// from Core 1 (e.g. from a scene's render() path). Copies `payload`
+// into a static buffer guarded by a sentinel-0 atomic flag; Core 0's
+// poll() drains and publishes on the next iteration when CONNECTED.
+// `payload` MUST be a complete JSON document (no envelope is added).
+// Truncated to the buffer capacity if oversize. If a previous
+// queue_debug() is still pending, this call overwrites it. Intended
+// for one-shot diagnostics (e.g. IR-learning capture dump), NOT
+// steady-state telemetry — use `observatory/status` for that.
+// (added in phase IR.2)
+void queue_debug(const char* payload);
 
 }  // namespace mqtt_link

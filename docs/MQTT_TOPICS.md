@@ -331,6 +331,52 @@ Published every 30 s.
 
 `theme` will join this payload once Phase T.4 lands (FR-15.7); it is omitted today.
 
+### `observatory/debug` — one-shot diagnostic dumps (phase IR.2)
+
+Published opportunistically by debug/diagnostic scenes when they have
+something to report — NOT a steady-state heartbeat. Each message is a
+self-describing JSON document with an `event` discriminator the
+listener can switch on; new event types may be added without bumping a
+version. Currently emitted by:
+
+- `IrTestScene` (the IR-learning wizard) on completion — one
+  `event: "ir_learn"` message containing the captured NEC address +
+  per-button command codes for the operator to lift into
+  `include/config.h` (FR-17.3).
+
+```json
+{
+  "event": "ir_learn",
+  "address": 85,
+  "button_count": 9,
+  "captures": [
+    { "name": "home",    "proto": 8, "addr": 85, "cmd": 10, "raw": 4244766975 },
+    { "name": "up",      "proto": 8, "addr": 85, "cmd":  6, "raw": 4244504831 },
+    { "name": "down",    "proto": 8, "addr": 85, "cmd":  7, "raw": 4244570367 }
+  ]
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `event` | string | discriminator — currently only `"ir_learn"` |
+| `address` | int | NEC address byte common to the captured remote (HOME's address; FR-17.3 expected-address gate uses this) |
+| `button_count` | int | number of capture slots in the table |
+| `captures[].name` | string | logical button name from the FR-17.5 mapping (`home`, `up`, `down`, `left`, `right`, `ok`, `back`, `options`, `replay`) |
+| `captures[].proto` | int | `decode_type_t` value (8 = NEC) |
+| `captures[].addr` | int | NEC address byte (will normally match top-level `address`) |
+| `captures[].cmd` | int | NEC command byte — the value to bake into `kIrButton<Name>Cmd` |
+| `captures[].raw` | long | low 32 bits of the protocol-specific payload (for debugging only) |
+
+QoS 0 / not retained — diagnostic dumps shouldn't persist on the broker.
+
+Subscribe with:
+```bash
+mosquitto_sub -t observatory/debug -v
+```
+then trigger `{"scene_id":"ir_test"}` and walk through every prompt on
+the panel.
+
 ---
 
 ## Reconnect Behaviour

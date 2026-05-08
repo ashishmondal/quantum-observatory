@@ -55,6 +55,7 @@ constexpr const char* kTopicMoon    = "observatory/moon";    // phase 7.2 follow
 constexpr const char* kTopicIss     = "observatory/iss";     // phase 7.1+ iss data path
 constexpr const char* kTopicJupiter = "observatory/jupiter"; // phase 7.3 jupiter data path
 constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
+constexpr const char* kTopicDebug   = "observatory/debug";   // phase IR.2 one-shot diagnostic dump (Pico → HA)
 
 // §5.4 example payload is ~85 bytes serialised. NFR-2.3 → max + 25%.
 // Using 256 here gives generous headroom for future fields without
@@ -68,10 +69,17 @@ constexpr size_t kStatusJsonCapacity = 256;
 // PubSubClient buffer when added to topic + framing below.
 constexpr size_t kSceneJsonCapacity = 384;
 
+// IR-learning capture dump (phase IR.2): up to ~9 buttons × ~55 B
+// each + envelope ≈ 550 B. 768 leaves ~25 % headroom for future
+// fields without crowding NFR-2.1.
+constexpr size_t kDebugPayloadCapacity = 768;
+
 // PubSubClient inbound/outbound share a single buffer. Must be ≥ the
 // largest payload + topic + a few bytes of MQTT framing. Sized to the
-// scene topic since that's bigger than the status payload.
-constexpr size_t kPubSubBufferSize = kSceneJsonCapacity + 64;
+// largest publish/subscribe payload across the whole topic surface.
+constexpr size_t kPubSubBufferSize =
+    (kSceneJsonCapacity > kDebugPayloadCapacity ? kSceneJsonCapacity
+                                                : kDebugPayloadCapacity) + 64;
 
 WiFiClient   s_tcp;
 PubSubClient s_client(s_tcp);
@@ -96,6 +104,19 @@ uint32_t s_jupiter_rejects   = 0;
 uint32_t s_constellation_msgs    = 0;
 uint32_t s_constellation_rejects = 0;
 uint32_t s_clear_msgs        = 0;
+
+// Cross-core one-shot debug publish buffer (phase IR.2). Single
+// producer (Core 1, e.g. IrTestScene), single consumer (Core 0's
+// poll() drain). Sentinel-0 atomic flag — non-zero = ready, 0 =
+// empty — matches CODING_PRACTICES §3 "One-shot diagnostics from
+// Core 1 use volatile uint32_t + sentinel 0". Buffer is filled
+// BEFORE the flag is set (writer side); reader treats a non-zero
+// flag as a happens-before for the buffer contents. Naturally-
+// aligned uint32_t writes are atomic on RP2040.
+char              s_debug_buf[kDebugPayloadCapacity];
+volatile uint32_t s_debug_pending = 0;
+uint32_t          s_debug_publishes = 0;
+uint32_t          s_debug_drops     = 0;
 
 // Tag identifying which §5.2 threshold topic a payload arrived on.
 // Drives the right setter + range validation in handle_thresholds().
@@ -1001,6 +1022,28 @@ void poll(uint32_t now_ms) {
         s_last_status_ms = now_ms;
         publish_status(now_ms);
       }
+      // Drain any pending cross-core debug payload (IrTestScene etc.).
+      // Sentinel-0 atomic; only Core 0 ever clears the flag, so the
+      // load-then-publish-then-store sequence is race-free against
+      // the Core 1 producer (which only WRITES, never reads).
+      if (s_debug_pending != 0) {
+        const bool ok = s_client.publish(kTopicDebug, s_debug_buf);
+        if (ok) {
+          ++s_debug_publishes;
+          Serial.print("[mqtt] pub ");
+          Serial.print(kTopicDebug);
+          Serial.print(' ');
+          Serial.print(strlen(s_debug_buf));
+          Serial.print("B payload=");
+          Serial.println(s_debug_buf);
+        } else {
+          ++s_debug_drops;
+          Serial.print("[mqtt] pub ");
+          Serial.print(kTopicDebug);
+          Serial.println(" FAILED");
+        }
+        s_debug_pending = 0;  // clear regardless — no retry path
+      }
       return;
 
     case State::DISCONNECTED:
@@ -1017,5 +1060,27 @@ void poll(uint32_t now_ms) {
 }
 
 bool connected() { return s_state == State::CONNECTED; }
+
+void queue_debug(const char* payload) {
+  if (payload == nullptr) return;
+  // Bounded copy + manual NUL — strncpy would memset the whole tail
+  // to zero on every call, which is wasted work for a 768 B buffer
+  // hit from a render frame. Truncation is silent (caller is expected
+  // to size their payload to the documented capacity); the publish-
+  // side log will still show the truncated string.
+  size_t n = 0;
+  while (n + 1 < sizeof(s_debug_buf) && payload[n] != '\0') {
+    s_debug_buf[n] = payload[n];
+    ++n;
+  }
+  s_debug_buf[n] = '\0';
+  // Publish AFTER the buffer is fully written. Single-writer,
+  // naturally-aligned 32-bit store is atomic on RP2040 — see
+  // CODING_PRACTICES §3 sentinel-0 pattern. Use millis() so
+  // consecutive bursts (which shouldn't happen but might during
+  // bring-up) get distinct values for log readability; OR with 1 so
+  // the sentinel is non-zero even when millis() happens to be 0.
+  s_debug_pending = millis() | 1u;
+}
 
 }  // namespace mqtt_link
