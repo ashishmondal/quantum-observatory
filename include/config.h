@@ -94,3 +94,18 @@
 #define LATITUDE_DEG          29.7604f
 #define LONGITUDE_DEG        -95.3698f
 #define LOCAL_TZ_OFFSET_MIN  -300       // CDT (UTC-5); use -360 for CST
+
+// ---- Compositor idle-slack budget (FR-16.9) ------------------------------
+// Per-frame headroom = `kFrameIntervalMs - render_time` (Core 1, integer
+// ms). The rolling average is published as `g_render_slack_ms` and
+// surfaced in the observatory/status heartbeat so HA can size new
+// layers / heavier scenes against actual measured budget.
+//
+// `kSlackFloorMs` is the minimum reported slack required before
+// optional Core-1 work runs (D.6 sky-model, D.7 Scene::prepare()).
+// Below the floor, those features SHALL skip the frame to preserve
+// FR-3.1's frame-rate target. The floor is intentionally generous (~20%
+// of the 42 ms frame budget) so a heavy scene can still spend the full
+// frame on itself without speculative work piling on. Consumers land in
+// D.6 and later — D.5 only publishes the measurement.
+#define RENDER_SLACK_FLOOR_MS_DEFAULT  8

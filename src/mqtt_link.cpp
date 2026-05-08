@@ -31,6 +31,12 @@
 // below) so the symbol matches main.cpp's definition at link time.
 extern volatile uint32_t g_render_fps;
 
+// Core 1's idle-slack telemetry (FR-16.9, phase D.5). Rolling 32-frame
+// average of `kFrameIntervalMs - render_time` in milliseconds. Same
+// atomic-uint32 contract as g_render_fps — published once per frame on
+// Core 1, read here without a mutex.
+extern volatile uint32_t g_render_slack_ms;
+
 namespace mqtt_link {
 
 namespace {
@@ -877,6 +883,10 @@ bool publish_status(uint32_t now_ms) {
   doc["rssi"]      = WiFi.RSSI();
   doc["uptime_s"]  = static_cast<uint32_t>(now_ms / 1000u);
   doc["free_heap"] = static_cast<uint32_t>(rp2040.getFreeHeap());
+  // Compositor idle-slack budget (FR-16.9 / phase D.5). Lets HA gauge
+  // how much per-frame headroom remains for adding new layers / heavier
+  // scenes without violating FR-3.1's 24 FPS target.
+  doc["render_slack_ms"] = static_cast<uint32_t>(g_render_slack_ms);
 
   char payload[kStatusJsonCapacity];
   const size_t n = serializeJson(doc, payload, sizeof(payload));

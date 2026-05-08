@@ -317,10 +317,19 @@ mosquitto_pub -t observatory/constellation -m '{"index":2,"highlight_star":-1}'
 Published every 30 s.
 
 ```json
-{ "scene_id": "n/a", "fps": 0, "rssi": -55, "uptime_s": 1234, "free_heap": 180000 }
+{ "scene_id": "clock", "fps": 24, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21 }
 ```
 
-> `scene_id` and `fps` are placeholder values today; populated in a later phase.
+| Field | Type | Notes |
+|---|---|---|
+| `scene_id` | string | active scene wire-id (matches `observatory/scene` payloads) |
+| `fps` | int | Core 1 rendered frames in the last 1 s window |
+| `rssi` | int (dBm) | Wi-Fi RSSI at heartbeat time |
+| `uptime_s` | int (sec) | `millis() / 1000` since boot |
+| `free_heap` | int (bytes) | `rp2040.getFreeHeap()` — track regressions per NFR-2.1 |
+| `render_slack_ms` | int (ms) | Rolling 32-frame average of `kFrameIntervalMs - render_time` on Core 1 (FR-16.9). High = idle headroom; falling toward 0 = scene is using the full frame budget. |
+
+`theme` will join this payload once Phase T.4 lands (FR-15.7); it is omitted today.
 
 ---
 
