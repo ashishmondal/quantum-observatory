@@ -380,3 +380,42 @@ automation observatory_evening_rotation:
               "duration": 300,
               "sticky": false
             } | tojson }}
+
+# ---------------------------------------------------------------------
+# observatory/theme — active retro sci-fi theme (FR-15.2 / phase T.4)
+# ---------------------------------------------------------------------
+#
+# An MQTT `select` entity exposes the five themes as a dropdown in HA.
+# The firmware boots to `apollo_amber` (FR-15.2 — no flash persistence)
+# and accepts the Director's choice on connect; it also echoes the
+# active theme back in `observatory/status.theme` (FR-15.7), which we
+# wire to `state_topic` + `value_template` so the UI reflects ground
+# truth instead of just the last button press.
+#
+# Firmware-side wire ids (lowercase enumerator names) are documented
+# in MQTT_TOPICS.md → `observatory/theme`. Keep `options` here in sync
+# with `theme::Id` in include/theme.h.
+#
+# command_template wraps the bare option string in the documented
+# `{"id":"..."}` envelope so the HA UI doesn't have to know about
+# JSON shape. retain: false matches every other observatory topic
+# (firmware caches in RAM; first publish on (re)connect re-establishes
+# state).
+
+mqtt:
+  select:
+    - name: "Observatory theme"
+      unique_id: observatory_theme
+      command_topic: observatory/theme
+      command_template: '{"id":"{{ value }}"}'
+      state_topic: observatory/status
+      value_template: "{{ value_json.theme | default('apollo_amber') }}"
+      qos: 1
+      retain: false
+      options:
+        - apollo_amber
+        - nostromo_green
+        - vectrex_neon
+        - blade_runner
+        - lcars_tos
+      icon: mdi:palette

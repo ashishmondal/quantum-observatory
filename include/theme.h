@@ -116,6 +116,15 @@ void set(Id id);
 // Reader. Cheap — single byte load.
 Id current();
 
+// Wire-id <-> Id mapping (FR-15.2). Wire ids are lowercase snake_case
+// matching the Id enumerators (`apollo_amber`, `nostromo_green`, ...).
+// id_from_string returns false on unknown / nullptr / empty input.
+// string_from_id returns "unknown" for an out-of-range id (defensive
+// — set() prevents it, but the heartbeat path should never crash on a
+// corrupt read).
+bool        id_from_string(const char* s, Id* out);
+const char* string_from_id(Id id);
+
 // Active-theme accessors. All read `current()` internally so callers
 // don't have to plumb Id through their call stacks.
 uint16_t        ink(Ink role);

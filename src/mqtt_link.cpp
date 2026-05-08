@@ -22,6 +22,7 @@
 #include "jupiter_state.h"
 #include "constellation_state.h"
 #include "moon_state.h"
+#include "theme.h"
 #include "thermal_monitor.h"
 #include "time_of_day.h"
 #include "wifi_link.h"
@@ -55,6 +56,7 @@ constexpr const char* kTopicMoon    = "observatory/moon";    // phase 7.2 follow
 constexpr const char* kTopicIss     = "observatory/iss";     // phase 7.1+ iss data path
 constexpr const char* kTopicJupiter = "observatory/jupiter"; // phase 7.3 jupiter data path
 constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
+constexpr const char* kTopicTheme   = "observatory/theme";   // FR-15.2 (phase T.4)
 constexpr const char* kTopicDebug   = "observatory/debug";   // phase IR.2 one-shot diagnostic dump (Pico → HA)
 
 // §5.4 example payload is ~85 bytes serialised. NFR-2.3 → max + 25%.
@@ -103,6 +105,8 @@ uint32_t s_jupiter_msgs      = 0;
 uint32_t s_jupiter_rejects   = 0;
 uint32_t s_constellation_msgs    = 0;
 uint32_t s_constellation_rejects = 0;
+uint32_t s_theme_msgs        = 0;
+uint32_t s_theme_rejects     = 0;
 uint32_t s_clear_msgs        = 0;
 
 // Cross-core one-shot debug publish buffer (phase IR.2). Single
@@ -696,6 +700,52 @@ void handle_constellation(char* buf, unsigned int length, uint32_t now_ms) {
   Serial.println();
 }
 
+// observatory/theme handler — FR-15.2 active-theme selector. Payload:
+//   {"id": "<theme_id>"}
+// The wire id is a lowercase enumerator name (e.g. "apollo_amber"); the
+// canonical mapping lives in theme::id_from_string. Unknown ids are
+// logged and dropped per FR-1.3 — the active theme keeps rendering.
+// theme::set() is itself idempotent (no-op when id is unchanged), so
+// HA echoing the current theme on reconnect is harmless. Per FR-15.4
+// the swap is next-frame, no scene re-init.
+void handle_theme(char* buf, unsigned int length) {
+  ++s_theme_msgs;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  StaticJsonDocument<96> doc;
+#pragma GCC diagnostic pop
+  const DeserializationError err = deserializeJson(doc, buf, length);
+  if (err) {
+    ++s_theme_rejects;
+    Serial.print("[mqtt] theme parse FAILED err=");
+    Serial.print(err.c_str());
+    Serial.print(" payload=");
+    Serial.println(buf);
+    return;
+  }
+
+  const char* wire_id = doc["id"] | static_cast<const char*>(nullptr);
+  if (wire_id == nullptr || wire_id[0] == '\0') {
+    ++s_theme_rejects;
+    Serial.print("[mqtt] theme missing id payload=");
+    Serial.println(buf);
+    return;
+  }
+
+  theme::Id id;
+  if (!theme::id_from_string(wire_id, &id)) {
+    ++s_theme_rejects;
+    Serial.print("[mqtt] theme unknown id=");
+    Serial.println(wire_id);
+    return;
+  }
+
+  theme::set(id);
+  Serial.print("[mqtt] theme applied id=");
+  Serial.println(wire_id);
+}
+
 // PubSubClient inbound callback. Runs on Core 0 from inside
 // PubSubClient::loop() (called from poll()) — same thread as the rest
 // of mqtt_link, so no locking needed against our own static state.
@@ -748,6 +798,10 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
   }
   if (strcmp(topic, kTopicConstellation) == 0) {
     handle_constellation(buf, length, millis());
+    return;
+  }
+  if (strcmp(topic, kTopicTheme) == 0) {
+    handle_theme(buf, length);
     return;
   }
   if (strcmp(topic, kTopicClear) == 0) {
@@ -908,6 +962,9 @@ bool publish_status(uint32_t now_ms) {
   // how much per-frame headroom remains for adding new layers / heavier
   // scenes without violating FR-3.1's 24 FPS target.
   doc["render_slack_ms"] = static_cast<uint32_t>(g_render_slack_ms);
+  // Active retro sci-fi theme id (FR-15.7 / phase T.4). Lets HA confirm
+  // the device's state without round-tripping observatory/theme.
+  doc["theme"] = theme::string_from_id(theme::current());
 
   char payload[kStatusJsonCapacity];
   const size_t n = serializeJson(doc, payload, sizeof(payload));
@@ -994,7 +1051,7 @@ void poll(uint32_t now_ms) {
         // does not support qos:2; qos:1 is the strongest option here
         // and the right one — duplicates are harmless because every
         // payload handler is idempotent (replace-state semantics).
-        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicConstellation };
+        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicConstellation, kTopicTheme };
         for (const char* t : topics) {
           if (s_client.subscribe(t, 1)) {
             Serial.print("[mqtt] sub ");

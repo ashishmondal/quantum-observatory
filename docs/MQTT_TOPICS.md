@@ -308,6 +308,31 @@ mosquitto_pub -t observatory/constellation -m '{"index":0,"highlight_star":1}'
 mosquitto_pub -t observatory/constellation -m '{"index":2,"highlight_star":-1}'
 ```
 
+### `observatory/theme` — active retro sci-fi theme (FR-15.2)
+
+```json
+{ "id": "apollo_amber" }
+```
+
+| Field | Type | Required | Range | Notes |
+|---|---|---|---|---|
+| `id` | string | yes | one of `apollo_amber`, `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos` | lowercase wire id matching `theme::Id` enumerators (FR-15.1). Unknown ids → drop (FR-1.3). |
+
+The swap takes effect at the next frame boundary with no scene re-init
+(FR-15.4). `theme::set()` is idempotent — re-publishing the active id
+is a no-op. The active theme is **not** persisted across reboots
+(FR-15.2 — no flash wear); the firmware boots to `apollo_amber` and
+HA is expected to push the desired theme on every reconnect.
+
+The active theme is echoed back in `observatory/status.theme`
+(FR-15.7) so the Director can confirm without round-tripping this
+topic.
+
+```bash
+mosquitto_pub -t observatory/theme -m '{"id":"apollo_amber"}'
+mosquitto_pub -t observatory/theme -m '{"id":"nostromo_green"}'
+```
+
 ---
 
 ## Publications (Pico → HA)
@@ -317,7 +342,7 @@ mosquitto_pub -t observatory/constellation -m '{"index":2,"highlight_star":-1}'
 Published every 30 s.
 
 ```json
-{ "scene_id": "clock", "fps": 24, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21 }
+{ "scene_id": "clock", "fps": 24, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber" }
 ```
 
 | Field | Type | Notes |
@@ -328,8 +353,7 @@ Published every 30 s.
 | `uptime_s` | int (sec) | `millis() / 1000` since boot |
 | `free_heap` | int (bytes) | `rp2040.getFreeHeap()` — track regressions per NFR-2.1 |
 | `render_slack_ms` | int (ms) | Rolling 32-frame average of `kFrameIntervalMs - render_time` on Core 1 (FR-16.9). High = idle headroom; falling toward 0 = scene is using the full frame budget. |
-
-`theme` will join this payload once Phase T.4 lands (FR-15.7); it is omitted today.
+| `theme` | string | active retro sci-fi theme wire-id (FR-15.7); matches `observatory/theme` payloads. |
 
 ### `observatory/debug` — one-shot diagnostic dumps (phase IR.2)
 

@@ -4,6 +4,8 @@
 
 #include "theme.h"
 
+#include <string.h>
+
 #include <Adafruit_GFX.h>      // GFXfont
 #include <Fonts/Picopixel.h>
 #include <Fonts/Tiny3x3a2pt7b.h>
@@ -92,9 +94,69 @@ constexpr Def kApollo = {
   /*bracket_close=*/ "]",
 };
 
-// Empty placeholder used until T.5 / T.7 land their real Defs. Until
-// then, set() will reject any non-Apollo id (clamped to APOLLO_AMBER)
-// so the live theme is always populated.
+// NOSTROMO_GREEN — 80s Alien CRT (THEME.md §2.2). Reuses Apollo's
+// font bindings in T.5; the BODY/HEADER per-theme typography swap
+// lands in T.6 once the new TTF roster is converted. Hints
+// SCANLINES + CURSOR_BLOCK are *declared* here so theme::has() reads
+// true; the actual layout primitives that consume them ship in T.7
+// (per the PLAN.md T.7 promise: "Each adds at least one new layout
+// hint primitive in gfx_text.h"). No visual loss in the meantime —
+// the green-on-black ink swap alone is what makes T.5's exit
+// criterion ("flips end-to-end inside one frame") readable from
+// across the room.
+//
+// Ink choices: phosphor green 0x07E0 dominates (chrome / header /
+// body / status_ok), dim green 0x0140 covers ghost / divider /
+// dim variants, yellow 0xFFE0 carries warn + alert (matches the
+// MU/TH/UR caution-stripe palette), pale green-white 0xDFFB pops as
+// ACCENT. SAFETY stays a deep red even under green CRT — it's a
+// hardware-safety signal, the Nostromo coolant-leak aesthetic
+// happens to read it the same way.
+constexpr Def kNostromo = {
+  /*inks=*/{
+    /*CHROME         */ 0x07E0,   // phosphor green
+    /*CHROME_HALO    */ 0x0000,
+    /*HEADER         */ 0x07E0,
+    /*HEADER_HALO    */ 0x0000,
+    /*HEADER_GLOW    */ 0x0000,   // no NEON_OUTLINE under Nostromo
+    /*HEADER_DIM     */ 0x0140,   // pulse-low for generic headers
+    /*BODY           */ 0x07E0,
+    /*BODY_HALO      */ 0x0000,
+    /*BODY_GLOW      */ 0x0000,
+    /*ACCENT         */ 0xDFFB,   // pale green-white pop
+    /*ACCENT_MAGENTA */ 0xFFE0,   // yellow caution-stripe (Alien CRT alt accent)
+    /*ALERT          */ 0xFFE0,   // yellow alert per THEME.md §2.2
+    /*GHOST          */ 0x0140,   // dim green LCD ghost
+    /*DIVIDER        */ 0x0140,
+    /*GIANT_DIGITS   */ 0x07E0,   // phosphor green giant clock
+    /*STATUS_OK      */ 0x07E0,
+    /*STATUS_OK_DIM  */ 0x0140,
+    /*STATUS_WARN    */ 0xFFE0,   // yellow
+    /*STATUS_WARN_DIM*/ 0x4200,   // dim yellow-olive
+    /*STATUS_INFO    */ 0x07E0,   // monochrome CRT — info reads as plain phosphor
+    /*STATUS_STALE   */ 0x2100,   // dim olive
+    /*STATUS_DIM     */ 0x0140,
+    /*LABEL          */ 0x0560,   // dim green label per THEME.md §2.2
+    /*VALUE          */ 0x07E0,
+    /*SAFETY         */ 0x4000,   // deep red — hardware-safety override, theme-agnostic
+  },
+  /*fonts=*/{
+    // T.5 reuses Apollo's font roster; T.6 swaps BODY → TomThumb +
+    // HEADER → VT323 once the new TTFs are converted.
+    /*MICRO */ &Tiny3x3a2pt7b,
+    /*BODY  */ &Picopixel,
+    /*HEADER*/ &FreeSansBold9pt7b,
+    /*CLOCK */ &digital_7__mono_14pt7b,
+  },
+  /*hint_mask=*/ bit(Hint::SCANLINES) | bit(Hint::CURSOR_BLOCK),
+  /*bracket_open=*/  ">",
+  /*bracket_close=*/ "_",
+};
+
+// Empty placeholder used until T.7 lands the real Defs for VECTREX /
+// BLADE_RUNNER / LCARS. Until then, those slots fall back to
+// neutral-ish defaults so a non-implemented id leaking through still
+// renders a readable panel.
 constexpr Def kPlaceholder = {
   /*inks=*/{
     // Order matches Ink enum (T.3b expansion). Neutral-ish defaults
@@ -117,7 +179,7 @@ constexpr Def kPlaceholder = {
 // Order MUST match Id enum.
 constexpr const Def* kThemes[static_cast<int>(Id::COUNT)] = {
   &kApollo,         // APOLLO_AMBER
-  &kPlaceholder,    // NOSTROMO_GREEN  (T.5)
+  &kNostromo,       // NOSTROMO_GREEN  (T.5)
   &kPlaceholder,    // VECTREX_NEON    (T.7)
   &kPlaceholder,    // BLADE_RUNNER    (T.7)
   &kPlaceholder,    // LCARS_TOS       (T.7)
@@ -171,6 +233,36 @@ bool has(Hint h) {
 
 const char* bracket_open()  { return active_def().bracket_open; }
 const char* bracket_close() { return active_def().bracket_close; }
+
+// Wire-id table. Order MUST match Id enum so a single index serves
+// both directions of the mapping. Strings are the lowercase enumerator
+// names per FR-15.2's example payload `{"id":"apollo_amber"}`.
+namespace {
+constexpr const char* kWireIds[static_cast<int>(Id::COUNT)] = {
+  "apollo_amber",     // APOLLO_AMBER
+  "nostromo_green",   // NOSTROMO_GREEN
+  "vectrex_neon",     // VECTREX_NEON
+  "blade_runner",     // BLADE_RUNNER
+  "lcars_tos",        // LCARS_TOS
+};
+}  // namespace
+
+bool id_from_string(const char* s, Id* out) {
+  if (s == nullptr || s[0] == '\0' || out == nullptr) return false;
+  for (uint8_t i = 0; i < static_cast<uint8_t>(Id::COUNT); ++i) {
+    if (strcmp(s, kWireIds[i]) == 0) {
+      *out = static_cast<Id>(i);
+      return true;
+    }
+  }
+  return false;
+}
+
+const char* string_from_id(Id id) {
+  const uint8_t i = static_cast<uint8_t>(id);
+  if (i >= static_cast<uint8_t>(Id::COUNT)) return "unknown";
+  return kWireIds[i];
+}
 
 palette::Id bg_palette_for(BgType bg) {
   // FR-15.6: APOLLO_AMBER is passthrough — return the palette id each
