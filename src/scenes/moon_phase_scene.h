@@ -36,7 +36,6 @@
 #include <stdio.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/Picopixel.h>
 
 #include "backgrounds/image_palette_bg.h"
 #include "bitmaps/_index.h"
@@ -44,6 +43,7 @@
 #include "config.h"
 #include "moon_state.h"
 #include "scene.h"
+#include "theme.h"
 #include "time_of_day.h"
 
 class MoonPhaseScene : public Scene {
@@ -162,17 +162,22 @@ public:
     const bool cursor_on = ((now_ms / 280u) & 1u) == 0u;
 
     // ── Custom monochrome ramp (FG region is ours per FR-12.1) ──────
-    // Plain RGB565 greyscale — the ILL/AGE lines need a clean
-    // 20%/80% split that none of the warm-grey moon palette stops
-    // happen to land on. The PHASE bar inverts (black on bright)
-    // so it pops as a "current state" badge, while ILL/AGE present
-    // dim labels next to bright values for at-a-glance readout.
+    // PHASE bar inverts (black on bright) so it pops as a "current
+    // state" badge; ILL/AGE present dim labels next to bright values
+    // for at-a-glance readout.
+    //
+    // Header / phase-bar / cursor inks are moon-palette greys
+    // (0xEF5D peak highlight, 0x4228 deep shadow) chosen to match
+    // the moon BMP's tonality — scene-internal, NOT theme-owned
+    // (CODING_PRACTICES §4). Label / value ride the shared
+    // theme::LABEL / theme::VALUE roles since the 20%/80% white
+    // split is a generic typewriter pattern other scenes will reuse.
     constexpr uint16_t kHeaderInk  = 0xEF5D;  // peak highlight (from moon palette)
     constexpr uint16_t kHeaderDim  = 0x4228;  // deep shadow grey
     constexpr uint16_t kPhaseBar   = 0xEF5D;  // bright bar behind PHASE
-    constexpr uint16_t kPhaseInk   = 0x0000;  // black glyphs on the bar
-    constexpr uint16_t kLabelInk   = 0x31A6;  // ~20% white  (R6 G13 B6)
-    constexpr uint16_t kValueInk   = 0xCE79;  // ~80% white  (R25 G51 B25)
+    constexpr uint16_t kPhaseInk   = 0x0000;  // black glyphs on the bar (universal)
+    const     uint16_t kLabelInk   = theme::ink(theme::Ink::LABEL);
+    const     uint16_t kValueInk   = theme::ink(theme::Ink::VALUE);
     constexpr uint16_t kCursorInk  = 0xEF5D;  // peak — pops on every line
 
     // ── Header: pulsing [MOON] in built-in 5×7 mono ─────────────────
@@ -187,7 +192,7 @@ public:
     // PHASE (i=0): black glyphs on a bright bar — reads as a current-
     // state badge. ILL/AGE (i=1,2): dim 4-char label "ILL "/"AGE "
     // followed by bright value, so the eye finds the number first.
-    matrix.setFont(&Picopixel);
+    matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
     constexpr uint8_t kLabelLen = 4;  // "ILL " / "AGE " (incl. trailing space)

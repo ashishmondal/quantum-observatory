@@ -3,6 +3,11 @@
 // in Phases 2+. Carries no state beyond the parent class.
 //
 // (added in phase 1.3 as the reference Scene implementation)
+//
+// diagnostic — bypasses theme:: by design (FR-15.3 exemption,
+// CODING_PRACTICES §4): the whole point is to flash full-saturation
+// primaries straight at the panel as a sanity check. Do not route
+// these literals through theme::ink().
 
 #pragma once
 

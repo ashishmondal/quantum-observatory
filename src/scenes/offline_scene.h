@@ -21,13 +21,13 @@
 #include <string.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/Picopixel.h>
 
 #include "backgrounds.h"
 #include "config.h"
 #include "fonts/digital_7__mono_14pt7b.h"
 #include "gfx_text.h"
 #include "scene.h"
+#include "theme.h"
 #include "time_of_day.h"
 
 class OfflineScene : public Scene {
@@ -59,21 +59,29 @@ public:
       hhmm[0]='-'; hhmm[1]='-'; hhmm[2]=':';
       hhmm[3]='-'; hhmm[4]='-'; hhmm[5]='\0';
     }
-    matrix.setFont(&digital_7__mono_14pt7b);
+    matrix.setFont(theme::font(theme::FontRole::CLOCK));
     matrix.setTextSize(1);
     gfx::draw_text_halo(matrix, /*x=*/2, /*y=*/17,
-                        hhmm, 0xFFFF, 0x0000);
+                        hhmm,
+                        theme::ink(theme::Ink::GIANT_DIGITS),
+                        /*halo=*/0x0000);  // universal background
 
-    // ── Divider (same row as giant_clock_scene) ─────────────────────
+    // ── Divider (same row as giant_clock_scene) ─────────────────
+    // Scene-local dim cool blue tint (0x0010), distinct from
+    // GiantClock's warm-green theme::DIVIDER — keeps the offline state
+    // visually distinguishable from the steady-state clock without
+    // burning a separate Ink role.
     matrix.drawFastHLine(0, 21, PANEL_WIDTH, 0x0010);
 
     // ── "OFFLINE" badge — replaces the date strip, amber to read as
     //    a soft warning rather than an error. Same baseline (Y=29) as
     //    giant_clock_scene's date so the swap is positionally clean.
     static const char kBadge[] = "OFFLINE";
-    matrix.setFont(&Picopixel);
+    matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
     gfx::draw_text_halo(matrix, gfx::centered_x(matrix, kBadge), /*y=*/29,
-                        kBadge, 0xFD20 /* amber */, 0x0000);
+                        kBadge,
+                        theme::ink(theme::Ink::STATUS_WARN),
+                        /*halo=*/0x0000);
   }
 };

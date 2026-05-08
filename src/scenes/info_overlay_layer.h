@@ -54,7 +54,6 @@
 #include <string.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/Picopixel.h>
 
 #include "config.h"
 #include "scene_state.h"
@@ -184,7 +183,7 @@ private:
   static constexpr int16_t kY5 = 29;
 
   void draw_content(Adafruit_Protomatter& matrix, uint32_t now_ms) {
-    matrix.setFont(&Picopixel);
+    matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
     // BODY is the active theme's data-line ink — same role the
@@ -192,7 +191,7 @@ private:
     // black so neighbouring lines don't bleed at the bottom of
     // each Picopixel glyph.
     const uint16_t fg   = theme::ink(theme::Ink::BODY);
-    const uint16_t halo = 0x0000;
+    const uint16_t halo = theme::ink(theme::Ink::BODY_HALO);
 
     char buf[24];
 

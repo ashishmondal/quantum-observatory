@@ -1,0 +1,2 @@
+# Built binary — rebuild with `make` (one-time, requires FreeType + pkg-config).
+fontconvert

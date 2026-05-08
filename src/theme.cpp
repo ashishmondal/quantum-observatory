@@ -6,6 +6,7 @@
 
 #include <Adafruit_GFX.h>      // GFXfont
 #include <Fonts/Picopixel.h>
+#include <Fonts/Tiny3x3a2pt7b.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 
 // Arduino's <Arduino.h> (pulled in transitively) defines `bit(b)` as a
@@ -46,30 +47,45 @@ constexpr uint32_t bit(Hint h) {
 //   - ghost  (giant_clock_scene LCD ghost):           dim grey 0x0841
 //   - divider (giant_clock_scene divider hline):      dim warm green 0x0300
 //   - giant_digits (giant_clock_scene live HH:MM):    white 0xFFFF
-//   - accent / alert: not currently referenced as literals; values
-//     chosen to match the docs/THEME.md §2.1 spec so T.3 + T.5+ scenes
-//     have something to consume from day one.
+//   - status_* / label / value / safety: extracted in T.3b from the
+//     constexpr literals previously duplicated across iss_pass,
+//     jupiter_visibility, moon_phase, constellation_now, night, and
+//     thermal_safe. Apollo values match the originals byte-for-byte
+//     so refactoring those scenes produces zero visual delta.
 constexpr Def kApollo = {
   /*inks=*/{
-    /*CHROME      */ 0xFFFF,
-    /*CHROME_HALO */ 0x0000,
-    /*HEADER      */ 0xFFFF,
-    /*HEADER_HALO */ 0x0000,
-    /*HEADER_GLOW */ 0x0000,   // Apollo doesn't NEON_OUTLINE; unused
-    /*BODY        */ 0xF940,   // deep amber, matches giant_clock date
-    /*BODY_HALO   */ 0x0000,
-    /*BODY_GLOW   */ 0x0000,   // unused under Apollo
-    /*ACCENT      */ 0xFFFF,   // white pop (THEME.md §2.1)
-    /*ALERT       */ 0xF800,   // red — reserved for priority callouts
-    /*GHOST       */ 0x0841,   // dim grey, matches giant_clock LCD ghost
-    /*DIVIDER     */ 0x0300,   // dim warm green, matches giant_clock hline
-    /*GIANT_DIGITS*/ 0xFFFF,   // white, matches giant_clock live digits
+    /*CHROME         */ 0xFFFF,
+    /*CHROME_HALO    */ 0x0000,
+    /*HEADER         */ 0xFFFF,
+    /*HEADER_HALO    */ 0x0000,
+    /*HEADER_GLOW    */ 0x0000,   // Apollo doesn't NEON_OUTLINE; unused
+    /*HEADER_DIM     */ 0x0000,   // generic dim — scenes with identity headers use STATUS_*_DIM
+    /*BODY           */ 0xF940,   // deep amber, matches giant_clock date
+    /*BODY_HALO      */ 0x0000,
+    /*BODY_GLOW      */ 0x0000,   // unused under Apollo
+    /*ACCENT         */ 0xFFFF,   // white pop (THEME.md §2.1)
+    /*ACCENT_MAGENTA */ 0xF81F,   // magenta — ISS crew, constellation highlight
+    /*ALERT          */ 0xF800,   // red — priority callouts
+    /*GHOST          */ 0x0841,   // dim grey, matches giant_clock LCD ghost
+    /*DIVIDER        */ 0x0300,   // dim warm green, matches giant_clock hline
+    /*GIANT_DIGITS   */ 0xFFFF,   // white, matches giant_clock live digits
+    /*STATUS_OK      */ 0x07E0,   // green — ISS/JUP visible
+    /*STATUS_OK_DIM  */ 0x0140,   // dim green — ISS [ISS] header pulse low
+    /*STATUS_WARN    */ 0xFD20,   // amber — countdown, daylight, offline badge
+    /*STATUS_WARN_DIM*/ 0x6A00,   // dim amber — JUP [JUP] header pulse low
+    /*STATUS_INFO    */ 0x07FF,   // cyan — altitude / magnitude / IAU code
+    /*STATUS_STALE   */ 0xC100,   // dim amber-red — "WAIT" no fresh data
+    /*STATUS_DIM     */ 0x630C,   // dim grey — JUP below horizon
+    /*LABEL          */ 0x31A6,   // ~20% white — moon ILL / AGE labels
+    /*VALUE          */ 0xCE79,   // ~80% white — moon values, latin name
+    /*SAFETY         */ 0x4000,   // deep red — night + thermal_safe (low LED current)
   },
   /*fonts=*/{
-    /*CHROME      */ &Picopixel,             // matches draw_clock_chrome
-    /*HEADER      */ &FreeSansBold9pt7b,     // matches draw_header (placeholder, T.6 swaps to Press Start 2P)
-    /*BODY        */ &Picopixel,             // matches draw_body + most scenes
-    /*GIANT_DIGITS*/ &digital_7__mono_14pt7b,
+    // Ladder order: MICRO, BODY, HEADER, CLOCK (FR-15.9).
+    /*MICRO */ &Tiny3x3a2pt7b,           // shared across every theme
+    /*BODY  */ &Picopixel,               // Apollo data lines (matches existing scenes)
+    /*HEADER*/ &FreeSansBold9pt7b,       // placeholder; T.6 swaps to Press Start 2P
+    /*CLOCK */ &digital_7__mono_14pt7b,  // shared across every theme
   },
   /*hint_mask=*/ bit(Hint::GIANT_DIGIT_GHOST),
   /*bracket_open=*/  "[",
@@ -81,11 +97,18 @@ constexpr Def kApollo = {
 // so the live theme is always populated.
 constexpr Def kPlaceholder = {
   /*inks=*/{
-    0xFFFF, 0x0000, 0xFFFF, 0x0000, 0x0000,
-    0xFFFF, 0x0000, 0x0000, 0xFFFF, 0xF800,
-    0x0841, 0x0300, 0xFFFF,
+    // Order matches Ink enum (T.3b expansion). Neutral-ish defaults
+    // keep the panel readable if a non-Apollo id leaks through before
+    // T.5 / T.7 land their real Defs.
+    0xFFFF, 0x0000, 0xFFFF, 0x0000, 0x0000, 0x0000,  // chrome, halo, header, halo, glow, header_dim
+    0xFFFF, 0x0000, 0x0000,                          // body, halo, glow
+    0xFFFF, 0xF81F, 0xF800,                          // accent, accent_magenta, alert
+    0x0841, 0x0300, 0xFFFF,                          // ghost, divider, giant_digits
+    0x07E0, 0x0140, 0xFD20, 0x6A00,                  // status_ok / status_ok_dim / warn / warn_dim
+    0x07FF, 0xC100, 0x630C,                          // info, stale, dim
+    0x31A6, 0xCE79, 0x4000,                          // label, value, safety
   },
-  /*fonts=*/{ &Picopixel, &FreeSansBold9pt7b, &Picopixel, &digital_7__mono_14pt7b },
+  /*fonts=*/{ &Tiny3x3a2pt7b, &Picopixel, &FreeSansBold9pt7b, &digital_7__mono_14pt7b },
   /*hint_mask=*/ 0u,
   /*bracket_open=*/  "[",
   /*bracket_close=*/ "]",

@@ -25,13 +25,12 @@
 #include <string.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/Picopixel.h>
 
 #include "backgrounds.h"
 #include "config.h"
-#include "fonts/digital_7__mono_14pt7b.h"
 #include "gfx_text.h"
 #include "scene.h"
+#include "theme.h"
 #include "time_of_day.h"
 
 class GiantClockScene : public Scene {
@@ -71,7 +70,7 @@ public:
     // the active readout is 4 chars × 12 px = 48 px wide. Anchor flush
     // left at x=2; the leading-digit slot only ever shows '1' (for
     // 10/11/12) and is blank otherwise.
-    matrix.setFont(&digital_7__mono_14pt7b);
+    matrix.setFont(theme::font(theme::FontRole::CLOCK));
     matrix.setTextSize(1);
 
     // ── LCD ghost layer (with halo) ──────────────────────────────────
@@ -82,33 +81,31 @@ public:
     // ghost reads as etched. Then the live time overlays in plain
     // white, no halo (the ghost+halo already provides the contrast
     // edge). Net cost: one halo pass instead of two.
-    constexpr uint16_t kDigitGhost = 0x0841;  // ~RGB(8,8,8) very dim grey
-    constexpr uint16_t kDigitHalo  = 0x0000;
     gfx::draw_text_halo(matrix, /*x=*/2, /*y=*/19,
-                        "18:88", kDigitGhost, kDigitHalo);
+                        "18:88",
+                        theme::ink(theme::Ink::GHOST),
+                        /*halo=*/0x0000);  // universal background
 
     // ── Live digits, no halo ────────────────────────────────────────
-    constexpr uint16_t kDigitInk = 0xFFFF;  // white
-    matrix.setTextColor(kDigitInk);
+    matrix.setTextColor(theme::ink(theme::Ink::GIANT_DIGITS));
     matrix.setCursor(2, 19);
     matrix.print(hhmm);
 
     // ── Divider ─────────────────────────────────────────────────────
-    // Dim warm green — same low-luminance "glow" feel as the amber
-    // date strip below, but in a complementary hue so the divider
-    // reads as a separate UI element rather than an extension of the
-    // date.
-    constexpr uint16_t kDivider = 0x0300;  // dim green
-    matrix.drawFastHLine(0, 22, PANEL_WIDTH, kDivider);
+    // Dim warm green under Apollo — same low-luminance "glow" feel as
+    // the amber date strip below, but in a complementary hue so the
+    // divider reads as a separate UI element rather than an extension
+    // of the date.
+    matrix.drawFastHLine(0, 22, PANEL_WIDTH,
+                         theme::ink(theme::Ink::DIVIDER));
 
     // ── Date strip ──────────────────────────────────────────────────
-    // Deep amber — RGB565 0xF940 ≈ RGB(255,80,0). Dropping green
-    // pulls the hue away from yellow toward burnt orange so it
-    // doesn't visually merge with white digits above.
-    matrix.setFont(&Picopixel);
+    // Apollo BODY ink is deep amber (0xF940) — RGB(255,80,0). Dropping
+    // green pulls the hue away from yellow toward burnt orange so it
+    // doesn't visually merge with white digits above. Other themes
+    // override BODY to their own data ink.
+    matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
-    constexpr uint16_t kInfoInk  = 0xF940;  // deep amber
-    constexpr uint16_t kInfoHalo = 0x0000;
     char date[16];  // "SAT 18 MAY 2024" + NUL = 16
     if (r.valid) {
       int16_t  yr;
@@ -122,6 +119,8 @@ public:
       date[sizeof(date)-1] = '\0';
     }
     gfx::draw_text_halo(matrix, gfx::centered_x(matrix, date), /*y=*/29,
-                        date, kInfoInk, kInfoHalo);
+                        date,
+                        theme::ink(theme::Ink::BODY),
+                        theme::ink(theme::Ink::BODY_HALO));
   }
 };

@@ -11,16 +11,17 @@
 
 #include "config.h"
 #include "scene.h"
+#include "theme.h"
 
 class BootScene : public Scene {
 public:
   const char* name() const override { return "boot"; }
 
   void init(Adafruit_Protomatter& matrix) override {
-    matrix.setFont();              // built-in 5x7
+    matrix.setFont();              // built-in 5x7 — no theme role for built-in
     matrix.setTextSize(1);
     matrix.setTextWrap(false);
-    matrix.setTextColor(0xFFFF);   // white
+    matrix.setTextColor(theme::ink(theme::Ink::ACCENT));
   }
 
   void render(Adafruit_Protomatter& matrix, uint32_t /*now_ms*/) override {
@@ -34,7 +35,7 @@ public:
     constexpr int X = (PANEL_WIDTH  - LEN * GLYPH_W) / 2;
     constexpr int Y = (PANEL_HEIGHT - GLYPH_H) / 2;
 
-    matrix.fillScreen(0x0000);
+    matrix.fillScreen(0x0000);  // universal background
     matrix.setCursor(X, Y);
     matrix.print(kLabel);
     // matrix.show() is called by loop1() after chrome is layered on top

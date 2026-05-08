@@ -68,12 +68,12 @@
 #include <string.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/Picopixel.h>
 
 #include "config.h"
 #include "constellation_state.h"
 #include "scene.h"
 #include "stars.h"
+#include "theme.h"
 
 class ConstellationNowScene : public Scene {
 public:
@@ -118,7 +118,7 @@ public:
     }
     const constellations_iau::Entry& entry = kCatalog[entry_idx];
 
-    matrix.fillScreen(0x0000);
+    matrix.fillScreen(0x0000);  // universal background
 
     // Projection is cached across frames keyed by entry_idx — the
     // dedup + insertion sort + cos(dec) projection pass costs ~150 µs
@@ -136,8 +136,8 @@ public:
 
     if (unique_count == 0) {
       // No drawable lines — render a WAIT placeholder.
-      matrix.setFont(&Picopixel);
-      matrix.setTextColor(0xC100);
+      matrix.setFont(theme::font(theme::FontRole::BODY));
+      matrix.setTextColor(theme::ink(theme::Ink::STATUS_STALE));
       matrix.setCursor(2, 14);
       matrix.print("CONST");
       matrix.setCursor(2, 22);
@@ -193,7 +193,7 @@ public:
       // Magnitude buckets. Without spectral class data in the parsed
       // catalog (HYG has it but the converter doesn't extract it
       // yet) every star renders neutral white — easy upgrade later.
-      constexpr uint16_t kInk = 0xFFFF;
+      const uint16_t kInk = theme::ink(theme::Ink::ACCENT);  // white pop
       const int16_t mag = s.mag_x100;
       if (mag < 100) {
         // mag < 1.0 — full + cross with tips + twinkle.
@@ -224,7 +224,10 @@ public:
       }
     }
 
-    // ── Left half: header + typewriter readout ─────────────────────
+    // ── Left half: header + typewriter readout ─────────────────────    // Cool blue-white header is scene-identity (constellation =
+    // "sky" tonality, distinct from ISS green / JUP amber / MOON
+    // grey). Stays inline per CODING_PRACTICES §4 — scene-internal
+    // identity color, not a generic STATUS_* role.
     const bool header_dim = (now_ms % 1500u) < 200u;
     constexpr uint16_t kHeaderInk = 0xAFFF;  // cool blue-white
     constexpr uint16_t kHeaderDim = 0x4A1F;
@@ -301,13 +304,13 @@ public:
     }
     const bool cursor_on = ((now_ms / 280u) & 1u) == 0u;
 
-    matrix.setFont(&Picopixel);
+    matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
-    constexpr uint16_t kNameInk      = 0xFFFF;
-    constexpr uint16_t kLatinInk     = 0xCE79;
-    constexpr uint16_t kHighlightInk = 0xF800;
-    constexpr uint16_t kIauInk       = 0x07FF;
+    const uint16_t kNameInk      = theme::ink(theme::Ink::ACCENT);          // white pop
+    const uint16_t kLatinInk     = theme::ink(theme::Ink::VALUE);           // ~80% white sub-name
+    const uint16_t kHighlightInk = theme::ink(theme::Ink::ALERT);           // red — named star highlight
+    const uint16_t kIauInk       = theme::ink(theme::Ink::STATUS_INFO);     // cyan IAU code
 
     for (int i = 0; i < 3; ++i) {
       if (typed[i] == 0 && active != i) continue;
@@ -332,7 +335,7 @@ public:
       int16_t bg_w_total = bg_w;
       if (active == i && cursor_on) bg_w_total += 4;
       if (bg_w_total > 0) {
-        matrix.fillRect(bg_x, bg_y + 2, bg_w_total - 1, bg_h, 0x0000);
+        matrix.fillRect(bg_x, bg_y + 2, bg_w_total - 1, bg_h, 0x0000);  // universal background
       }
 
       uint16_t ink = kNameInk;

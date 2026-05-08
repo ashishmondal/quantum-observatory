@@ -17,12 +17,15 @@
 #include <stdio.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/FreeSansBold9pt7b.h>
 
 #include "config.h"
 #include "gfx_text.h"
 #include "scene.h"
+#include "theme.h"
 #include "thermal_monitor.h"
+// FreeSansBold9pt7b is what theme::font(HEADER) currently resolves to
+// for Apollo (placeholder until T.6 swaps in Press Start 2P), so this
+// scene picks up that font through the theme — no direct include needed.
 
 class ThermalSafeScene : public Scene {
 public:
@@ -40,12 +43,12 @@ public:
     (void)now_ms;
     matrix.fillScreen(0x0000);
 
-    matrix.setFont(&FreeSansBold9pt7b);
+    matrix.setFont(theme::font(theme::FontRole::HEADER));
     matrix.setTextSize(1);
 
-    // Deep red — same 0x4000 as NightScene (low LED current).
-    constexpr uint16_t kInk  = 0x4000;
-    constexpr uint16_t kHalo = 0x0000;
+    // Deep red — theme::SAFETY ink, same as NightScene (low LED current).
+    const uint16_t kInk  = theme::ink(theme::Ink::SAFETY);
+    constexpr uint16_t kHalo = 0x0000;  // universal background
 
     // Top half: "COOL". Baseline ~13 puts the cap line near the top
     // of the panel given the FreeSansBold9pt7b ascent.

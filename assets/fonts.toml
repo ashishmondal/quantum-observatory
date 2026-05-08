@@ -1,0 +1,62 @@
+# Font conversion manifest — used by tools/convert_fonts.py.
+#
+# Each [[font]] entry produces one Adafruit_GFX-compatible header under
+# `include/fonts/` by invoking `tools/convert_font.sh`. Re-run after
+# editing this file:
+#
+#     tools/convert_fonts.py                 # convert every entry
+#     tools/convert_fonts.py apollo_header   # convert just one (by id)
+#
+# Field reference:
+#   id         required. Stable name; matches the [[font]] key for
+#              command-line filtering and shows up in the summary table.
+#   input      required. Path to the .ttf / .otf, relative to the repo
+#              root.
+#   size       required. Point size passed to fontconvert. Pixel-design
+#              fonts only rasterize cleanly at their native size — see
+#              comments below for known-good values.
+#   output     required. Header path, relative to the repo root.
+#   first      optional, default 32  (space).
+#   last       optional, default 126 (~).  Bump above 0x7E to include
+#              custom glyphs (THEME.md §9 plan).
+#   note       optional. Free-form context — never read by the script.
+#
+# Authoring rule: keep this file the single source of truth for what
+# headers exist under include/fonts/. Hand-editing a converted header
+# defeats reproducibility (PLAN T.6 exit criterion) — instead, change
+# the manifest and re-run.
+
+# ─── CLOCK role (all themes) ─────────────────────────────────────────
+[[font]]
+id     = "clock_digital7_14pt"
+input  = "assets/fonts/digital-7 (mono).ttf"
+size   = 14
+output = "include/fonts/digital_7__mono_14pt7b.h"
+note   = "Giant HH:MM digits. Recolored per theme; geometry never changes."
+
+# ─── HEADER role (per theme; FR-15.9 / THEME.md §5) ──────────────────
+# Three bundled HEADER fonts cover all five themes. Vectrex, Blade
+# Runner, and LCARS share Pixel Operator — their identity rides on
+# inks + layout hints (NEON_OUTLINE / FRAME_BORDER / BLOCK_BARS), not
+# the typeface. T.6 in PLAN.md tracks the bundling work.
+
+[[font]]
+id     = "apollo_header_press_start_2p"
+input  = "assets/fonts/PressStart2P.ttf"
+size   = 8
+output = "include/fonts/press_start_2p_8pt7b.h"
+note   = "APOLLO header. Native 8x8 pixel design — only 8pt rasterizes cleanly."
+
+[[font]]
+id     = "nostromo_header_vt323"
+input  = "assets/fonts/VT323-Regular.ttf"
+size   = 8
+output = "include/fonts/vt323_8pt7b.h"
+note   = "NOSTROMO header. CRT terminal feel."
+
+[[font]]
+id     = "shared_header_pixel_operator"
+input  = "assets/fonts/PixelOperator8.ttf"
+size   = 8
+output = "include/fonts/pixel_operator_8pt7b.h"
+note   = "VECTREX + BLADE_RUNNER + LCARS header (shared)."

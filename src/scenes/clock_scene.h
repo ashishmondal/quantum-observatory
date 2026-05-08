@@ -13,6 +13,7 @@
 
 #include "config.h"
 #include "scene.h"
+#include "theme.h"
 
 class ClockScene : public Scene {
 public:
@@ -22,10 +23,10 @@ public:
     // Built-in 5x7 font; size 2 → 12 px wide, 16 px tall per glyph (incl.
     // the 1 px GFX spacing). Background colour stays cyan so we can verify
     // both fill and text in one glance.
-    matrix.setFont();              // built-in default
+    matrix.setFont();              // built-in default — no theme role for built-in
     matrix.setTextSize(2);
     matrix.setTextWrap(false);
-    matrix.setTextColor(0xFFFF);   // white
+    matrix.setTextColor(theme::ink(theme::Ink::ACCENT));
   }
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
@@ -45,7 +46,7 @@ public:
     int y = (PANEL_HEIGHT - GLYPH_H) / 2;
     if (x < 0) x = 0;
 
-    matrix.fillScreen(0x0000);
+    matrix.fillScreen(0x0000);  // universal background
     matrix.setCursor(x, y);
     matrix.print(buf);
     // matrix.show() is called by loop1() after chrome (phase 3.5.2).

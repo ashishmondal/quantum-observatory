@@ -4,6 +4,10 @@
 // placement and halo legibility (FR-3.3, FR-4.3).
 //
 // (added in phase 3.1; refactored to use 2-line primitives in phase 3.4)
+//
+// diagnostic — bypasses theme:: by design (FR-15.3 exemption,
+// CODING_PRACTICES §4): exercises the gfx::draw_header / draw_body
+// primitives directly to validate layout/halo independent of theme.
 
 #pragma once
 

@@ -27,6 +27,11 @@
 // Self-contained — no globals from main.cpp. Owns its own frame
 // counter so it works as a true diagnostic regardless of what other
 // instrumentation is in flight.
+//
+// diagnostic — bypasses theme:: by design (FR-15.3 exemption,
+// CODING_PRACTICES §4): this scene's whole job is to exercise the
+// raw palette / setFont path so a theming regression cannot mask a
+// rendering regression. Do not refactor literals here through theme::.
 
 #pragma once
 

@@ -48,28 +48,52 @@ enum class Id : uint8_t {
 // Color roles every scene resolves through theme::ink(). The names are
 // deliberately role-based, not hue-based, so a theme can repaint without
 // every scene knowing — see FR-15.3.
+//
+// The STATUS_* family carries semantic state (overhead, daylight, no
+// fresh data, below horizon) that the typewriter scenes (iss_pass,
+// jupiter_visibility, moon_phase, constellation_now) all share — they
+// were duplicating these as constexpr literals before T.3b. Each
+// scene-identity HEADER also gets a *_DIM sibling so the per-scene
+// pulsing header lands on a theme-owned dim value rather than a
+// scene-local literal.
 enum class Ink : uint8_t {
-  CHROME,         // small HH:MM clock chrome ink
-  CHROME_HALO,    // halo behind chrome
-  HEADER,         // bracketed scene header (e.g. "[ISS]")
+  CHROME,           // small HH:MM clock chrome ink
+  CHROME_HALO,      // halo behind chrome
+  HEADER,           // bracketed scene header (e.g. "[ISS]")
   HEADER_HALO,
-  HEADER_GLOW,    // 2nd halo color for NEON_OUTLINE themes
-  BODY,           // typewriter / data lines
+  HEADER_GLOW,      // 2nd halo color for NEON_OUTLINE themes
+  HEADER_DIM,       // pulsing header low value (generic)
+  BODY,             // typewriter / data lines
   BODY_HALO,
   BODY_GLOW,
-  ACCENT,         // value-of-interest pop (e.g. "VIS" callout)
-  ALERT,          // priority callouts (ISS NOW, thermal_safe label)
-  GHOST,          // unlit-segment ghost behind LCD digits
-  DIVIDER,        // 1-px separator rows
-  GIANT_DIGITS,   // big HH:MM ink
+  ACCENT,           // value-of-interest pop (white)
+  ACCENT_MAGENTA,   // second accent (e.g. ISS crew, constellation highlight)
+  ALERT,            // priority callouts (constellation highlight star)
+  GHOST,            // unlit-segment ghost behind LCD digits
+  DIVIDER,          // 1-px separator rows
+  GIANT_DIGITS,     // big HH:MM ink
+  STATUS_OK,        // green — overhead + visible / healthy
+  STATUS_OK_DIM,    // dim green — pulse-low for OK-identity headers (ISS)
+  STATUS_WARN,      // amber — countdown, daylight wash, badges (offline, JUP day)
+  STATUS_WARN_DIM,  // dim amber — pulse-low for WARN-identity headers (JUP)
+  STATUS_INFO,      // cyan — informational data (altitude, magnitude, IAU)
+  STATUS_STALE,     // dim amber-red — no fresh data ("WAIT")
+  STATUS_DIM,       // dim grey — below horizon
+  LABEL,            // ~20% white — dim label (moon "ILL "/"AGE ")
+  VALUE,            // ~80% white — bright value next to dim label
+  SAFETY,           // deep red — night / thermal_safe (low LED current)
   COUNT
 };
 
 enum class FontRole : uint8_t {
-  CHROME,         // tiny corner clock readout
-  HEADER,         // bracketed header band
-  BODY,           // typewriter / data lines
-  GIANT_DIGITS,   // big HH:MM
+  // Ascending size ladder (FR-15.9). Order in this enum reflects
+  // physical size; per-theme tables in theme.cpp follow the same order.
+  // MICRO and CLOCK are fixed across every theme; BODY and HEADER are
+  // the only per-theme slots.
+  MICRO,          // 1–3 char indicators only — Tiny3x3 every theme
+  BODY,           // readable lines (typewriter / data)
+  HEADER,         // bracketed scene header band (e.g. "[ISS]")
+  CLOCK,          // giant HH:MM — Digital-7 14pt every theme
   COUNT
 };
 

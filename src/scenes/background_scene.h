@@ -5,6 +5,12 @@
 // foreground, then matrix.show().
 //
 // (added in phase 2.5)
+//
+// diagnostic — bypasses theme:: by design (FR-15.3 exemption,
+// CODING_PRACTICES §4): this is the bg-only smoke-test scene used to
+// eyeball each renderer in isolation. No theme-affected literals to
+// refactor (no foreground inks/fonts), but the file is in the
+// diagnostic family so the exemption is documented for completeness.
 
 #pragma once
 

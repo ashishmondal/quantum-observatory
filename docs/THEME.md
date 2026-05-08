@@ -33,9 +33,11 @@ frame — scenes never hardcode color, font, or accent rules.
 70s NASA Mission Operations Control Room — burnt amber phosphor on black,
 seven-segment digits, all-caps bracketed labels.
 
-- **Body font:** Silkscreen 5×7
-- **Header font:** Press Start 2P (8×8, chunky)
-- **Giant digits:** Digital-7 mono 14pt (ships today)
+- **Fonts** (the four roles, see §3.1):
+  - `MICRO`  — Tiny3x3 (shared by all themes)
+  - `BODY`   — Picopixel (3×5 with descenders)
+  - `HEADER` — Press Start 2P (8×8 chunky, the MOCR look)
+  - `CLOCK`  — Digital-7 mono 14pt (ships today)
 - **Inks:** amber `0xFD60`, warm amber `0xFCA0`, white accent, dim amber halo
 - **Brackets:** `[` `]`
 - **Hints:** `GIANT_DIGIT_GHOST` (the "18:88" unlit-segment shadow)
@@ -45,9 +47,11 @@ seven-segment digits, all-caps bracketed labels.
 80s *Alien* / Nostromo MU/TH/UR computer — high-contrast phosphor green CRT
 with cursor blocks, scanlines, and command-line voice.
 
-- **Body font:** VT323 (CRT terminal)
-- **Header font:** VT323 at larger size
-- **Giant digits:** Digital-7 mono 14pt (recolored green)
+- **Fonts:**
+  - `MICRO`  — Tiny3x3
+  - `BODY`   — TomThumb
+  - `HEADER` — VT323 (CRT terminal, larger size)
+  - `CLOCK`  — Digital-7 mono 14pt (recolored green)
 - **Inks:** phosphor green `0x07E0`, dim green `0x0560`, yellow alert `0xFFE0`
 - **Brackets:** `>` `_`
 - **Hints:** `SCANLINES` (every other row dimmed by ~30%), `CURSOR_BLOCK`
@@ -58,9 +62,12 @@ with cursor blocks, scanlines, and command-line voice.
 Atari/Vectrex vector arcade — thin glowing strokes, cyan + magenta
 complementary halos, deep black background.
 
-- **Body font:** Pixel Operator (thin grid)
-- **Header font:** Vector Battle (true thin-vector look)
-- **Giant digits:** Digital-7 mono with 2-color neon halo (header ink + glow)
+- **Fonts:**
+  - `MICRO`  — Tiny3x3
+  - `BODY`   — Picopixel (3×5 with descenders — thin grid)
+  - `HEADER` — Pixel Operator (vector-arcade feel comes from
+    `NEON_OUTLINE` + the cyan/magenta inks, not the typeface)
+  - `CLOCK`  — Digital-7 mono 14pt (cyan, with NEON_OUTLINE halo)
 - **Inks:** cyan `0x07FF`, magenta glow `0xF81F`, white accent
 - **Brackets:** `<` `>`
 - **Hints:** `NEON_OUTLINE` (halo drawn in glow color, not black)
@@ -70,10 +77,11 @@ complementary halos, deep black background.
 Late-80s neo-noir HUD — saturated cyan + magenta on deep blue, framed
 panels, occasional Japanese-katakana flavor (out of scope for v1).
 
-- **Body font:** Silkscreen
-- **Header font:** Pixel Operator Bold (or a permissive cyberpunk pixel
-  font like Pixeled — see §6 licensing)
-- **Giant digits:** Digital-7 mono 14pt (cyan)
+- **Fonts:**
+  - `MICRO`  — Tiny3x3
+  - `BODY`   — Org_01 (5×6 sans, true lowercase)
+  - `HEADER` — Pixel Operator
+  - `CLOCK`  — Digital-7 mono 14pt (cyan)
 - **Inks:** cyan `0x07FF`, orange `0xFD20`, magenta accent `0xF81F`
 - **Brackets:** `:` `:` (colons as flanking dividers — built-in glyph)
 - **Hints:** `FRAME_BORDER` (1-px outer cyan rectangle), `NEON_OUTLINE`
@@ -83,9 +91,11 @@ panels, occasional Japanese-katakana flavor (out of scope for v1).
 Star Trek TOS LCARS-precursor — colored solid blocks, no brackets, blocky
 sans-serif labels in orange/yellow/red.
 
-- **Body font:** Pixel Operator
-- **Header font:** Pixel Operator Bold
-- **Giant digits:** Digital-7 mono 14pt (orange)
+- **Fonts:**
+  - `MICRO`  — Tiny3x3
+  - `BODY`   — Org_01 (5×6 sans)
+  - `HEADER` — Pixel Operator
+  - `CLOCK`  — Digital-7 mono 14pt (orange)
 - **Inks:** orange `0xFD20`, yellow `0xFFE0`, red alert `0xF800`
 - **Brackets:** none — replaced by colored block bars (`drawFillRect`)
 - **Hints:** `BLOCK_BARS` (header is preceded by a 4×7 colored block instead
@@ -113,14 +123,27 @@ namespace theme {
 
   enum class Ink : uint8_t {
     CHROME, CHROME_HALO,
-    HEADER, HEADER_HALO, HEADER_GLOW,
+    HEADER, HEADER_HALO, HEADER_GLOW, HEADER_DIM,
     BODY,   BODY_HALO,   BODY_GLOW,
-    ACCENT, ALERT,
+    ACCENT, ACCENT_MAGENTA, ALERT,
     GHOST, DIVIDER, GIANT_DIGITS,
+    // Status family — semantic state shared by typewriter scenes
+    // (iss_pass, jupiter_visibility, moon_phase, constellation_now).
+    // The *_DIM siblings of OK / WARN are the pulse-low value of an
+    // identity-coloured header (e.g. ISS [ISS] pulses STATUS_OK ↔
+    // STATUS_OK_DIM); generic-header scenes use HEADER ↔ HEADER_DIM.
+    STATUS_OK, STATUS_OK_DIM,
+    STATUS_WARN, STATUS_WARN_DIM,
+    STATUS_INFO, STATUS_STALE, STATUS_DIM,
+    LABEL, VALUE,
+    SAFETY,                 // night + thermal_safe deep red
   };
 
   enum class FontRole : uint8_t {
-    CHROME, HEADER, BODY, GIANT_DIGITS,
+    MICRO,         // 1–3 char indicators only — Tiny3x3, all themes
+    BODY,          // readable lines: stat readouts, prompts
+    HEADER,        // bracketed scene labels, button prompts
+    CLOCK,         // Digital-7 14pt giant HH:MM, all themes
   };
 
   enum class Hint : uint8_t {
@@ -205,24 +228,67 @@ topic — added to `homeassistant/setup_mqtt.py` alongside the scene select.
 
 ## 5. Fonts to bundle
 
+All themes share a **four-role size ladder** (§3.1 `FontRole`):
+`MICRO < BODY < HEADER < CLOCK`. Themes differ in which font they
+bind to BODY and HEADER — MICRO and CLOCK are the same across every
+theme.
+
+- **MICRO** — Tiny3x3 (2 pt, ships with Adafruit_GFX). Every theme.
+  Used for 1–3 character indicators only (priority dots, status
+  flags, badges); never for words. Kept in the build deliberately so
+  scenes can opt in as the design evolves.
+- **CLOCK** — Digital-7 mono 14 pt. Every theme. Recolored per theme;
+  geometry never changes.
+- **BODY** and **HEADER** — per-theme, see §2.
+
+The `BODY` slot is filled by one of three Adafruit_GFX bundled pixel
+fonts, picked to match each theme's identity:
+
+| Theme | BODY font (built-in, no bundling cost) |
+|---|---|
+| `apollo_amber`    | Picopixel (3×5 with descenders) |
+| `nostromo_green`  | TomThumb (3×5, no descenders)   |
+| `vectrex_neon`    | Picopixel                         |
+| `blade_runner`    | Org_01 (5×6 sans, true lowercase)|
+| `lcars_tos`       | Org_01                           |
+
+`HEADER` is the biggest theme differentiator but draws from a fixed
+roster of **only three** TTF conversions — deliberately small so the
+set is easy to license, attribute, and PROGMEM-budget. Each theme
+picks one:
+
+| Theme              | HEADER font           |
+|---|---|
+| `apollo_amber`     | Press Start 2P        |
+| `nostromo_green`   | VT323                 |
+| `vectrex_neon`     | Pixel Operator        |
+| `blade_runner`     | Pixel Operator        |
+| `lcars_tos`        | Pixel Operator        |
+
+Three themes share Pixel Operator — their visual identity rides on
+inks + layout hints (`NEON_OUTLINE` for Vectrex, `FRAME_BORDER` for
+Blade Runner, `BLOCK_BARS` for LCARS), not the typeface. This keeps
+the bundled-TTF count at three.
+
 | File (`include/fonts/`) | Source TTF (`assets/fonts/`) | Used by |
 |---|---|---|
-| `digital_7__mono_14pt7b.h` *(shipped)* | `digital-7 (mono).ttf` *(shipped)* | All themes (giant digits) |
-| `silkscreen_5pt7b.h` | Silkscreen (Jason Kottke, OFL) | APOLLO body, BLADE_RUNNER body |
-| `vt323_8pt7b.h` | VT323 (Peter Hull, OFL) | NOSTROMO body + header |
-| `pixel_operator_8pt7b.h` | Pixel Operator (Jayvee Enaguas, CC0) | VECTREX body, LCARS body |
-| `pixel_operator_bold_8pt7b.h` | Pixel Operator Bold (CC0) | BLADE_RUNNER + LCARS header |
-| `press_start_2p_8pt7b.h` | Press Start 2P (codeman38, OFL) | APOLLO header |
-| `vector_battle_8pt7b.h` | Vector Battle (Ruler) | VECTREX header |
+| `digital_7__mono_14pt7b.h` *(shipped)* | `digital-7 (mono).ttf` *(shipped)* | All themes (`CLOCK`) |
+| `press_start_2p_8pt7b.h`       | `PressStart2P.ttf` (codeman38, OFL)         | APOLLO `HEADER` |
+| `vt323_8pt7b.h`                | `VT323-Regular.ttf` (Peter Hull, OFL)       | NOSTROMO `HEADER` |
+| `pixel_operator_8pt7b.h`       | `PixelOperator8.ttf` (Jayvee Enaguas, CC0)  | VECTREX + BLADE_RUNNER + LCARS `HEADER` |
 
-License attribution stubs land alongside each header in T-6. All seven
-fonts above are confirmed permissive (OFL / CC0 / "free, including
-commercial"). Blade Runner and LCARS marquee fonts are deliberately
-**not** bundled — the look is achieved with permissive lookalikes plus
-the theme's ink/hint primitives.
+License attribution stubs land alongside each header in T-6. All
+three bundled TTFs above are confirmed permissive (OFL / CC0).
+Blade Runner and LCARS marquee fonts are deliberately **not** bundled
+— the look is achieved with permissive lookalikes plus the theme's
+ink/hint primitives.
 
-PROGMEM cost estimate: ~3 KB per converted GFXfont × 6 new fonts ≈ 18 KB
-flash. Zero SRAM cost (read directly from flash via Adafruit_GFX).
+PROGMEM cost (measured from `// Approx. N bytes` in each generated
+header): Press Start 2P 2508 B + VT323 1065 B + Pixel Operator 1998 B
+≈ **5.6 KB** flash for the three HEADER fonts. Zero SRAM cost (read
+directly from flash via Adafruit_GFX). The three BODY fonts and the
+MICRO font are already linked because they ship with Adafruit_GFX —
+no additional cost.
 
 ---
 

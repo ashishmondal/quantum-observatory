@@ -49,7 +49,6 @@
 #include <stdio.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/Picopixel.h>
 
 #include "backgrounds/image_palette_bg.h"
 #include "bitmaps/_index.h"
@@ -58,6 +57,7 @@
 #include "scene.h"
 #include "stars.h"
 #include "sun_position.h"
+#include "theme.h"
 #include "time_of_day.h"
 
 class JupiterVisibilityScene : public Scene {
@@ -227,7 +227,7 @@ public:
       int16_t bg_w_total = bg_w;
       if (active == i && cursor_on) bg_w_total += 4;
       if (bg_w_total > 0) {
-        matrix.fillRect(bg_x, bg_y + 2, bg_w_total - 1, bg_h, 0x0000);
+        matrix.fillRect(bg_x, bg_y + 2, bg_w_total - 1, bg_h, 0x0000);  // universal background
       }
 
       // Per-line ink. VIS line picks its hue from the state machine

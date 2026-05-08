@@ -44,7 +44,6 @@
 #include <stdio.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/Picopixel.h>
 
 #include "backgrounds/image_palette_bg.h"
 #include "bitmaps/_index.h"
@@ -53,6 +52,7 @@
 #include "iss_state.h"
 #include "scene.h"
 #include "sun_position.h"
+#include "theme.h"
 #include "time_of_day.h"
 
 class IssPassScene : public Scene {
@@ -182,23 +182,26 @@ public:
 
     // ── Header: pulsing [ISS] in built-in 5×7 mono ──────────────────
     const bool header_dim = (now_ms % 1500u) < 200u;
-    constexpr uint16_t kHeaderInk = 0x07E0;  // bright green
-    constexpr uint16_t kHeaderDim = 0x0140;
+    // ISS scene identity = STATUS_OK (green = "healthy / overhead‑able");
+    // pulse-low rides the matching STATUS_OK_DIM so a future theme can
+    // re-tone both ends together.
+    const uint16_t header_ink     = theme::ink(theme::Ink::STATUS_OK);
+    const uint16_t header_dim_ink = theme::ink(theme::Ink::STATUS_OK_DIM);
     matrix.setFont(nullptr);
     matrix.setTextSize(1);
-    matrix.setTextColor(header_dim ? kHeaderDim : kHeaderInk);
+    matrix.setTextColor(header_dim ? header_dim_ink : header_ink);
     matrix.setCursor(1, 0);
     matrix.print("[ISS]");
 
-    // ── Three typewriter lines (Picopixel) ──────────────────────────
-    matrix.setFont(&Picopixel);
+    // ── Three typewriter lines (Picopixel) ──────────────────────
+    matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
-    constexpr uint16_t kVisibleInk = 0x07E0;  // green — banner when overhead
-    constexpr uint16_t kWaitInk    = 0xC100;  // dim amber-red — no fresh data
-    constexpr uint16_t kCountInk   = 0xFD20;  // amber — countdown to next pass
-    constexpr uint16_t kDataInk    = 0x07FF;  // cyan
-    constexpr uint16_t kCrewInk    = 0xF81F;  // magenta
+    const uint16_t kVisibleInk = theme::ink(theme::Ink::STATUS_OK);    // overhead
+    const uint16_t kWaitInk    = theme::ink(theme::Ink::STATUS_STALE); // no fresh data
+    const uint16_t kCountInk   = theme::ink(theme::Ink::STATUS_WARN);  // countdown
+    const uint16_t kDataInk    = theme::ink(theme::Ink::STATUS_INFO);  // altitude
+    const uint16_t kCrewInk    = theme::ink(theme::Ink::ACCENT_MAGENTA);
 
     for (int i = 0; i < 3; ++i) {
       if (typed[i] == 0 && active != i) continue;  // nothing to draw yet
@@ -233,7 +236,7 @@ public:
       int16_t bg_w_total = bg_w;
       if (active == i && cursor_on) bg_w_total += 4;
       if (bg_w_total > 0) {
-        matrix.fillRect(bg_x, bg_y + 2, bg_w_total - 1, bg_h, 0x0000);
+        matrix.fillRect(bg_x, bg_y + 2, bg_w_total - 1, bg_h, 0x0000);  // universal background
       }
 
       // Pick the colour: VIS line uses VISIBLE/countdown/WAIT hue once

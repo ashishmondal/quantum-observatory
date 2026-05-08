@@ -1,5 +1,10 @@
 // IR remote learning wizard (phase IR.2).
 //
+// diagnostic — bypasses theme:: by design (FR-15.3 exemption,
+// CODING_PRACTICES §4): on-screen prompts and counters use raw
+// inks/fonts directly so EMI behaviour and capture state read at a
+// glance regardless of the active theme. Do not theme this scene.
+//
 // Replaces the bare phase-IR.1 logging POC. Walks the operator
 // through every button on the target Roku-style remote, captures one
 // clean NEC frame per prompt, then publishes the full capture set to

@@ -59,6 +59,7 @@ enum class SceneId : uint8_t {
   JUPITER_VISIBILITY = 17,  // Jupiter look-angles + magnitude readout (phase 7.3)
   CONSTELLATION_NOW  = 18,  // dynamic constellation art + name (phase 7.4)
   IR_TEST            = 19,  // IR receiver POC readout (phase IR.1)
+  FONT_DEMO          = 20,  // diagnostic: cycle Adafruit_GFX builtin fonts
 };
 
 // One-time mutex init. Call from setup() before either core spins.

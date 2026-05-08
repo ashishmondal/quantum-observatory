@@ -31,6 +31,7 @@
 #include "scenes/clock_scene.h"
 #include "scenes/color_cycle_scene.h"
 #include "scenes/giant_clock_scene.h"
+#include "scenes/font_demo_scene.h"
 #include "scenes/gfx_test_scene.h"
 #include "scenes/night_scene.h"
 #include "scenes/offline_scene.h"
@@ -90,6 +91,7 @@ static MoonPhaseScene  s_moon_phase_scene;  // phase 7.2 — sticky moon disc + 
 static JupiterVisibilityScene s_jupiter_visibility_scene; // phase 7.3 — Jupiter look-angles
 static ConstellationNowScene  s_constellation_now_scene;  // phase 7.4 — dynamic constellation art
 static IrTestScene            s_ir_test_scene;            // phase IR.1 — IR receiver POC readout
+static FontDemoScene          s_font_demo_scene;          // diagnostic: cycle Adafruit_GFX builtin fonts
 
 // Single "current scene" pointer; loop() just delegates to it. Swapping
 // scenes is one assignment — no other code changes. (NFR-5.1)
@@ -236,6 +238,7 @@ static Scene* scene_for(scene_state::SceneId id) {
     case SI::JUPITER_VISIBILITY: return &s_jupiter_visibility_scene;
     case SI::CONSTELLATION_NOW:  return &s_constellation_now_scene;
     case SI::IR_TEST:            return &s_ir_test_scene;
+    case SI::FONT_DEMO:          return &s_font_demo_scene;
   }
   return nullptr;
 }
@@ -331,18 +334,38 @@ static void action_ir_info_toggle(uint16_t /*addr*/, uint16_t /*cmd*/) {
   g_info_overlay_event_ms = ts;
 }
 
+// LEFT / RIGHT — scene-scoped. Today only the FontDemoScene consumes
+// these (cycle through Adafruit_GFX bundled fonts). Other scenes
+// silently ignore the press; the dispatch table still bumps `accepted`
+// because the press DID reach a handler — it just chose to no-op.
+// Keep the active-scene gate here (not in the dispatch table) so
+// future scenes can opt in without touching ir_remote internals.
+static void action_ir_left(uint16_t /*addr*/, uint16_t /*cmd*/) {
+  if (scene_state::current() == scene_state::SceneId::FONT_DEMO) {
+    s_font_demo_scene.cycle(-1);
+  }
+}
+static void action_ir_right(uint16_t /*addr*/, uint16_t /*cmd*/) {
+  if (scene_state::current() == scene_state::SceneId::FONT_DEMO) {
+    s_font_demo_scene.cycle(+1);
+  }
+}
+
 // FR-17.5 dispatch table. Pointer + count handed to ir_remote in
 // setup(); ir_remote stores the pointer (table outlives the program
 // because it's file-scope). `honour_repeats=false` everywhere because
 // every action is discrete (FR-17.4 — long-press must not stampede).
-// LEFT/RIGHT (theme cycle, IR.5) and OPTIONS (mqtt-routed, IR.6) are
-// intentionally absent — they're scheduled phases, not IR.4 scope.
+// LEFT/RIGHT are wired here as scene-scoped (FontDemoScene consumes;
+// every other scene no-ops) so the font-picker is reachable from the
+// couch. OPTIONS (mqtt-routed, IR.6) is still intentionally absent.
 static constexpr ir_remote::DispatchEntry kIrDispatch[] = {
     {kIrButtonUpCmd,      ir_remote::Lane::LOCAL, false, &action_ir_scene_next, "up"},
     {kIrButtonDownCmd,    ir_remote::Lane::LOCAL, false, &action_ir_scene_prev, "down"},
     {kIrButtonOkCmd,      ir_remote::Lane::LOCAL, false, &action_ir_info_toggle, "ok"},
     {kIrButtonBackCmd,    ir_remote::Lane::LOCAL, false, &action_ir_back,       "back"},
     {kIrButtonHomeCmd,    ir_remote::Lane::LOCAL, false, &action_ir_home,       "home"},
+    {kIrButtonLeftCmd,    ir_remote::Lane::LOCAL, false, &action_ir_left,       "left"},
+    {kIrButtonRightCmd,   ir_remote::Lane::LOCAL, false, &action_ir_right,      "right"},
 };
 static constexpr uint8_t kIrDispatchCount =
     sizeof(kIrDispatch) / sizeof(kIrDispatch[0]);

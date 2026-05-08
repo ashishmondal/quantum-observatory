@@ -24,6 +24,7 @@
 #include "config.h"
 #include "gfx_text.h"
 #include "scene.h"
+#include "theme.h"
 #include "time_of_day.h"
 
 class NightScene : public Scene {
@@ -52,13 +53,13 @@ public:
 
     matrix.setFont(&FreeSansBold12pt7b);
     matrix.setTextSize(1);
-    // Deep red — RGB565 0x4000 ≈ R=8/31 — bright enough to read across
-    // a small bedroom but ~25% of full red current. Cooler than the
-    // giant clock's 0xFFFF white in every sense (FR-7.3 spirit).
+    // Deep red — theme::SAFETY ink (Apollo: 0x4000, ~25% red current).
+    // Bright enough to read across a small bedroom but cooler than the
+    // giant clock's white in every sense (FR-7.3 spirit).
     // No halo: the background is already pure black, and a red halo
     // would just smear the glyphs without adding legibility.
-    constexpr uint16_t kInk  = 0x4000;
-    constexpr uint16_t kHalo = 0x0000;
+    const uint16_t kInk  = theme::ink(theme::Ink::SAFETY);
+    constexpr uint16_t kHalo = 0x0000;  // universal background
     // Same baseline as giant_clock_scene so the swap doesn't visibly
     // jump if the room flips into night mid-scene.
     gfx::draw_text_halo(matrix, gfx::centered_x(matrix, hhmm), 17,

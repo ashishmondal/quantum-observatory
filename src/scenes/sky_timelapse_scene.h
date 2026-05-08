@@ -22,13 +22,13 @@
 #include <stdio.h>
 
 #include <Adafruit_Protomatter.h>
-#include <Fonts/Picopixel.h>
 
 #include "backgrounds/sky_bg_render.h"
 #include "config.h"
 #include "gfx_text.h"
 #include "scene.h"
 #include "sun_position.h"
+#include "theme.h"
 
 class SkyTimelapseScene : public Scene {
 public:
@@ -54,9 +54,11 @@ public:
 
     // Label.
     static const char kLabel[] = "TIMELAPSE";
-    matrix.setFont(&Picopixel);
+    matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
     gfx::draw_text_halo(matrix, gfx::centered_x(matrix, kLabel), /*y=*/31,
-                        kLabel, /*ink=*/0x07FF, /*halo=*/0x0000);
+                        kLabel,
+                        /*ink=*/theme::ink(theme::Ink::STATUS_INFO),
+                        /*halo=*/0x0000);
   }
 };
