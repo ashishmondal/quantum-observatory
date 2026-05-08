@@ -137,8 +137,12 @@ public:
       matrix.setCursor(0, 10);
     } else {
       // GFX font: baseline anchor. y=24 keeps 12 pt fonts mostly
-      // on-panel; taller fonts intentionally clip.
-      matrix.setCursor(0, 24);
+      // on-panel; taller fonts intentionally clip. TomThumb's glyph
+      // cells sit one row above the baseline used by Picopixel /
+      // Org_01 (THEME.md §2.3) — shift the cursor down so the
+      // operator sees TomThumb on the same row as the others.
+      const int16_t y = (entry.font == &TomThumb) ? 25 : 24;
+      matrix.setCursor(0, y);
     }
     matrix.print(kSampleText);
   }

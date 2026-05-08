@@ -252,6 +252,13 @@ fonts, picked to match each theme's identity:
 | `blade_runner`    | Org_01 (5×6 sans, true lowercase)|
 | `lcars_tos`       | Org_01                           |
 
+> **TomThumb baseline quirk.** TomThumb's GFX glyphs sit one pixel
+> *above* the baseline that Picopixel/Org_01 use, so any scene that
+> swaps fonts at a fixed `y` will see TomThumb text float one row
+> high. When drawing TomThumb (directly or via the BODY role on
+> `nostromo_green`), add **+1 to `y`** so it lines up with the other
+> BODY fonts at the same baseline.
+
 `HEADER` is the biggest theme differentiator but draws from a fixed
 roster of **only three** TTF conversions — deliberately small so the
 set is easy to license, attribute, and PROGMEM-budget. Each theme

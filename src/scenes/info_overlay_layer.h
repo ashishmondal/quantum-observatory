@@ -186,6 +186,15 @@ private:
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
+    // Per-font baseline correction (THEME.md §2.3): nostromo_green's
+    // BODY = TomThumb sits one row above Picopixel/Org_01.
+    const int8_t  dy = theme::baseline_y_shift(theme::FontRole::BODY);
+    const int16_t y1 = kY1 + dy;
+    const int16_t y2 = kY2 + dy;
+    const int16_t y3 = kY3 + dy;
+    const int16_t y4 = kY4 + dy;
+    const int16_t y5 = kY5 + dy;
+
     // BODY is the active theme's data-line ink — same role the
     // typewriter scenes use for their value rows. Halo is plain
     // black so neighbouring lines don't bleed at the bottom of
@@ -206,7 +215,7 @@ private:
                static_cast<unsigned>((ip >>  8) & 0xFFu),
                static_cast<unsigned>((ip >> 16) & 0xFFu),
                static_cast<unsigned>((ip >> 24) & 0xFFu));
-      gfx::draw_text_halo(matrix, 0, kY1, buf, fg, halo);
+      gfx::draw_text_halo(matrix, 0, y1, buf, fg, halo);
     }
 
     // Line 2 — RSSI (dBm) + MQTT state. RSSI reads 0 before the
@@ -218,7 +227,7 @@ private:
       const long     rssi  = static_cast<long>(g_info_rssi_dbm);
       const char*    mq    = (flags & 0x2u) ? "OK" : "NO";
       snprintf(buf, sizeof(buf), "RSS%ld MQ %s", rssi, mq);
-      gfx::draw_text_halo(matrix, 0, kY2, buf, fg, halo);
+      gfx::draw_text_halo(matrix, 0, y2, buf, fg, halo);
     }
 
     // Line 3 — uptime + FPS. Uptime as HHHH:MM (caps at 9999 h ≈
@@ -236,7 +245,7 @@ private:
                static_cast<unsigned long>(hh),
                static_cast<unsigned long>(mm),
                static_cast<unsigned long>(fps));
-      gfx::draw_text_halo(matrix, 0, kY3, buf, fg, halo);
+      gfx::draw_text_halo(matrix, 0, y3, buf, fg, halo);
     }
 
     // Line 4 — active scene wire-id. Same string mqtt_link emits in
@@ -244,7 +253,7 @@ private:
     {
       const char* scn = scene_state::string_from_id(scene_state::current());
       snprintf(buf, sizeof(buf), "SCN %s", scn);
-      gfx::draw_text_halo(matrix, 0, kY4, buf, fg, halo);
+      gfx::draw_text_halo(matrix, 0, y4, buf, fg, halo);
     }
 
     // Line 5 — active theme + free heap (KB). Theme.h doesn't yet
@@ -257,7 +266,7 @@ private:
       const uint32_t heap_kb = g_info_free_heap_b / 1024u;
       snprintf(buf, sizeof(buf), "THM %s H%luk", thm,
                static_cast<unsigned long>(heap_kb));
-      gfx::draw_text_halo(matrix, 0, kY5, buf, fg, halo);
+      gfx::draw_text_halo(matrix, 0, y5, buf, fg, halo);
     }
   }
 

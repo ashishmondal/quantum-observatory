@@ -196,6 +196,10 @@ public:
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
+    // Per-font baseline correction (THEME.md §2.3): nostromo_green's
+    // BODY = TomThumb sits one row above Picopixel/Org_01.
+    const int8_t kBodyDy = theme::baseline_y_shift(theme::FontRole::BODY);
+
     const uint16_t kVisibleInk = theme::ink(theme::Ink::STATUS_OK);    // overhead
     const uint16_t kWaitInk    = theme::ink(theme::Ink::STATUS_STALE); // no fresh data
     const uint16_t kCountInk   = theme::ink(theme::Ink::STATUS_WARN);  // countdown
@@ -210,15 +214,16 @@ public:
       const uint8_t n = typed[i];
       memcpy(prefix, lines[i], n);
       prefix[n] = '\0';
+      const int16_t by = static_cast<int16_t>(kBaselineY[i] + kBodyDy);
 
       // Measure the partial string so the black background hugs the
       // glyphs and the cursor lines up exactly. Picopixel has variable
       // glyph widths; getTextBounds gives the authoritative pixel box.
-      int16_t  bx, by;
+      int16_t  bx, by_unused;
       uint16_t bw, bh;
       uint16_t prefix_px = 0;
       if (n > 0) {
-        matrix.getTextBounds(prefix, 1, kBaselineY[i], &bx, &by, &bw, &bh);
+        matrix.getTextBounds(prefix, 1, by, &bx, &by_unused, &bw, &bh);
         prefix_px = bw;
       }
 
@@ -227,7 +232,7 @@ public:
       // Use fillRect so the trailing (untyped) portion of the row stays
       // transparent / shows the BMP.
       const int16_t bg_x = 0;
-      const int16_t bg_y = static_cast<int16_t>(kBaselineY[i] - 6);
+      const int16_t bg_y = static_cast<int16_t>(by - 6);
       const int16_t bg_h = 5;
       const int16_t bg_w = (n > 0) ? static_cast<int16_t>(prefix_px + 2) : 0;
       // Add room for the cursor (2 px wide + 1 px gap) when this line
@@ -250,7 +255,7 @@ public:
 
       if (n > 0) {
         matrix.setTextColor(ink);
-        matrix.setCursor(1, kBaselineY[i]);
+        matrix.setCursor(1, by);
         matrix.print(prefix);
       }
 

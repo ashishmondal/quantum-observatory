@@ -83,7 +83,11 @@ inline void draw_header(Adafruit_Protomatter& matrix, const char* str,
                         uint16_t fg = 0xFFFF, uint16_t halo = 0x0000) {
   matrix.setFont(theme::font(theme::FontRole::HEADER));
   matrix.setTextSize(1);
-  draw_text_halo(matrix, /*x=*/2, /*y=*/15, str, fg, halo);
+  // Per-font baseline correction (THEME.md §2.3): TomThumb sits one
+  // row above the other faces, so y is shifted down +1 when the
+  // active HEADER role binds to it. No-op for every other font.
+  const int16_t y = 15 + theme::baseline_y_shift(theme::FontRole::HEADER);
+  draw_text_halo(matrix, /*x=*/2, y, str, fg, halo);
 }
 
 // Draw a centred, haloed body line, just under the header band.
@@ -93,7 +97,10 @@ inline void draw_body(Adafruit_Protomatter& matrix, const char* str,
                       uint16_t fg = 0xFFFF, uint16_t halo = 0x0000) {
   matrix.setFont(theme::font(theme::FontRole::BODY));
   matrix.setTextSize(1);
-  draw_text_halo(matrix, centered_x(matrix, str), 22, str, fg, halo);
+  // Per-font baseline correction (THEME.md §2.3): nostromo_green's
+  // BODY = TomThumb sits one row above Picopixel / Org_01.
+  const int16_t y = 22 + theme::baseline_y_shift(theme::FontRole::BODY);
+  draw_text_halo(matrix, centered_x(matrix, str), y, str, fg, halo);
 }
 
 // Always-on small clock readout — top-right corner, Picopixel HH:MM with
@@ -133,7 +140,11 @@ inline void draw_clock_chrome(Adafruit_Protomatter& matrix, uint32_t now_ms,
   // extends to rows 0..6 — within the panel.
   int16_t x = PANEL_WIDTH - static_cast<int16_t>(w) - 1 - x1;
   if (x < 0) x = 0;
-  draw_text_halo(matrix, x, 5, buf, fg, halo);
+  // Per-font baseline correction (THEME.md §2.3): TomThumb sits one
+  // row above other BODY faces; shift the chrome readout down by
+  // the active BODY's correction so the corner clock stays aligned.
+  const int16_t y = 5 + theme::baseline_y_shift(theme::FontRole::BODY);
+  draw_text_halo(matrix, x, y, buf, fg, halo);
 }
 
 // ── Theme layout-hint primitives (FR-15 / THEME.md §3.4) ─────────────
@@ -234,8 +245,11 @@ inline void draw_scene_header(Adafruit_Protomatter& matrix,
   // top-left y. This makes the header band visually consistent across
   // scenes/themes and frees callers from font-baseline math — they
   // pass y=0 and the helper translates to the GFX baseline.
+  // Additional per-font baseline correction (THEME.md §2.3) keeps
+  // TomThumb-bound HEADERs visually flush with the other faces.
   const int16_t kHeaderX = 2;
-  const int16_t y_top    = y + 1;
+  const int16_t y_top    = y + 1 +
+      theme::baseline_y_shift(theme::FontRole::HEADER);
 
   if (theme::has(theme::Hint::BLOCK_BARS)) {
     // BLOCK_BARS path: left-anchor the block + name composition at

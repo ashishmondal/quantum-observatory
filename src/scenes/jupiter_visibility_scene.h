@@ -192,8 +192,13 @@ public:
                            header_dim ? header_dim_ink : header_ink);
 
     // ── Three typewriter lines (theme BODY font) ─────────────────────
+    // ── Three typewriter lines (theme BODY font) ─────────────────────
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
+
+    // Per-font baseline correction (THEME.md §2.3): nostromo_green's
+    // BODY = TomThumb sits one row above Picopixel/Org_01.
+    const int8_t kBodyDy = theme::baseline_y_shift(theme::FontRole::BODY);
 
     constexpr uint16_t kVisibleInk = 0x07E0;  // green — banner when overhead + dark
     constexpr uint16_t kBelowInk   = 0x630C;  // dim grey — below horizon
@@ -209,19 +214,20 @@ public:
       const uint8_t n = typed[i];
       memcpy(prefix, lines[i], n);
       prefix[n] = '\0';
+      const int16_t by = static_cast<int16_t>(kBaselineY[i] + kBodyDy);
 
       // Measure typed prefix (Picopixel is variable-width).
-      int16_t  bx, by;
+      int16_t  bx, by_unused;
       uint16_t bw, bh;
       uint16_t prefix_px = 0;
       if (n > 0) {
-        matrix.getTextBounds(prefix, 1, kBaselineY[i], &bx, &by, &bw, &bh);
+        matrix.getTextBounds(prefix, 1, by, &bx, &by_unused, &bw, &bh);
         prefix_px = bw;
       }
 
       // Black backdrop, 1 px padding above + below the glyph cap.
       const int16_t bg_x = 0;
-      const int16_t bg_y = static_cast<int16_t>(kBaselineY[i] - 6);
+      const int16_t bg_y = static_cast<int16_t>(by - 6);
       const int16_t bg_h = 5;
       const int16_t bg_w = (n > 0) ? static_cast<int16_t>(prefix_px + 2) : 0;
       int16_t bg_w_total = bg_w;
@@ -246,7 +252,7 @@ public:
 
       if (n > 0) {
         matrix.setTextColor(ink);
-        matrix.setCursor(1, kBaselineY[i]);
+        matrix.setCursor(1, by);
         matrix.print(prefix);
       }
 

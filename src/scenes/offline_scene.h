@@ -79,7 +79,11 @@ public:
     static const char kBadge[] = "OFFLINE";
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
-    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, kBadge), /*y=*/29,
+    // Per-font baseline correction (THEME.md §2.3): TomThumb sits one
+    // row above other BODY faces; nudge the badge so it stays on the
+    // intended row across themes.
+    const int16_t badge_y = 29 + theme::baseline_y_shift(theme::FontRole::BODY);
+    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, kBadge), badge_y,
                         kBadge,
                         theme::ink(theme::Ink::STATUS_WARN),
                         /*halo=*/0x0000);

@@ -199,26 +199,33 @@ public:
     constexpr uint8_t kLabelLen = 4;  // "ILL " / "AGE " (incl. trailing space)
     constexpr int16_t kTextX    = 6;  // global +5 shift from the panel edge
 
+    // Per-font baseline correction (THEME.md §2.3): nostromo_green's
+    // BODY = TomThumb sits one row above Picopixel/Org_01, so every y
+    // we hand to setCursor / getTextBounds picks up this shift to
+    // stay aligned with the per-line backdrop band.
+    const int8_t kBodyDy = theme::baseline_y_shift(theme::FontRole::BODY);
+
     for (int i = 0; i < 3; ++i) {
       if (typed[i] == 0 && active != i) continue;
 
       const uint8_t n = typed[i];
+      const int16_t by = static_cast<int16_t>(kBaselineY[i] + kBodyDy);
 
       // Measure the typed prefix once (authoritative width for
       // backdrop + cursor placement). Picopixel is variable-width.
       char prefix[12];
       memcpy(prefix, lines[i], n);
       prefix[n] = '\0';
-      int16_t  bx, by;
+      int16_t  bx, by_unused;
       uint16_t bw, bh;
       uint16_t prefix_px = 0;
       if (n > 0) {
-        matrix.getTextBounds(prefix, kTextX, kBaselineY[i], &bx, &by, &bw, &bh);
+        matrix.getTextBounds(prefix, kTextX, by, &bx, &by_unused, &bw, &bh);
         prefix_px = bw;
       }
 
       // Backdrop band: 5 px tall, 1 px above the glyph cap.
-      const int16_t bg_y = static_cast<int16_t>(kBaselineY[i] - 6);
+      const int16_t bg_y = static_cast<int16_t>(by - 6);
       const int16_t bg_h = 5;
       const int16_t bg_w = (n > 0) ? static_cast<int16_t>(prefix_px + 2) : 0;
       int16_t bg_w_total = bg_w;
@@ -241,7 +248,7 @@ public:
         if (i == 0) {
           // PHASE bar — single colour (black on bright).
           matrix.setTextColor(kPhaseInk);
-          matrix.setCursor(kTextX, kBaselineY[i]);
+          matrix.setCursor(kTextX, by);
           matrix.print(prefix);
         } else {
           // ILL / AGE — split label vs value at kLabelLen.
@@ -253,20 +260,20 @@ public:
           memcpy(lbl, lines[i], label_n);
           lbl[label_n] = '\0';
           matrix.setTextColor(kLabelInk);
-          matrix.setCursor(kTextX, kBaselineY[i]);
+          matrix.setCursor(kTextX, by);
           matrix.print(lbl);
 
           if (n > kLabelLen) {
             // Measure label width to know where the value starts.
             int16_t lbx, lby;
             uint16_t lbw, lbh;
-            matrix.getTextBounds(lbl, kTextX, kBaselineY[i], &lbx, &lby, &lbw, &lbh);
+            matrix.getTextBounds(lbl, kTextX, by, &lbx, &lby, &lbw, &lbh);
             char val[12];
             const uint8_t val_n = static_cast<uint8_t>(n - kLabelLen);
             memcpy(val, lines[i] + kLabelLen, val_n);
             val[val_n] = '\0';
             matrix.setTextColor(kValueInk);
-            matrix.setCursor(kTextX + lbw, kBaselineY[i]);
+            matrix.setCursor(kTextX + lbw, by);
             matrix.print(val);
           }
         }

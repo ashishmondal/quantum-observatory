@@ -186,11 +186,14 @@ public:
     // FPS + theme tag readout in BODY ink.
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
+    // Per-font baseline correction (THEME.md §2.3): TomThumb sits one
+    // row above other BODY faces.
+    const int16_t by = 30 + theme::baseline_y_shift(theme::FontRole::BODY);
     char line[16];
     snprintf(line, sizeof(line), "%lu",
              static_cast<unsigned long>(m_fps_display));
     matrix.setTextColor(theme::ink(theme::Ink::BODY));
-    matrix.setCursor(1, 30);
+    matrix.setCursor(1, by);
     matrix.print(line);
 
     // GIANT_DIGIT_GHOST mini-demo: draw an "8" in GHOST ink behind a
@@ -200,21 +203,21 @@ public:
     // out — that's the same passthrough behaviour as the real giant
     // clock under non-Apollo themes.
     matrix.setTextColor(theme::ink(theme::Ink::GHOST));
-    matrix.setCursor(28, 30);
+    matrix.setCursor(28, by);
     matrix.print("8");
     matrix.setTextColor(theme::ink(theme::Ink::BODY));
-    matrix.setCursor(28, 30);
+    matrix.setCursor(28, by);
     matrix.print("1");
 
     // Uptime "Tn" in VALUE ink so VALUE / LABEL distinct from BODY.
     const uint32_t uptime_s = (now_ms - m_init_ms) / 1000u;
     matrix.setTextColor(theme::ink(theme::Ink::LABEL));
-    matrix.setCursor(36, 30);
+    matrix.setCursor(36, by);
     matrix.print("T");
     snprintf(line, sizeof(line), "%lus",
              static_cast<unsigned long>(uptime_s));
     matrix.setTextColor(theme::ink(theme::Ink::VALUE));
-    matrix.setCursor(40, 30);
+    matrix.setCursor(40, by);
     matrix.print(line);
 
     // Tiny "moving witness" pixel in the bottom-right that hops 1 px

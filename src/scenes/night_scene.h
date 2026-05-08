@@ -120,7 +120,10 @@ public:
       date[sizeof(date)-1] = '\0';
     }
     matrix.setTextColor(kInk);
-    matrix.setCursor(gfx::centered_x(matrix, date) + date_x_nudge(), 29);
+    // Per-font baseline correction (THEME.md §2.3): TomThumb sits one
+    // row above other BODY faces.
+    const int16_t date_y = 29 + theme::baseline_y_shift(theme::FontRole::BODY);
+    matrix.setCursor(gfx::centered_x(matrix, date) + date_x_nudge(), date_y);
     matrix.print(date);
     // matrix.show() is called by loop1().
   }
