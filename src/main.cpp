@@ -10,7 +10,6 @@
 #include "gfx_text.h"
 #include "light_sensor.h"
 #include "scene_state.h"
-#include "sky_snapshot.h"
 #include "theme.h"
 #include "thermal_monitor.h"
 #include "time_of_day.h"
@@ -40,7 +39,6 @@
 #include "scenes/moon_phase_scene.h"
 #include "scenes/constellation_now_scene.h"
 #include "scenes/ir_test_scene.h"
-#include "scenes/sky_timelapse_scene.h"
 #include "scenes/splash_scene.h"
 #include "scenes/text_demo_scene.h"
 #include "scenes/thermal_safe_scene.h"
@@ -85,7 +83,6 @@ static OfflineScene    s_offline_scene;     // phase 6.4 — MQTT-disconnect ove
 static SplashScene     s_splash_scene;      // phase 6.5+ — boot splash override
 static ThermalSafeScene s_thermal_safe_scene; // phase 5.5.2 — DS3231-triggered override
 static GfxTestScene    s_gfx_test_scene;    // graphics smoke-test (FPS, palette cycle)
-static SkyTimelapseScene s_sky_timelapse_scene; // debug: 1 day per 10 s
 static IssPassScene    s_iss_pass_scene;    // phase 7.1 — "ISS NOW" callout
 static MoonPhaseScene  s_moon_phase_scene;  // phase 7.2 — sticky moon disc + phase
 static JupiterVisibilityScene s_jupiter_visibility_scene; // phase 7.3 — Jupiter look-angles
@@ -136,21 +133,20 @@ public:
 
 // Chrome adapter — the always-on HH:MM readout (FR-9.2). Honours the
 // active scene's wants_clock_chrome() opt-out so the giant clock isn't
-// defaced. Future D.8/D.9 work (link-health dot, sun arc) layers in
-// here; keeping it as a Layer means those additions don't touch loop1().
+// defaced. Future link-health dot work layers in here; keeping it as
+// a Layer means those additions don't touch loop1().
 class ChromeLayer final : public Layer {
 public:
   const char* name() const override { return "chrome"; }
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
     if (g_current_scene != nullptr && g_current_scene->wants_clock_chrome()) {
       gfx::draw_clock_chrome(matrix, now_ms);
-      // FR-16.5 micro-indicator: 1-px sun arc on the top edge,
-      // driven by the sky_snapshot Core 1 publishes once per second.
-      // Cheap (one snapshot read + one drawPixel) and shares the
-      // wants_clock_chrome() opt-out so the giant clock isn't
-      // defaced by stray top-row pixels.
-      gfx::draw_sun_arc_chrome(matrix);
     }
+    // Theme-level decorations (FRAME_BORDER, SCANLINES) layer on top
+    // of every scene including chrome opt-outs — the giant clock
+    // gets a Blade Runner cyan frame just like everything else.
+    // (added in phase T.7)
+    gfx::draw_theme_decorations(matrix);
   }
 };
 
@@ -232,7 +228,6 @@ static Scene* scene_for(scene_state::SceneId id) {
     case SI::SPLASH:       return &s_splash_scene;
     case SI::THERMAL_SAFE: return &s_thermal_safe_scene;
     case SI::GFX_TEST:     return &s_gfx_test_scene;
-    case SI::SKY_TIMELAPSE: return &s_sky_timelapse_scene;
     case SI::ISS_PASS:     return &s_iss_pass_scene;
     case SI::MOON_PHASE:   return &s_moon_phase_scene;
     case SI::JUPITER_VISIBILITY: return &s_jupiter_visibility_scene;
@@ -334,21 +329,26 @@ static void action_ir_info_toggle(uint16_t /*addr*/, uint16_t /*cmd*/) {
   g_info_overlay_event_ms = ts;
 }
 
-// LEFT / RIGHT — scene-scoped. Today only the FontDemoScene consumes
-// these (cycle through Adafruit_GFX bundled fonts). Other scenes
-// silently ignore the press; the dispatch table still bumps `accepted`
-// because the press DID reach a handler — it just chose to no-op.
-// Keep the active-scene gate here (not in the dispatch table) so
-// future scenes can opt in without touching ir_remote internals.
+// LEFT / RIGHT — theme cycle (FR-17.10 / IR.5). Goes through
+// theme::cycle() so the next-frame swap (FR-15.4) and the status-
+// heartbeat echo (FR-15.7) are preserved — same code path MQTT uses.
+// Carveout: while sitting on the FONT_DEMO diagnostic, route ◄/► to
+// FontDemoScene's font picker instead so the diagnostic stays usable
+// from the couch. FONT_DEMO is reachable only via explicit MQTT, so
+// the carveout doesn't surprise an operator browsing scenes.
 static void action_ir_left(uint16_t /*addr*/, uint16_t /*cmd*/) {
   if (scene_state::current() == scene_state::SceneId::FONT_DEMO) {
     s_font_demo_scene.cycle(-1);
+    return;
   }
+  theme::cycle(-1);
 }
 static void action_ir_right(uint16_t /*addr*/, uint16_t /*cmd*/) {
   if (scene_state::current() == scene_state::SceneId::FONT_DEMO) {
     s_font_demo_scene.cycle(+1);
+    return;
   }
+  theme::cycle(+1);
 }
 
 // FR-17.5 dispatch table. Pointer + count handed to ir_remote in
@@ -531,12 +531,6 @@ void setup() {
   // value has been pushed (so the scene works standalone).
   constellation_state::init();
 
-  // Continuous sky-model snapshot (FR-16.5, phase D.6). Seeds an
-  // explicitly-invalid snapshot so first-frame chrome readers don't
-  // observe uninitialised seqlock state. The actual 1 Hz refresh
-  // runs on Core 1 from loop1() during slack windows.
-  sky_snapshot::init();
-
   // DS3231 RTC bring-up (FR-9.5). Battery-backed authoritative time
   // source — every reader (chrome, giant clock, future scenes) goes
   // through tod::now() which reads the cache populated by tod::poll().
@@ -647,6 +641,30 @@ void loop() {
   // per-iteration call is essentially free.
   ir_remote::set_dispatch_enabled(
       scene_state::current() != scene_state::SceneId::IR_TEST);
+
+  // Phase T.9 / FR-15.8 — gfx_test theme auto-cycle.
+  // While the diagnostic scene is up, rotate themes every
+  // kThemeStepMs so a single capture covers every theme's Ink and
+  // Hint coverage. theme::cycle() is the same writer-side path the
+  // MQTT and IR remote handlers already use (CODING_PRACTICES §3
+  // single-writer rule for the atom-flip mode-switch pattern). No
+  // work for any other scene — last_step_ms resets on exit so a
+  // re-entry restarts from the current theme.
+  {
+    static constexpr uint32_t kThemeStepMs = 6000u;  // 5 themes × 6 s = 30 s full sweep
+    static uint32_t s_last_theme_step_ms   = 0;
+    if (scene_state::current() == scene_state::SceneId::GFX_TEST) {
+      if (s_last_theme_step_ms == 0) s_last_theme_step_ms = now_ms;
+      if (now_ms - s_last_theme_step_ms >= kThemeStepMs) {
+        theme::cycle(+1);
+        s_last_theme_step_ms = now_ms;
+        Serial.print("[gfx_test] theme=");
+        Serial.println(theme::string_from_id(theme::current()));
+      }
+    } else {
+      s_last_theme_step_ms = 0;
+    }
+  }
 
   // Phase 6.4: MQTT-disconnect override (FR-5.1). Edge-detect on
   // mqtt_link::connected() so we only wake the renderer when the
@@ -1080,15 +1098,6 @@ void loop1() {
         g_first_frame_render_ms = v;
       }
     }
-
-    // FR-16.5 / phase D.6: continuous sky-model refresh on Core 1.
-    // Internally rate-limited to ~1 Hz and gated on the freshly-
-    // computed slack so it skips frames where the active scene is
-    // already at budget. The trig-heavy sun::compute + iss_geom
-    // cost (~200 µs combined on RP2040 soft-float) lands here once a
-    // second on a slack window — moves it off Core 0 entirely and
-    // off the per-frame render path that scenes currently run.
-    sky_snapshot::tick(now_ms, g_render_slack_ms);
   }
 
   // Publish FPS to Core 0 once per second WITHOUT printing here —

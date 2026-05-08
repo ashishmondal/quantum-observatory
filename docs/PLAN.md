@@ -296,16 +296,11 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
   - `tools/bmp_to_header.py`: `GAMMA = 2.2` constant + `gamma_correct()` applied to each R/G/B channel before quantising to RGB565.
   - **Win:** observatory splash and any future artwork render with perceptually correct brightness on the panel's non-linear LED response.
 
-- [x] **6.5.5 Sky background — gradient + sun** (FR-13.2, FR-13.3)
-  - NOAA low-precision solar model (`include/sun_position.h` / `src/sun_position.cpp`, ~80 lines, ±1°). Five-band altitude gradient (day / golden / civil / nautical / astronomical), per-row top→bottom lerp, smoothed top rows so deep-night doesn't show a hard near-black band at row 0.
-  - Sun: 4-tier disc (radius 4, ~9 px), each tier carrying top/bot color pair → vertical gradient pale-on-top / warm-on-bottom, intensifying near the horizon. Linear azimuth→x mapping (az 60°→0, 180°→32, 300°→63) draws a true semi-elliptical arc; sx clamped to `[4, 59]` so the disc is never cropped.
-  - Houston lat/lon + tz hardcoded in `config.h` (LOCAL_TZ_OFFSET_MIN flips for DST manually until MQTT-settable lands).
-  - Refactored into a free function `sky_bg_render::draw(matrix, utc_epoch, lat, lon)` so the timelapse can feed a synthetic epoch without mocking `tod::now()`.
-  - **Win:** giant clock now sits over a live sun-aware sky that visibly evolves through the day.
+- [x] **6.5.5 Sky background — gradient + sun** *(removed)*
+  - Originally landed: NOAA solar model + five-band altitude gradient + multi-tier sun disc as the live background for the giant clock. Removed in favour of the artist-supplied `starfield.bmp` (BG_IMAGE) — the constant motion of the sun disc was visually busy under the white HH:MM digits and the gradient washed out the date strip. The `sun_position` module survives because `iss_pass` and `jupiter_visibility` consume it for daylight classification (FR-14.2 / FR-14.3). The `sky_bg`/`sky_bg_render` renderers and their `BgType::SKY` enum slot were deleted.
 
-- [x] **6.5.6 Sky timelapse debug scene** (FR-13.4)
-  - `SkyTimelapseScene` maps `now_ms % 10000` to a 24 h synthetic UTC sweep and feeds `sky_bg_render::draw()`. Cyan "TIMELAPSE" Picopixel label at y=31. Selectable via standard MQTT scene contract (`{"scene_id":"sky_timelapse"}`).
-  - **Win:** one full day (sun rising on the left, arcing up over centre, setting on the right, full night, repeat) every 10 s — makes tuning the gradient and sun arc trivial.
+- [x] **6.5.6 Sky timelapse debug scene** *(removed)*
+  - Originally landed: `SkyTimelapseScene` mapped `now_ms % 10000` to a 24 h synthetic UTC sweep so the gradient + sun arc were tunable in 10 s. Removed alongside 6.5.5 — with no sky background to validate, the diagnostic scene served no purpose. `SceneId::SKY_TIMELAPSE` slot reclaimed.
 
 ---
 
@@ -340,15 +335,16 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
 - [x] **T.1 Docs** — THEME.md drafted; FR-15 added to REQUIREMENTS; README link; assets/README.md authoring note (FR-15.6 runtime duotone).
 - [x] **T.2 `theme.h` / `theme.cpp` skeleton** — APOLLO_AMBER only, exact same colors / fonts / brackets as today. `theme::set/current/ink/font/has/bracket_open/bracket_close/bg_palette_for`. Atomic `uint8_t` active id. Built and called from one no-op site (e.g. `gfx_test`) to prove the API. Build fixes during D.1: `GFXfont` is a typedef'd anonymous struct in Adafruit_GFX, can't be forward-declared, so theme.h pulls `<gfxfont.h>` directly; theme.cpp `#undef`s Arduino's `bit(b)` macro before defining `theme::bit(Hint)`. **Exit:** firmware builds, runs, looks pixel-identical to today.
 - [x] **T.2.1 `FontRole` rename to size ladder** (FR-15.9) — rename `theme::FontRole` enumerators from semantic (`CHROME`, `HEADER`, `BODY`, `GIANT_DIGITS`) to the four-role size ladder (`MICRO`, `BODY`, `HEADER`, `CLOCK`). `MICRO` binds to Tiny3x3 across every theme; `CLOCK` binds to Digital-7 14pt across every theme; `BODY` and `HEADER` are the only per-theme slots. Update the per-theme font tables in `theme.cpp` to the assignments in [THEME.md](THEME.md) §2. **Exit:** every `theme::font()` call site compiles against the new enum; visual diff = zero (Apollo's bindings stay byte-identical, just under new role names).
-- [-] **T.3 Scene refactor** — replace every hardcoded RGB565 / `setFont(&...)` / bracket literal under `src/scenes/` with `theme::ink()` / `theme::font()` / `theme::bracket_*()`. Mechanical, every scene file touched. **Exit:** `grep -nE '0x[0-9A-Fa-f]{4}|setFont\\(' src/scenes/` returns nothing meaningful; visual diff = zero.
+- [x] **T.3 Scene refactor** — replace every hardcoded RGB565 / `setFont(&...)` / bracket literal under `src/scenes/` with `theme::ink()` / `theme::font()` / `theme::bracket_*()`. Mechanical, every scene file touched. **Exit:** `grep -nE '0x[0-9A-Fa-f]{4}|setFont\\(' src/scenes/` returns nothing meaningful; visual diff = zero.
   - [x] **T.3a Map clean scenes (zero-diff sweep)** — refactor only the scenes whose entire literal set has a 1:1 home in today's `Ink` enum (`giant_clock_scene`, `info_overlay_layer`). Audit revealed the rest either use accent inks the enum can't express today (multi-color status scenes — T.3b) or use raw colors legitimately (diagnostics — T.3c). **Exit:** Apollo renders byte-identically to today; theme::font(BODY) wired through real scene code.
-  - [x] **T.3b Expand `Ink` for multi-color status scenes** — extend `theme::Ink` with the roles the typewriter scenes need (e.g. `STATUS_OK`/`STATUS_WARN`/`STATUS_INFO`/`HEADER_DIM`/`VALUE`/`LABEL`), populate Apollo's table to preserve current colors, then refactor `iss_pass_scene`, `jupiter_visibility_scene`, `constellation_now_scene`, `moon_phase_scene`, `night_scene`, `thermal_safe_scene`, `offline_scene`, `boot_scene`, `clock_scene`, `splash_scene`, `sky_timelapse_scene`. Update [THEME.md](THEME.md) §3.1 enum to match. **Exit:** every non-diagnostic scene under `src/scenes/` reads inks via `theme::ink()`; visual diff = zero on Apollo.
+  - [x] **T.3b Expand `Ink` for multi-color status scenes** — extend `theme::Ink` with the roles the typewriter scenes need (e.g. `STATUS_OK`/`STATUS_WARN`/`STATUS_INFO`/`HEADER_DIM`/`VALUE`/`LABEL`), populate Apollo's table to preserve current colors, then refactor `iss_pass_scene`, `jupiter_visibility_scene`, `constellation_now_scene`, `moon_phase_scene`, `night_scene`, `thermal_safe_scene`, `offline_scene`, `boot_scene`, `clock_scene`, `splash_scene`. Update [THEME.md](THEME.md) §3.1 enum to match. **Exit:** every non-diagnostic scene under `src/scenes/` reads inks via `theme::ink()`; visual diff = zero on Apollo.
   - [x] **T.3c Diagnostic scenes — explicit exemption** — `gfx_test_scene`, `font_demo_scene`, `ir_test_scene`, `color_cycle_scene`, `text_demo_scene`, `background_scene` test the renderer / fonts / palettes directly and intentionally use raw literals; document the exemption inline (`// diagnostic — bypasses theme:: by design`) and amend the T.3 grep gate to exclude these files. **Exit:** the FR-15.3 grep gate (`grep -nE '0x[0-9A-Fa-f]{4}|setFont\\(' src/scenes/ | grep -v '^.*_(test|demo|cycle)_scene\\.h:'`) returns nothing meaningful.
 - [x] **T.4 MQTT theme topic** — subscribe `observatory/theme` `{"id":"<theme_id>"}` in `mqtt_link.cpp`; persist active theme in `scene_state` (no flash); add `theme` to `observatory/status` heartbeat; add HA `select.observatory_theme` in `homeassistant/setup_mqtt.py`. **Exit:** publishing the topic with `apollo_amber` is a no-op; unknown ids logged + ignored.
-- [ ] **T.5 NOSTROMO_GREEN** — second theme: green CRT inks, scanlines hint, cursor-block hint. Reuses existing fonts (no new TTFs yet). First *visible* theme switch from MQTT. **Exit:** publishing `nostromo_green` flips the dashboard end-to-end inside one frame.
-- [ ] **T.6 Font roster** — convert and bundle the three `HEADER`-role TTFs (FR-15.9, [THEME.md](THEME.md) §5): Press Start 2P (APOLLO), VT323 (NOSTROMO), Pixel Operator (VECTREX + BLADE_RUNNER + LCARS — shared) to GFXfont headers under `include/fonts/`. Each is already declared as a `[[font]]` entry in `assets/fonts.toml` (the single source of truth for what headers exist); run `tools/convert_fonts.py` to (re)generate them. The script batches `tools/convert_font.sh`, which wraps the vendored Adafruit `fontconvert` (`tools/fontconvert/`, builds against system FreeType via pkg-config) and post-processes each header to add `#pragma once` + `static` linkage so it can be `#include`d from multiple TUs without multiple-definition errors. Update Apollo `HEADER` to Press Start 2P (closes FR-4.1 placeholder). License attribution stubs in each header. The three `BODY`-role fonts (TomThumb, Picopixel, Org_01) and the `MICRO` font (Tiny3x3) ship with Adafruit_GFX — no bundling cost. **Exit:** all three headers compile; PROGMEM cost ≤ 7 KB total (measured 5.6 KB).
-- [ ] **T.7 Remaining themes** — VECTREX_NEON (vector-glow halo), BLADE_RUNNER (cyan/orange + frame border), LCARS_TOS (block bars, no brackets). Each adds at least one new layout hint primitive in `gfx_text.h`. **Exit:** all five themes selectable; each visually distinct at a glance.
-- [ ] **T.8 BG duotone runtime** — `tools/bmp_to_header.py` emits per-image `lum[192]` + reads `assets/<name>.notheme` sidecar → `themeable` flag. Boot-time 256-entry ramp LUT per non-default theme. Per-image double-buffered runtime palette (~3.8 KB SRAM). Theme switch ≤ 5 ms. APOLLO stays passthrough. **Exit:** switching to NOSTROMO retones every themable BMP green; switching back restores original colors; no torn frames.
+- [x] **T.5 NOSTROMO_GREEN** — second theme: green CRT inks, scanlines hint, cursor-block hint. Reuses existing fonts (no new TTFs yet). First *visible* theme switch from MQTT. **Exit:** publishing `nostromo_green` flips the dashboard end-to-end inside one frame.
+- [x] **T.6 Font roster** — convert and bundle the three `HEADER`-role TTFs (FR-15.9, [THEME.md](THEME.md) §5): Press Start 2P (APOLLO), VT323 (NOSTROMO), Pixel Operator (VECTREX + BLADE_RUNNER + LCARS — shared) to GFXfont headers under `include/fonts/`. Each is already declared as a `[[font]]` entry in `assets/fonts.toml` (the single source of truth for what headers exist); run `tools/convert_fonts.py` to (re)generate them. The script batches `tools/convert_font.sh`, which wraps the vendored Adafruit `fontconvert` (`tools/fontconvert/`, builds against system FreeType via pkg-config) and post-processes each header to add `#pragma once` + `static` linkage so it can be `#include`d from multiple TUs without multiple-definition errors. Update Apollo `HEADER` to Press Start 2P (closes FR-4.1 placeholder). License attribution stubs in each header. The three `BODY`-role fonts (TomThumb, Picopixel, Org_01) and the `MICRO` font (Tiny3x3) ship with Adafruit_GFX — no bundling cost. **Exit:** all three headers compile; PROGMEM cost ≤ 7 KB total (measured 5.6 KB).
+- [x] **T.7 Remaining themes** — VECTREX_NEON (vector-glow halo), BLADE_RUNNER (cyan/orange + frame border), LCARS_TOS (block bars, no brackets). Each adds at least one new layout hint primitive in `gfx_text.h`. **Exit:** all five themes selectable; each visually distinct at a glance.
+  - [x] **T.7a Per-scene hint wiring** — route `theme::bracket_*()` through the typewriter scene headers (replacing literal `"[ISS]"` etc.), swap `0x0000` halos for `theme::ink(HEADER_HALO)` so NEON_OUTLINE engages on Vectrex/BR, and call `gfx::draw_theme_block_header()` instead of bracketed snprintf when `theme::has(BLOCK_BARS)`. Mechanical fan-out across iss_pass, jupiter_visibility, moon_phase, constellation_now. **Exit:** LCARS shows colored block bars in place of brackets; Vectrex/BR headers glow cyan-on-magenta / cyan-on-orange.
+- [x] **T.8 BG duotone runtime** — `tools/bmp_to_header.py` emits per-image `lum[192]` + reads `assets/<name>.notheme` sidecar → `themeable` flag. Boot-time 256-entry ramp LUT per non-default theme. Per-image double-buffered runtime palette (~3.8 KB SRAM). Theme switch ≤ 5 ms. APOLLO stays passthrough. **Exit:** switching to NOSTROMO retones every themable BMP green; switching back restores original colors; no torn frames.
 - [ ] **T.9 `gfx_test` coverage** — extend the diagnostic scene to cycle every `theme::Ink` role and every `Hint` overlay on a fixed cadence so one capture covers all themes (FR-15.8). **Exit:** running `gfx_test` for 60 s exercises every theme at least once.
 
 ---
@@ -356,13 +352,11 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
 ## Phase D — Dual-Core Compositor & Idle-Slack Utilization (FR-16)
 
 > Goal: graduate Core 1 from "single-scene renderer with idle slack" to
-> "compositor + ambient sky simulator + speculative pre-render", and
+> "compositor + speculative pre-render", and
 > tighten the cross-core data path so Core 0's network jitter cannot
 > perturb the frame. Each step is a small demoable win with a visible
 > or measurable outcome — no flag-day rewrites. Order matters: D.1
-> must land before D.2/D.3 (it builds the layer plumbing they consume),
-> and D.4 must land before D.6 (seqlock is needed before sky-model
-> snapshots cross cores at high frequency).
+> must land before D.2/D.3 (it builds the layer plumbing they consume).
 
 - [x] **D.1 Layer stack scaffolding** (FR-16.1, FR-16.10)
   - Introduced a `Layer` interface (`render(matrix, now_ms)`, `name()`,
@@ -377,7 +371,7 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     giant-clock opt-out. Overlay slots start `nullptr` for D.2/D.3/D.8
     to fill without touching `loop1()`.
   - **Win:** zero visual change; firmware builds clean (RAM 30.1%,
-    Flash 25.5%); one layer of indirection now exists so D.2/D.3/D.6
+    Flash 25.5%); one layer of indirection now exists so D.2/D.3
     are local edits.
 
 - [x] **D.2 Fade-through-black transitions** (FR-16.3)
@@ -430,22 +424,21 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     Maintain a 32-frame rolling average; publish to Core 0 via a
     `volatile uint32_t g_render_slack_ms`. Add `render_slack_ms` to
     the `observatory/status` heartbeat. Define `kSlackFloorMs`
-    (default 8) below which D.6/D.7 work skips for the frame.
+    (default 8) below which D.7 work skips for the frame.
   - **Win:** HA shows a live `render_slack_ms` sensor; idle scenes
     report ~30 ms slack, heavy scenes report < 10 ms — quantifies how
-    much budget D.6/D.7 actually have.
+    much budget D.7 actually has.
 
-- [x] **D.6 Continuous sky-model on Core 1** (FR-16.5)
-  - Run the `sun_position` computation + a moon-phase calculation +
-    (if available) the cached ISS look-angle once per second on Core 1
-    during a slack window, regardless of active scene. Publish into a
-    `sky_snapshot` struct via the FR-16.7 seqlock. Sky-aware scenes
-    (`clock`+sky bg, `moon_phase`, `iss_pass`, `jupiter_visibility`)
-    read the snapshot instead of recomputing; the chrome layer gains
-    a 1-pixel sun-arc indicator along the top edge driven from it.
-  - **Win:** swapping from `clock` to `moon_phase` shows the moon disc
-    immediately on the first frame (no stall); the chrome arc visibly
-    marches across the day in `sky_timelapse`.
+- [x] **D.6 Continuous sky-model on Core 1** *(removed)*
+  - Originally landed: ran `sun_position` + moon-phase + cached ISS
+    look-angle once per second during a slack window and published a
+    `sky_snapshot` struct via the FR-16.7 seqlock; the chrome layer
+    drew a 1-pixel sun-arc indicator along the top edge from it.
+    Removed alongside the sky background — with no sky-aware scenes
+    or chrome consumers left, the snapshot module was dead weight.
+    `sky_snapshot.{h,cpp}` and the chrome arc helper were deleted;
+    `sun_position` survives for the FR-14.2/14.3 daylight tests on
+    iss/jupiter scenes (each scene calls it directly now).
 
 - [x] **D.7 Speculative `Scene::prepare()`** (FR-16.4)
   - Add an optional `Scene::prepare(now_ms)` hook (default no-op).
@@ -543,7 +536,7 @@ top of that foundation in commit-sized steps, ordered by
   - `kRemoteCycle[]` in `config.h`: ordered list of operator-facing
     `SceneId`s for `▲/▼`. Excludes overrides + diagnostics per
     FR-17.6. Default: `{CLOCK, MOON_PHASE, JUPITER_VISIBILITY,
-    CONSTELLATION_NOW, ISS_PASS, SKY_TIMELAPSE}`.
+    CONSTELLATION_NOW, ISS_PASS}`.
   - `ir_remote::poll()` gains the FR-17.2 discipline filter (NEC only,
     no parity/overflow) + FR-17.3 address gate. Frames that pass the
     filters increment a separate `accepted` counter (visible in
@@ -573,16 +566,15 @@ top of that foundation in commit-sized steps, ordered by
     feature in Phase IR — pays for the entire IR effort the first
     time something breaks at the in-laws' place.
 
-- [ ] **IR.5 Theme cycle (`◄`/`►`)** (FR-17.10, FR-15.2, FR-15.4)
-  - Wire `◄` → `theme::set(prev)`, `►` → `theme::set(next)`. Same
-    `theme::set()` path MQTT uses (FR-15.4 next-frame swap, no scene
-    re-init). Order from `theme::all_ids()` — append-only.
+- [x] **IR.5 Theme cycle (`◄`/`►`)** (FR-17.10, FR-15.2, FR-15.4)
+  - Wire `◄` → `theme::cycle(-1)`, `►` → `theme::cycle(+1)`. Same
+    atomic single-byte store `theme::set()` uses (FR-15.4 next-frame
+    swap, no scene re-init); wraps modulo `Id::COUNT`. FONT_DEMO
+    diagnostic keeps `◄`/`►` as its font picker (carveout in
+    `action_ir_left/right`) since FONT_DEMO is reachable only via
+    explicit MQTT.
   - Status heartbeat already echoes theme (FR-15.7) so HA reflects
     the operator's choice without extra wiring.
-  - **Caveat:** depends on T.8 `theme::set()` being live at runtime.
-    If T.8 hasn't landed when IR.5 is scheduled, IR.5 falls back to
-    publishing `observatory/theme` and routing through HA — slower
-    by one round-trip but still demos the action.
   - **Win:** room guest can switch the look-and-feel from the
     couch without learning HA.
 

@@ -48,6 +48,7 @@
 #include "backgrounds/image_palette_bg.h"
 #include "bitmaps/_index.h"
 #include "config.h"
+#include "gfx_text.h"
 #include "iss_geometry.h"
 #include "iss_state.h"
 #include "scene.h"
@@ -64,7 +65,7 @@ public:
     for (int i = 0; i < kImageRegistryCount; ++i) {
       const ImageEntry& e = kImageRegistry[i];
       if (e.name != nullptr && std::strcmp(e.name, "iss") == 0) {
-        m_bg.set(e.palette, e.pixels, e.regions, e.region_count);
+        m_bg.set(e);
         return;
       }
     }
@@ -180,18 +181,16 @@ public:
     }
     const bool cursor_on = ((now_ms / 280u) & 1u) == 0u;
 
-    // ── Header: pulsing [ISS] in built-in 5×7 mono ──────────────────
-    const bool header_dim = (now_ms % 1500u) < 200u;
+    // ── Header: pulsing identity-bracketed name in built-in 5×7 mono ─
     // ISS scene identity = STATUS_OK (green = "healthy / overhead‑able");
     // pulse-low rides the matching STATUS_OK_DIM so a future theme can
-    // re-tone both ends together.
+    // re-tone both ends together. Brackets / halo / BLOCK_BARS routing
+    // owned by theme via gfx::draw_scene_header (T.7a).
+    const bool header_dim = (now_ms % 1500u) < 200u;
     const uint16_t header_ink     = theme::ink(theme::Ink::STATUS_OK);
     const uint16_t header_dim_ink = theme::ink(theme::Ink::STATUS_OK_DIM);
-    matrix.setFont(nullptr);
-    matrix.setTextSize(1);
-    matrix.setTextColor(header_dim ? header_dim_ink : header_ink);
-    matrix.setCursor(1, 0);
-    matrix.print("[ISS]");
+    gfx::draw_scene_header(matrix, "ISS", 1, 0,
+                           header_dim ? header_dim_ink : header_ink);
 
     // ── Three typewriter lines (Picopixel) ──────────────────────
     matrix.setFont(theme::font(theme::FontRole::BODY));

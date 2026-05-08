@@ -41,6 +41,7 @@
 #include "bitmaps/_index.h"
 #include "bitmaps/moon.h"
 #include "config.h"
+#include "gfx_text.h"
 #include "moon_state.h"
 #include "scene.h"
 #include "theme.h"
@@ -59,7 +60,7 @@ public:
     for (int i = 0; i < kImageRegistryCount; ++i) {
       const ImageEntry& e = kImageRegistry[i];
       if (e.name != nullptr && std::strcmp(e.name, "moon") == 0) {
-        m_bg.set(e.palette, e.pixels, e.regions, e.region_count);
+        m_bg.set(e);
         return;
       }
     }
@@ -180,13 +181,13 @@ public:
     const     uint16_t kValueInk   = theme::ink(theme::Ink::VALUE);
     constexpr uint16_t kCursorInk  = 0xEF5D;  // peak — pops on every line
 
-    // ── Header: pulsing [MOON] in built-in 5×7 mono ─────────────────
+    // ── Header: pulsing identity-bracketed name in built-in 5×7 mono ─
+    // MOON identity = scene-internal moon-grey (kHeaderInk/kHeaderDim
+    // above) — not a STATUS_* role; brackets / halo / BLOCK_BARS
+    // routing owned by theme via gfx::draw_scene_header (T.7a).
     const bool header_dim = (now_ms % 1500u) < 200u;
-    matrix.setFont(nullptr);
-    matrix.setTextSize(1);
-    matrix.setTextColor(header_dim ? kHeaderDim : kHeaderInk);
-    matrix.setCursor(6, 0);
-    matrix.print("[MOON]");
+    gfx::draw_scene_header(matrix, "MOON", 6, 0,
+                           header_dim ? kHeaderDim : kHeaderInk);
 
     // ── Three typewriter lines (Picopixel) ──────────────────────────
     // PHASE (i=0): black glyphs on a bright bar — reads as a current-

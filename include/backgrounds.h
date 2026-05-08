@@ -24,7 +24,7 @@
 #include "backgrounds/nebula_bg.h"
 #include "backgrounds/bitmap_bg.h"
 #include "backgrounds/image_palette_bg.h"
-#include "backgrounds/sky_bg.h"
+#include "backgrounds/theme_clock_bg.h"
 #include "bitmaps/_index.h"
 
 class Adafruit_Protomatter;
@@ -36,7 +36,7 @@ enum class BgType : uint8_t {
   NEBULA,
   BITMAP,
   IMAGE,
-  SKY,
+  THEME_CLOCK,   // per-theme animated bg behind giant clock (FR-15)
 };
 
 class Backgrounds {
@@ -47,7 +47,7 @@ public:
     m_star.init();
     m_para.init();
     m_neb.init();
-    m_sky.init();
+    m_theme_clock.init();
     init_bitmap_demo();
     init_image_default();
   }
@@ -59,24 +59,24 @@ public:
       case BgType::STARFIELD: m_star.render(matrix, now_ms); break;
       case BgType::PARALLAX:  m_para.render(matrix, now_ms); break;
       case BgType::NEBULA:    m_neb.render(matrix, now_ms);  break;
-      case BgType::BITMAP:    m_bmp.render(matrix, now_ms);  break;
-      case BgType::IMAGE:     m_img.render(matrix, now_ms);  break;
-      case BgType::SKY:       m_sky.render(matrix, now_ms);  break;
+      case BgType::BITMAP:    m_bmp.render(matrix, now_ms);         break;
+      case BgType::IMAGE:     m_img.render(matrix, now_ms);         break;
+      case BgType::THEME_CLOCK: m_theme_clock.render(matrix, now_ms); break;
       case BgType::NONE:
-      default:                matrix.fillScreen(0x0000);     break;
+      default:                matrix.fillScreen(0x0000);            break;
     }
   }
 
   // Stable lower-case identifier — handy for logs / future scene registry.
   static const char* name(BgType type) {
     switch (type) {
-      case BgType::STARFIELD: return "starfield";
-      case BgType::PARALLAX:  return "parallax";
-      case BgType::NEBULA:    return "nebula";
-      case BgType::BITMAP:    return "bitmap";
-      case BgType::IMAGE:     return "image";
-      case BgType::SKY:       return "sky";
-      case BgType::NONE:      return "none";
+      case BgType::STARFIELD:   return "starfield";
+      case BgType::PARALLAX:    return "parallax";
+      case BgType::NEBULA:      return "nebula";
+      case BgType::BITMAP:      return "bitmap";
+      case BgType::IMAGE:       return "image";
+      case BgType::THEME_CLOCK: return "theme_clock";
+      case BgType::NONE:        return "none";
     }
     return "unknown";
   }
@@ -92,7 +92,7 @@ private:
   NebulaBg        m_neb;
   BitmapBg        m_bmp;
   ImagePaletteBg  m_img;
-  SkyBg           m_sky;
+  ThemeClockBg    m_theme_clock;
 
   // Built-in demo bitmap. Splits the 192-entry BG ramp of NEBULA_CLOUDS
   // into two cycling sub-regions and lays out the panel as horizontal
@@ -144,7 +144,7 @@ private:
       }
     }
     const ImageEntry& e = kImageRegistry[chosen];
-    m_img.set(e.palette, e.pixels, e.regions, e.region_count);
+    m_img.set(e);
   }
 };
 

@@ -22,12 +22,25 @@ See notes at end for glyph nomenclature & other tidbits.
 #include <ft2build.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include FT_GLYPH_H
 #include FT_MODULE_H
 #include FT_TRUETYPE_DRIVER_H
 #include "gfxfont.h" // Adafruit_GFX font structures
 
-#define DPI 141 // Approximate res. of Adafruit 2.8" TFT
+#define DEFAULT_DPI 141 // Approximate res. of Adafruit 2.8" TFT (upstream default)
+
+// quantum-observatory: pixel-design fonts (e.g. Press Start 2P, VT323,
+// Pixel Operator) must be rasterized at 72 DPI so 1 pt == 1 px and
+// glyphs land on the design grid. Override via env var instead of a
+// CLI arg to keep the upstream argv contract intact (the existing
+// arg list is positional: size + optional first/last char codes — a
+// new positional would be ambiguous).
+//
+//   FONTCONVERT_DPI=72 ./fontconvert pixel.ttf 8 > out.h
+//
+// Unset / non-positive → falls back to DEFAULT_DPI (141).
 
 // Accumulate bits for output, with periodic hexadecimal byte write
 void enbit(uint8_t value) {
@@ -137,7 +150,13 @@ int main(int argc, char *argv[]) {
   }
 
   // << 6 because '26dot6' fixed-point format
-  FT_Set_Char_Size(face, size << 6, 0, DPI, 0);
+  int dpi = DEFAULT_DPI;
+  const char *dpi_env = getenv("FONTCONVERT_DPI");
+  if (dpi_env && *dpi_env) {
+    int v = atoi(dpi_env);
+    if (v > 0) dpi = v;
+  }
+  FT_Set_Char_Size(face, size << 6, 0, dpi, 0);
 
   // Currently all symbols from 'first' to 'last' are processed.
   // Fonts may contain WAY more glyphs than that, but this code

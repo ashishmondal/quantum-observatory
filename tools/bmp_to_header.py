@@ -41,6 +41,13 @@ OUT    = ROOT / "include" / "bitmaps"
 PANEL_W, PANEL_H = 64, 32
 BG_LIMIT         = 192   # must match palette::BG_LEN in color_palette.h
 
+# Histogram-stretch percentiles for the per-image luminance table
+# (THEME.md §6.2). Stretching against the actually-used entries lets
+# bunched images (most photos / most art) consume the full duotone
+# ramp instead of a thin slice.
+LUM_P_LO = 0.01
+LUM_P_HI = 0.99
+
 # Gamma applied to every channel before RGB565 quantisation. The HUB75
 # panel's perceived response is closer to gamma ~2.2-2.8, so a sRGB
 # texture with a gamma-1.0 render path looks washed out (mid-tones too
@@ -156,6 +163,47 @@ def parse_regions_sidecar(path: pathlib.Path):
     return out
 
 
+def compute_lum_table(palette, pixels):
+    """Return a 192-entry uint8 BT.601 luminance table, histogram-stretched
+    against the actually-used palette entries (THEME.md §6.2).
+
+    Stretching is per-image: find the 1st and 99th percentile of the
+    *per-pixel* luminance distribution, then linearly map [p1, p99] to
+    [0, 255] with clamping. Degenerate flat images (p99 == p1) skip the
+    stretch.
+    """
+    # Raw BT.601 luminance per palette entry (0..191), pre-gamma. Using
+    # the raw sRGB-ish values (the same the palette is authored in) so
+    # the duotone ramp interpolates in the same space the artist sees.
+    raw = [0] * BG_LIMIT
+    for i in range(BG_LIMIT):
+        r, g, b = palette[i]
+        raw[i] = (299 * r + 587 * g + 114 * b + 500) // 1000
+        if raw[i] < 0:   raw[i] = 0
+        if raw[i] > 255: raw[i] = 255
+
+    # Histogram of per-pixel luminance over the actual image.
+    pixel_lums = [raw[px] for px in pixels]
+    pixel_lums.sort()
+    n = len(pixel_lums)
+    p_lo = pixel_lums[int(LUM_P_LO * (n - 1))]
+    p_hi = pixel_lums[int(LUM_P_HI * (n - 1))]
+
+    out = [0] * BG_LIMIT
+    if p_hi <= p_lo:
+        # Flat image (single luminance) — skip stretch.
+        for i in range(BG_LIMIT):
+            out[i] = raw[i]
+    else:
+        span = p_hi - p_lo
+        for i in range(BG_LIMIT):
+            v = ((raw[i] - p_lo) * 255 + span // 2) // span
+            if v < 0:   v = 0
+            if v > 255: v = 255
+            out[i] = v
+    return out
+
+
 def safe_basename(stem: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in stem)
 
@@ -164,12 +212,13 @@ def to_pascal(name: str) -> str:
     return "".join(p.capitalize() for p in name.split("_") if p)
 
 
-def emit_image_header(stem: str, palette, pixels, regions):
+def emit_image_header(stem: str, palette, pixels, regions, themeable):
     safe = safe_basename(stem)
     base = "k" + to_pascal(safe)
     sym_palette = base + "Palette"
     sym_pixels  = base + "Pixels"
     sym_regions = base + "Regions"
+    sym_lum     = base + "Lum"
 
     OUT.mkdir(parents=True, exist_ok=True)
     out = OUT / f"{safe}.h"
@@ -222,8 +271,24 @@ def emit_image_header(stem: str, palette, pixels, regions):
             f"{{ 0, {used_max + 1}, 0 }} }};")
         lines.append(f"inline constexpr uint8_t {sym_regions}Count = 1;")
     lines.append("")
+
+    if themeable:
+        lum = compute_lum_table(palette, pixels)
+        lines.append(
+            "// BT.601 luminance per palette entry, histogram-stretched")
+        lines.append(
+            "// (THEME.md §6.2). Consumed at theme-switch time to build")
+        lines.append(
+            "// a per-image runtime palette under non-default themes.")
+        lines.append(f"inline constexpr uint8_t {sym_lum}[192] = {{")
+        for i in range(0, BG_LIMIT, 16):
+            chunk = lum[i : i + 16]
+            lines.append("  " + " ".join(f"{v:3d}," for v in chunk))
+        lines.append("};")
+        lines.append("")
+
     out.write_text("\n".join(lines))
-    return out, sym_palette, sym_pixels, sym_regions
+    return out, sym_palette, sym_pixels, sym_regions, sym_lum if themeable else None
 
 
 def emit_registry(entries):
@@ -245,22 +310,37 @@ def emit_registry(entries):
     if entries:
         lines.append("")
     lines += [
+        "// `themeable` + `lum` are populated by the T.8 BG duotone runtime",
+        "// (THEME.md §6). When themeable, `lum` points at a 192-entry",
+        "// per-image luminance table the theme module ramps through to",
+        "// synthesize a runtime palette on theme switch. Non-themeable",
+        "// images (`assets/<name>.notheme` sidecar) carry lum=nullptr and",
+        "// always render in their baked palette.",
+        "// `image_index` is the entry's position in this registry; the",
+        "// theme module uses it to address the per-image runtime palette",
+        "// double-buffer (FR-15.6).",
         "struct ImageEntry {",
         "  const char*           name;",
         "  const uint16_t*       palette;",
         "  const uint8_t*        pixels;",
         "  const BitmapBg::Region* regions;",
         "  uint8_t               region_count;",
+        "  bool                  themeable;",
+        "  const uint8_t*        lum;          // 192 entries; nullptr iff !themeable",
+        "  uint8_t               image_index;  // position in kImageRegistry",
         "};",
         "",
         "inline constexpr ImageEntry kImageRegistry[] = {",
     ]
-    for stem, sym_palette, sym_pixels, sym_regions in entries:
+    for idx, (stem, sym_palette, sym_pixels, sym_regions, sym_lum, themeable) in enumerate(entries):
+        lum_str = sym_lum if (themeable and sym_lum) else "nullptr"
+        themeable_str = "true" if themeable else "false"
         lines.append(
             f'  {{ "{stem}", {sym_palette}, {sym_pixels}, '
-            f'{sym_regions}, {sym_regions}Count }},')
+            f'{sym_regions}, {sym_regions}Count, '
+            f'{themeable_str}, {lum_str}, {idx} }},')
     if not entries:
-        lines.append("  { nullptr, nullptr, nullptr, nullptr, 0 },")
+        lines.append("  { nullptr, nullptr, nullptr, nullptr, 0, false, nullptr, 0 },")
     lines.append("};")
     lines.append("")
     lines.append(
@@ -288,10 +368,16 @@ def main() -> int:
         except BmpError as e:
             print(f"[bmp] ERROR {p.name}: {e}", file=sys.stderr)
             return 1
-        out, sp, sx, sr = emit_image_header(p.stem, palette, pixels, regions)
+        # FR-15.6 / THEME.md §6.4: empty `.notheme` sidecar opts an image
+        # out of duotone retoning. Sidecar contents (if any) are ignored
+        # — presence is the signal.
+        themeable = not p.with_suffix(".notheme").exists()
+        out, sp, sx, sr, sl = emit_image_header(
+            p.stem, palette, pixels, regions, themeable)
         print(f"[bmp] {p.name} -> {out.relative_to(ROOT)}  "
-              f"({len(regions) if regions else 1} region(s))")
-        entries.append((p.stem, sp, sx, sr))
+              f"({len(regions) if regions else 1} region(s), "
+              f"{'themable' if themeable else 'no-theme'})")
+        entries.append((p.stem, sp, sx, sr, sl, themeable))
 
     idx = emit_registry(entries)
     if entries:

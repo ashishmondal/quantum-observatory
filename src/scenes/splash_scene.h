@@ -39,7 +39,7 @@ public:
     for (int i = 0; i < kImageRegistryCount; ++i) {
       const ImageEntry& e = kImageRegistry[i];
       if (e.name != nullptr && std::strcmp(e.name, "observatory") == 0) {
-        m_bg.set(e.palette, e.pixels, e.regions, e.region_count);
+        m_bg.set(e);
         return;
       }
     }

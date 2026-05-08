@@ -19,13 +19,14 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include <Adafruit_Protomatter.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/Picopixel.h>
 
 #include "config.h"
-#include "sky_snapshot.h"
+#include "theme.h"
 #include "time_of_day.h"
 
 namespace gfx {
@@ -69,26 +70,28 @@ inline int16_t centered_x(Adafruit_Protomatter& matrix, const char* str) {
   return x;
 }
 
-// Draw a centred, haloed header line.
-//   - Font: FreeSansBold9pt7b (placeholder for Space Mono Bold, FR-4.1).
-//   - Baseline Y = 14 → caps span ~rows 2–13, halo to ~rows 1–14.
-//     FreeSansBold9pt7b caps are ~12 px tall (much taller than the
-//     spec'd 7-px Space Mono Bold), which is why the header eats most
-//     of the panel for now. Will tighten when 8.6 swaps the real font.
+// Draw a left-anchored, haloed header line.
+//   - Font: theme::FontRole::HEADER (per-theme — Press Start 2P / VT323
+//     / Pixel Operator). Routing through theme means a theme switch
+//     re-fonts every header-band caller without per-scene edits
+//     (FR-15.3 / FR-15.4).
+//   - X = 2 (uniform left margin across every scene + theme).
+//   - Baseline Y = 15 (1 px lower than the prior y=14 — the extra row
+//     gives ascender-heavy theme headers like VT323 / Pixel Operator
+//     a touch more breathing room from the panel top).
 inline void draw_header(Adafruit_Protomatter& matrix, const char* str,
                         uint16_t fg = 0xFFFF, uint16_t halo = 0x0000) {
-  matrix.setFont(&FreeSansBold9pt7b);
+  matrix.setFont(theme::font(theme::FontRole::HEADER));
   matrix.setTextSize(1);
-  draw_text_halo(matrix, centered_x(matrix, str), 14, str, fg, halo);
+  draw_text_halo(matrix, /*x=*/2, /*y=*/15, str, fg, halo);
 }
 
 // Draw a centred, haloed body line, just under the header band.
-//   - Font: Picopixel (placeholder for Silkscreen 5x7, FR-4.1).
+//   - Font: theme::FontRole::BODY (per-theme).
 //   - Baseline Y = 22 → glyphs span ~rows 18–22, halo to ~rows 17–23.
-//     Sits in the lower third, below the (currently oversized) header.
 inline void draw_body(Adafruit_Protomatter& matrix, const char* str,
                       uint16_t fg = 0xFFFF, uint16_t halo = 0x0000) {
-  matrix.setFont(&Picopixel);
+  matrix.setFont(theme::font(theme::FontRole::BODY));
   matrix.setTextSize(1);
   draw_text_halo(matrix, centered_x(matrix, str), 22, str, fg, halo);
 }
@@ -118,7 +121,9 @@ inline void draw_clock_chrome(Adafruit_Protomatter& matrix, uint32_t now_ms,
     buf[3] = '-'; buf[4] = '-'; buf[5] = '\0';
   }
 
-  matrix.setFont(&Picopixel);
+  // Chrome HH:MM rides BODY — small per-theme readable text. A theme
+  // switch re-fonts the corner readout for free (FR-15.3 / FR-15.4).
+  matrix.setFont(theme::font(theme::FontRole::BODY));
   matrix.setTextSize(1);
 
   int16_t x1, y1; uint16_t w, h;
@@ -131,49 +136,147 @@ inline void draw_clock_chrome(Adafruit_Protomatter& matrix, uint32_t now_ms,
   draw_text_halo(matrix, x, 5, buf, fg, halo);
 }
 
-// Always-on micro sun-arc indicator — single pixel along the top edge
-// (row 0) at the column corresponding to the live sun azimuth. Driven
-// by the FR-16.5 sky_snapshot so this costs nothing on the render path
-// beyond a snapshot read + one drawPixel. Below-horizon → no pixel;
-// near horizon → dim warm; above horizon → bright amber.
+// ── Theme layout-hint primitives (FR-15 / THEME.md §3.4) ─────────────
 //
-// The azimuth→x mapping mirrors sky_bg_render::draw() exactly so the
-// chrome dot lines up with the sun disc when the sky bg is showing.
-// Skipped when the snapshot is invalid (pre-RTC-sync) or when the
-// rendering scene has opted out of chrome — same opt-out as the
-// clock readout, since both share the top edge.
+// Each is cheap and gated by `theme::has(Hint)`. Called from a single
+// post-scene, pre-`matrix.show()` site so themes that declare a hint
+// get it for free across every scene without per-scene refactor. Themes
+// that don't declare the hint pay nothing — `theme::has()` is one byte
+// load + one bit test.
 //
-// (added in phase D.6 — FR-16.5 chrome micro-indicator)
-inline void draw_sun_arc_chrome(Adafruit_Protomatter& matrix) {
-  sky_snapshot::Snapshot snap;
-  sky_snapshot::read(&snap);
-  if (!snap.valid) return;
+// (added in phase T.7)
 
-  // Mirror sky_bg_render::draw()'s linear az→x mapping (az 60°=0,
-  // 180°=31.5, 300°=63). Outside [45°, 315°] the sun is "behind us"
-  // for the south-facing panel — no indicator.
-  const float az = snap.sun_azimuth_deg;
-  if (az < 45.0f || az > 315.0f) return;
-  const float xf = (az - 60.0f) * (63.0f / 240.0f);
-  int x = static_cast<int>(xf + 0.5f);
+// 1-px outer rectangle in HEADER ink. Used by BLADE_RUNNER + LCARS
+// FRAME_BORDER (THEME.md §2.4 / §2.5). Two hlines + two vlines is
+// 4·64 = 256 pixel writes — negligible against the panel's 2048-pixel
+// frame budget.
+inline void draw_theme_frame(Adafruit_Protomatter& matrix) {
+  const uint16_t c = theme::ink(theme::Ink::HEADER);
+  matrix.drawFastHLine(0, 0,                   PANEL_WIDTH,  c);
+  matrix.drawFastHLine(0, PANEL_HEIGHT - 1,    PANEL_WIDTH,  c);
+  matrix.drawFastVLine(0, 0,                   PANEL_HEIGHT, c);
+  matrix.drawFastVLine(PANEL_WIDTH - 1, 0,     PANEL_HEIGHT, c);
+}
+
+// Every-other-row dimmer overlay — Nostromo CRT scanlines hint
+// (THEME.md §2.2). Rather than re-blend the underlying pixel (which
+// Protomatter doesn't support reading back, see CODING_PRACTICES §10),
+// stamp a sparse pattern of dim phosphor on alternating rows. Reads as
+// a CRT scanline veneer at 64 px width. Cheap: 16 hlines.
+inline void draw_theme_scanlines(Adafruit_Protomatter& matrix) {
+  // Pull the dim-phosphor color from the active theme so a future
+  // scanline-using theme (other than Nostromo) inherits the right hue.
+  const uint16_t dim = theme::ink(theme::Ink::DIVIDER);
+  for (int16_t y = 1; y < PANEL_HEIGHT; y += 2) {
+    // Stipple every 4th column at half-row stride — visible texture
+    // without overpowering the underlying scene.
+    for (int16_t x = 0; x < PANEL_WIDTH; x += 4) {
+      matrix.drawPixel(x, y, dim);
+    }
+  }
+}
+
+// LCARS-style colored block bars in lieu of bracket glyphs (THEME.md
+// §2.5 BLOCK_BARS). Draws "▮ NAME ▮" with two filled 3×7 orange blocks
+// flanking a header string. Scenes that want LCARS's full look call
+// this *instead* of prepending bracket strings to a snprintf'd header.
+// y is the top of the header band (rows y..y+6 used). Caller is
+// responsible for setting the font + body-ink before calling.
+//
+// Returns the X coordinate where the header baseline glyphs should be
+// drawn (immediately after the left block, with a 1-px gap), so the
+// caller can chain a `draw_text_halo` if it wants a haloed name.
+inline int16_t draw_theme_block_header(Adafruit_Protomatter& matrix,
+                                       const char* name,
+                                       int16_t y) {
+  const uint16_t accent = theme::ink(theme::Ink::ACCENT);
+  // Measure the name in the currently-set font to centre everything.
+  int16_t  x1, y1; uint16_t w, h;
+  matrix.getTextBounds(name, 0, 0, &x1, &y1, &w, &h);
+  const int16_t kBlockW = 3;
+  const int16_t kBlockH = 7;
+  const int16_t total = kBlockW + 1 + static_cast<int16_t>(w) + 1 + kBlockW;
+  int16_t x = (PANEL_WIDTH - total) / 2;
   if (x < 0) x = 0;
-  if (x > PANEL_WIDTH - 1) x = PANEL_WIDTH - 1;
+  matrix.fillRect(x, y, kBlockW, kBlockH, accent);
+  matrix.fillRect(x + total - kBlockW, y, kBlockW, kBlockH, accent);
+  return x + kBlockW + 1 - x1;  // text baseline X — caller owns the Y/baseline.
+}
 
-  // Top-left corner is reserved by the chrome clock readout (which
-  // we draw on the right) — row 0 is otherwise free. Use a warm
-  // amber that stays legible against any sky-bg gradient. Below
-  // horizon (the snap.observer_dark window or sub-horizon) we just
-  // skip; the indicator is meant for "where IS the sun in the sky",
-  // not "where would it be if it were up" — that's what the
-  // sky_timelapse debug scene is for.
-  if (snap.sun_altitude_deg < -3.0f) return;
+// Typewriter-scene identity header — "[NAME]" in the active theme's
+// brackets, drawn in the active theme's HEADER font (Press Start 2P /
+// VT323 / Pixel Operator) with halo from theme::ink(HEADER_HALO) so
+// NEON_OUTLINE themes (Vectrex/BR) glow and bracket-only themes pay
+// no visible halo cost (Apollo/Nostromo halo is 0x0000 = black on the
+// already-black panel band). Under BLOCK_BARS themes (LCARS) brackets
+// are empty strings and the helper instead centers
+// `draw_theme_block_header()` blocks flanking NAME, ignoring (x).
+//
+// (x, y) follows matrix.print() top-left semantics matching the
+// existing typewriter scene call sites (iss_pass / jupiter_visibility
+// / moon_phase / constellation_now). The helper translates to the
+// font's baseline internally so callers don't have to know whether
+// the active HEADER font is built-in (top-left origin) or a GFXfont
+// (baseline origin) — the theme can swap freely.
+//
+// (added in phase T.7a — FR-15.3 bracket / halo / block-bars routing;
+//  T.x extended to consume theme::font(HEADER) so identity headers
+//  retypeset on theme switch alongside body / chrome.)
+inline void draw_scene_header(Adafruit_Protomatter& matrix,
+                              const char* name,
+                              int16_t /*x_unused*/, int16_t y,
+                              uint16_t fg) {
+  matrix.setFont(theme::font(theme::FontRole::HEADER));
+  matrix.setTextSize(1);
 
-  // Two-tier brightness: bright amber when sun > 5° (well up), warm
-  // dim near horizon. Matches the disc gradient in sky_bg.
-  const uint16_t bright = 0xFE60;  // amber (R31 G19 B0)
-  const uint16_t warm   = 0x8200;  // deep orange-red (R16 G16 B0)
-  const uint16_t c = (snap.sun_altitude_deg > 5.0f) ? bright : warm;
-  matrix.drawPixel(x, 0, c);
+  // Uniform layout policy (T.x polish): every scene header is
+  // left-anchored at x=2 and dropped 1 px from the caller-supplied
+  // top-left y. This makes the header band visually consistent across
+  // scenes/themes and frees callers from font-baseline math — they
+  // pass y=0 and the helper translates to the GFX baseline.
+  const int16_t kHeaderX = 2;
+  const int16_t y_top    = y + 1;
+
+  if (theme::has(theme::Hint::BLOCK_BARS)) {
+    // BLOCK_BARS path: left-anchor the block + name composition at
+    // x=kHeaderX so it lines up with bracketed themes. Block is 3 px
+    // wide, then 1 px gap, then the name glyphs.
+    int16_t  bx1, by1; uint16_t bw, bh;
+    matrix.getTextBounds(name, 0, 0, &bx1, &by1, &bw, &bh);
+    const int16_t baseline_y = y_top - by1;
+    const uint16_t accent = theme::ink(theme::Ink::ACCENT);
+    const int16_t kBlockW = 3;
+    const int16_t kBlockH = 7;
+    matrix.fillRect(kHeaderX, y_top, kBlockW, kBlockH, accent);
+    matrix.setTextColor(fg);
+    matrix.setCursor(kHeaderX + kBlockW + 1 - bx1, baseline_y);
+    matrix.print(name);
+    return;
+  }
+
+  // Bracketed path — theme owns the bracket glyphs (FR-15.3).
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%s%s%s",
+           theme::bracket_open(), name, theme::bracket_close());
+  const uint16_t halo = theme::ink(theme::Ink::HEADER_HALO);
+  // Translate top-left y → baseline y for GFXfont rendering. For the
+  // built-in 5×7 font (legacy callers) y1 == 0 so this is a no-op.
+  int16_t  bx1, by1; uint16_t bw, bh;
+  matrix.getTextBounds(buf, 0, 0, &bx1, &by1, &bw, &bh);
+  const int16_t baseline_y = y_top - by1;
+  draw_text_halo(matrix, kHeaderX, baseline_y, buf, fg, halo);
+}
+
+// Umbrella decoration pass. Called once after the scene + chrome have
+// drawn but before `matrix.show()`, so theme-level decorations layer
+// on top of everything. Hints not declared by the active theme cost
+// one byte load + one branch each.
+inline void draw_theme_decorations(Adafruit_Protomatter& matrix) {
+  if (theme::has(theme::Hint::SCANLINES))    draw_theme_scanlines(matrix);
+  if (theme::has(theme::Hint::FRAME_BORDER)) draw_theme_frame(matrix);
+  // CURSOR_BLOCK / NEON_OUTLINE / BLOCK_BARS / GIANT_DIGIT_GHOST are
+  // per-scene primitives (consumed by header / digit drawing call
+  // sites), not full-panel decorations — no global pass for them.
 }
 
 }  // namespace gfx

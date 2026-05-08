@@ -30,6 +30,7 @@
 #include "config.h"
 #include "gfx_text.h"
 #include "scene.h"
+#include "scenes/bayer_dither.h"
 #include "theme.h"
 #include "time_of_day.h"
 
@@ -40,14 +41,36 @@ public:
   // FR-9.3: this scene IS the clock — suppress the chrome readout.
   bool wants_clock_chrome() const override { return false; }
 
+private:
+  // Per-theme horizontal nudge for the centred date strip. Blade Runner
+  // and LCARS both render their date in Org_01 (5×6 sans w/ true
+  // lowercase); under those themes the optical centre of the glyph
+  // strip sits ~2 px left of the geometric centre returned by
+  // gfx::centered_x() — pushing the strip right by 2 px restores the
+  // visual centring. Apollo/Nostromo/Vectrex use Picopixel/TomThumb
+  // which are already optically centred, so they get 0.
+  static int16_t date_x_nudge() {
+    switch (theme::current()) {
+      case theme::Id::BLADE_RUNNER:
+      case theme::Id::LCARS_TOS:
+        return 2;
+      default:
+        return 0;
+    }
+  }
+
+public:
+
   void init(Adafruit_Protomatter& matrix) override {
     matrix.setTextWrap(false);
   }
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
-    // Background: live sky gradient + sun on an arc, computed from
-    // the device's local time and the observer location in config.h.
-    g_backgrounds.render(BgType::SKY, matrix, now_ms);
+    // Background: per-theme animated ambience (FR-15) — see
+    // src/backgrounds/theme_clock_bg.h. Each theme gets its own
+    // signature motion behind the LCD readout; the live digits self-
+    // clean via the halo passes below so any bg pattern is safe.
+    g_backgrounds.render(BgType::THEME_CLOCK, matrix, now_ms);
 
     const tod::Reading r = tod::now(now_ms);
 
@@ -92,12 +115,15 @@ public:
     matrix.print(hhmm);
 
     // ── Divider ─────────────────────────────────────────────────────
-    // Dim warm green under Apollo — same low-luminance "glow" feel as
-    // the amber date strip below, but in a complementary hue so the
-    // divider reads as a separate UI element rather than an extension
-    // of the date.
-    matrix.drawFastHLine(0, 22, PANEL_WIDTH,
-                         theme::ink(theme::Ink::DIVIDER));
+    // Suppressed under Apollo — the animated CRT raster scan already
+    // provides a moving horizontal element between the giant digits
+    // and the date strip, so a static divider line on top of it just
+    // reads as visual clutter. Other themes still get the divider as
+    // their backgrounds are quieter near row 22.
+    if (theme::current() != theme::Id::APOLLO_AMBER) {
+      matrix.drawFastHLine(0, 22, PANEL_WIDTH,
+                           theme::ink(theme::Ink::DIVIDER));
+    }
 
     // ── Date strip ──────────────────────────────────────────────────
     // Apollo BODY ink is deep amber (0xF940) — RGB(255,80,0). Dropping
@@ -118,9 +144,88 @@ public:
       strncpy(date, "--- -- --- ----", sizeof(date));
       date[sizeof(date)-1] = '\0';
     }
-    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, date), /*y=*/29,
+    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, date) + date_x_nudge(), /*y=*/29,
                         date,
                         theme::ink(theme::Ink::BODY),
                         theme::ink(theme::Ink::BODY_HALO));
+
+    // ── Theme-change banner ─────────────────────────────────────────
+    // After a theme switch we want the new theme's name to "announce
+    // itself" on a black field, then dissolve away to reveal the
+    // freshly-themed clock — the same Bayer-dither dissolve the
+    // compositor uses between scenes (see scenes/fade_black_layer.h).
+    //
+    // Phases (millis since the switch):
+    //   0   .. HOLD              alpha = 255 → full black, draw the
+    //                            two-line theme name on top.
+    //   HOLD .. HOLD + DISSOLVE  alpha = 255 → 0 → bayer dissolve
+    //                            reveals the bg+clock underneath; the
+    //                            text dissolves with it (we stop
+    //                            painting it, so the dither carves
+    //                            holes through the black covering it).
+    //   else                     no overlay, no banner.
+    //
+    // Boots silent: theme::last_change_ms() returns 0 until the first
+    // switch (compared via wrap-safe subtraction so the millis()
+    // counter rolling past 0 around day 49 doesn't fire it).
+    constexpr uint32_t kHoldMs     = 1200;
+    constexpr uint32_t kDissolveMs = 500;
+    constexpr uint32_t kBannerMs   = kHoldMs + kDissolveMs;
+    const uint32_t since = now_ms - theme::last_change_ms();
+    if (theme::last_change_ms() != 0 && since < kBannerMs) {
+      uint16_t alpha;
+      bool     draw_text;
+      if (since < kHoldMs) {
+        alpha     = 255;
+        draw_text = true;
+      } else {
+        const uint32_t t = since - kHoldMs;
+        alpha     = static_cast<uint16_t>(255u - (t * 255u) / kDissolveMs);
+        draw_text = false;
+      }
+
+      // Black overlay first — punches holes (or the whole screen at
+      // alpha=255) through the bg+clock that already drew above.
+      bayer::apply_black_overlay(matrix, alpha);
+
+      if (draw_text) {
+        // Split the display name at its single space so the label
+        // renders as two centred lines. display_name() is owned by
+        // theme.cpp and contains exactly one space (e.g.
+        // "APOLLO AMBER", "NOSTROMO GREEN").
+        const char* full = theme::display_name(theme::current());
+        char line1[16];
+        const char* sp = strchr(full, ' ');
+        const char* line2;
+        if (sp != nullptr) {
+          const size_t n = static_cast<size_t>(sp - full);
+          const size_t copy = (n < sizeof(line1) - 1) ? n : sizeof(line1) - 1;
+          memcpy(line1, full, copy);
+          line1[copy] = '\0';
+          line2 = sp + 1;
+        } else {
+          // Single-word fallback — render the whole thing on line 1.
+          strncpy(line1, full, sizeof(line1) - 1);
+          line1[sizeof(line1) - 1] = '\0';
+          line2 = "";
+        }
+
+        matrix.setFont(theme::font(theme::FontRole::HEADER));
+        matrix.setTextSize(1);
+        // Two stacked lines, baselines at y=14 and y=26 — places the
+        // two glyph blocks roughly centred on the panel for the
+        // current HEADER fonts (ascent ~7..8 px each).
+        const int16_t cx1 = gfx::centered_x(matrix, line1);
+        gfx::draw_text_halo(matrix, cx1, /*y=*/14, line1,
+                            theme::ink(theme::Ink::HEADER),
+                            theme::ink(theme::Ink::HEADER_HALO));
+        if (line2[0] != '\0') {
+          const int16_t cx2 = gfx::centered_x(matrix, line2);
+          gfx::draw_text_halo(matrix, cx2, /*y=*/26, line2,
+                              theme::ink(theme::Ink::HEADER),
+                              theme::ink(theme::Ink::HEADER_HALO));
+        }
+      }
+    }
   }
 };

@@ -53,7 +53,6 @@ enum class SceneId : uint8_t {
   BG_IMAGE      = 11,  // direct RGB565 image from assets/*.bmp (no animation)
   OFFLINE       = 12,  // MQTT-disconnect fallback — firmware override (FR-5.1)
   SPLASH        = 13,  // boot splash — firmware override, shown until first MQTT connect
-  SKY_TIMELAPSE = 14,  // debug: 1 day every 10 s, sun rises L → sets R
   ISS_PASS      = 15,  // priority-4 "ISS NOW" callout (phase 7.1)
   MOON_PHASE    = 16,  // sticky moon disc + phase readout (phase 7.2)
   JUPITER_VISIBILITY = 17,  // Jupiter look-angles + magnitude readout (phase 7.3)

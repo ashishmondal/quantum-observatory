@@ -15,6 +15,11 @@
 #   size       required. Point size passed to fontconvert. Pixel-design
 #              fonts only rasterize cleanly at their native size — see
 #              comments below for known-good values.
+#   dpi        optional, default 141 (upstream Adafruit fontconvert
+#              default — calibrated for a 2.8" TFT). Pixel-design fonts
+#              must use dpi=72 so 1 pt == 1 px and glyphs land on the
+#              design grid; otherwise the rasterizer scales them up by
+#              141/72 ≈ 1.96× and headers render “twice as big”.
 #   output     required. Header path, relative to the repo root.
 #   first      optional, default 32  (space).
 #   last       optional, default 126 (~).  Bump above 0x7E to include
@@ -44,19 +49,22 @@ note   = "Giant HH:MM digits. Recolored per theme; geometry never changes."
 id     = "apollo_header_press_start_2p"
 input  = "assets/fonts/PressStart2P.ttf"
 size   = 8
+dpi    = 72
 output = "include/fonts/press_start_2p_8pt7b.h"
 note   = "APOLLO header. Native 8x8 pixel design — only 8pt rasterizes cleanly."
 
 [[font]]
 id     = "nostromo_header_vt323"
 input  = "assets/fonts/VT323-Regular.ttf"
-size   = 8
+size   = 12
+dpi    = 72
 output = "include/fonts/vt323_8pt7b.h"
-note   = "NOSTROMO header. CRT terminal feel."
+note   = "NOSTROMO header. CRT terminal feel. VT323 is a TTF outline, not a strict pixel grid — small sizes get squished by FreeType hinting; 12pt rasterizes cleanly. Filename keeps the _8pt7b suffix to avoid churning theme.cpp's #include path."
 
 [[font]]
 id     = "shared_header_pixel_operator"
 input  = "assets/fonts/PixelOperator8.ttf"
 size   = 8
+dpi    = 72
 output = "include/fonts/pixel_operator_8pt7b.h"
 note   = "VECTREX + BLADE_RUNNER + LCARS header (shared)."

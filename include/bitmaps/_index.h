@@ -13,20 +13,32 @@
 #include "bitmaps/observatory.h"
 #include "bitmaps/starfield.h"
 
+// `themeable` + `lum` are populated by the T.8 BG duotone runtime
+// (THEME.md §6). When themeable, `lum` points at a 192-entry
+// per-image luminance table the theme module ramps through to
+// synthesize a runtime palette on theme switch. Non-themeable
+// images (`assets/<name>.notheme` sidecar) carry lum=nullptr and
+// always render in their baked palette.
+// `image_index` is the entry's position in this registry; the
+// theme module uses it to address the per-image runtime palette
+// double-buffer (FR-15.6).
 struct ImageEntry {
   const char*           name;
   const uint16_t*       palette;
   const uint8_t*        pixels;
   const BitmapBg::Region* regions;
   uint8_t               region_count;
+  bool                  themeable;
+  const uint8_t*        lum;          // 192 entries; nullptr iff !themeable
+  uint8_t               image_index;  // position in kImageRegistry
 };
 
 inline constexpr ImageEntry kImageRegistry[] = {
-  { "iss", kIssPalette, kIssPixels, kIssRegions, kIssRegionsCount },
-  { "jupiter", kJupiterPalette, kJupiterPixels, kJupiterRegions, kJupiterRegionsCount },
-  { "moon", kMoonPalette, kMoonPixels, kMoonRegions, kMoonRegionsCount },
-  { "observatory", kObservatoryPalette, kObservatoryPixels, kObservatoryRegions, kObservatoryRegionsCount },
-  { "starfield", kStarfieldPalette, kStarfieldPixels, kStarfieldRegions, kStarfieldRegionsCount },
+  { "iss", kIssPalette, kIssPixels, kIssRegions, kIssRegionsCount, true, kIssLum, 0 },
+  { "jupiter", kJupiterPalette, kJupiterPixels, kJupiterRegions, kJupiterRegionsCount, true, kJupiterLum, 1 },
+  { "moon", kMoonPalette, kMoonPixels, kMoonRegions, kMoonRegionsCount, true, kMoonLum, 2 },
+  { "observatory", kObservatoryPalette, kObservatoryPixels, kObservatoryRegions, kObservatoryRegionsCount, true, kObservatoryLum, 3 },
+  { "starfield", kStarfieldPalette, kStarfieldPixels, kStarfieldRegions, kStarfieldRegionsCount, true, kStarfieldLum, 4 },
 };
 
 inline constexpr int kImageRegistryCount = 5;

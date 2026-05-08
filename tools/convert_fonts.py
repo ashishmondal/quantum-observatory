@@ -38,7 +38,7 @@ DEFAULT_CONFIG = REPO_ROOT / "assets" / "fonts.toml"
 CONVERTER = REPO_ROOT / "tools" / "convert_font.sh"
 
 REQUIRED_FIELDS = ("id", "input", "size", "output")
-OPTIONAL_FIELDS = ("first", "last", "note")
+OPTIONAL_FIELDS = ("first", "last", "note", "dpi")
 ALLOWED_FIELDS = set(REQUIRED_FIELDS) | set(OPTIONAL_FIELDS)
 
 
@@ -52,6 +52,7 @@ class FontEntry:
     first: int
     last: int
     note: str
+    dpi: int        # 0 → use the converter's default (141)
 
 
 def _load(config_path: Path) -> list[FontEntry]:
@@ -104,6 +105,10 @@ def _load(config_path: Path) -> list[FontEntry]:
             sys.exit(f"error: [{ent_id}] invalid first/last range "
                      f"(got first={first}, last={last})")
 
+        dpi = row.get("dpi", 0)
+        if not isinstance(dpi, int) or dpi < 0:
+            sys.exit(f"error: [{ent_id}] dpi must be a non-negative int")
+
         in_path = (REPO_ROOT / row["input"]).resolve()
         out_path = (REPO_ROOT / row["output"]).resolve()
 
@@ -120,6 +125,7 @@ def _load(config_path: Path) -> list[FontEntry]:
             first=first,
             last=last,
             note=str(row.get("note", "")),
+            dpi=dpi,
         ))
 
     return entries
@@ -135,14 +141,21 @@ def _run_one(ent: FontEntry, dry_run: bool) -> int:
         str(ent.first),
         str(ent.last),
     ]
-    print(f"→ {ent.id}: {shlex.join(cmd)}")
+    # Per-font DPI override is plumbed via env var so the wrapper's
+    # positional argv stays backward-compatible (size/first/last).
+    env = os.environ.copy()
+    if ent.dpi > 0:
+        env["FONTCONVERT_DPI"] = str(ent.dpi)
+        print(f"→ {ent.id}: FONTCONVERT_DPI={ent.dpi} {shlex.join(cmd)}")
+    else:
+        print(f"→ {ent.id}: {shlex.join(cmd)}")
     if dry_run:
         return 0
     if not ent.input.is_file():
         print(f"  ✗ input missing: {ent.input.relative_to(REPO_ROOT)}",
               file=sys.stderr)
         return 1
-    proc = subprocess.run(cmd, cwd=REPO_ROOT)
+    proc = subprocess.run(cmd, cwd=REPO_ROOT, env=env)
     return proc.returncode
 
 

@@ -32,6 +32,7 @@
 #include <gfxfont.h>
 
 enum class BgType : uint8_t;  // backgrounds.h
+struct ImageEntry;            // bitmaps/_index.h (auto-generated)
 
 namespace theme {
 
@@ -113,6 +114,11 @@ enum class Hint : uint8_t {
 // are silently ignored — callers validate at the MQTT boundary.
 void set(Id id);
 
+// Cycle the active theme by `delta` steps (FR-17.10 / IR.5). +1 = next,
+// -1 = previous; wraps modulo `Id::COUNT`. Same atomic single-byte
+// store as set(); safe to call from Core 0 only.
+void cycle(int8_t delta);
+
 // Reader. Cheap — single byte load.
 Id current();
 
@@ -124,6 +130,17 @@ Id current();
 // corrupt read).
 bool        id_from_string(const char* s, Id* out);
 const char* string_from_id(Id id);
+
+// Human-friendly display label for `id` (uppercased, words separated
+// by spaces — e.g. "APOLLO AMBER"). Stable pointer per id; safe to
+// stash. Returns "UNKNOWN" for an out-of-range id.
+const char* display_name(Id id);
+
+// Wall-clock (millis()) timestamp of the most recent theme change.
+// Set by both set() and cycle(). 0 until the first switch — boot
+// remains on APOLLO_AMBER without triggering the on-screen banner.
+// Reader-side; safe from Core 1 every frame.
+uint32_t last_change_ms();
 
 // Active-theme accessors. All read `current()` internally so callers
 // don't have to plumb Id through their call stacks.
@@ -141,5 +158,13 @@ const char*     bracket_close();
 // the existing renderers already use — passthrough, no visual change
 // until non-default themes ship.
 palette::Id     bg_palette_for(BgType bg);
+
+// FR-15.6 / THEME.md §6: returns the palette `ImagePaletteBg` should
+// render `e` with under the active theme. APOLLO_AMBER and any image
+// with `themeable=false` always return the baked `e.palette`. Other
+// themes return the per-image runtime palette synthesized at the most
+// recent theme switch (double-buffered, atomic flip — FR-15.4 next-frame
+// swap, no torn frames). Reader-side; safe from Core 1 every frame.
+const uint16_t* active_image_palette(const ImageEntry& e);
 
 }  // namespace theme

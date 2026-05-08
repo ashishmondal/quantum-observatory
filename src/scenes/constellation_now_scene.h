@@ -71,6 +71,7 @@
 
 #include "config.h"
 #include "constellation_state.h"
+#include "gfx_text.h"
 #include "scene.h"
 #include "stars.h"
 #include "theme.h"
@@ -231,11 +232,11 @@ public:
     const bool header_dim = (now_ms % 1500u) < 200u;
     constexpr uint16_t kHeaderInk = 0xAFFF;  // cool blue-white
     constexpr uint16_t kHeaderDim = 0x4A1F;
-    matrix.setFont(nullptr);
-    matrix.setTextSize(1);
-    matrix.setTextColor(header_dim ? kHeaderDim : kHeaderInk);
-    matrix.setCursor(1, 0);
-    matrix.print("[CON]");
+    // Brackets / halo / BLOCK_BARS routing owned by theme via
+    // gfx::draw_scene_header (T.7a). Identity hue stays inline
+    // (CODING_PRACTICES §4 — scene-internal cool-blue, not STATUS_*).
+    gfx::draw_scene_header(matrix, "CON", 1, 0,
+                           header_dim ? kHeaderDim : kHeaderInk);
 
     // Build readout lines. Convert names to upper case for the
     // dashboard's shouty-typewriter aesthetic.

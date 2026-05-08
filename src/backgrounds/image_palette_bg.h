@@ -23,24 +23,60 @@
 #include <Adafruit_Protomatter.h>
 
 #include "backgrounds/bitmap_bg.h"   // for BitmapBg::Region
+#include "bitmaps/_index.h"           // ImageEntry, kImageRegistry
 #include "config.h"
+#include "theme.h"                    // theme::active_image_palette()
 
 class ImagePaletteBg {
 public:
-  // Point at the flash-resident tables for one image. nullptr palette
-  // or pixels => render black (defensive default when no images exist).
+  // Bind to a registry entry. The bg holds a pointer to the entry so it
+  // can re-resolve the active palette on every frame (T.8 / FR-15.6 —
+  // non-default themes synthesize a runtime palette on theme switch).
+  // Pixels and regions are read directly from the entry; the palette
+  // is not — see render() below.
+  void set(const ImageEntry& e) {
+    m_entry = &e;
+  }
+
+  // Backwards-compatible overload: bind to raw flash tables (used by
+  // the splash scene's local instance and any future runtime-loaded
+  // image not in the codegen registry). Such instances bypass T.8
+  // duotone retoning — they always render in the supplied palette.
   void set(const uint16_t* palette,
            const uint8_t*  pixels,
            const BitmapBg::Region* regions,
            uint8_t region_count) {
-    m_palette      = palette;
-    m_pixels       = pixels;
-    m_regions      = regions;
+    m_entry        = nullptr;
+    m_raw_palette  = palette;
+    m_raw_pixels   = pixels;
+    m_raw_regions  = regions;
     m_region_count = region_count;
   }
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) {
-    if (m_palette == nullptr || m_pixels == nullptr) {
+    // Resolve the active palette + pixel arrays. Two paths:
+    //   1) registry-bound (set(ImageEntry&)) — palette comes from
+    //      theme::active_image_palette() so theme switches retone
+    //      themable images for free (FR-15.6).
+    //   2) raw-bound (set(palette, pixels, regions, count)) — used by
+    //      the splash scene's standalone instance; bypasses theming.
+    const uint16_t*         palette;
+    const uint8_t*          pixels;
+    const BitmapBg::Region* regions;
+    uint8_t                 region_count;
+    if (m_entry != nullptr) {
+      palette      = theme::active_image_palette(*m_entry);
+      pixels       = m_entry->pixels;
+      regions      = m_entry->regions;
+      region_count = m_entry->region_count;
+    } else {
+      palette      = m_raw_palette;
+      pixels       = m_raw_pixels;
+      regions      = m_raw_regions;
+      region_count = m_region_count;
+    }
+
+    if (palette == nullptr || pixels == nullptr) {
       matrix.fillScreen(0x0000);
       return;
     }
@@ -50,9 +86,9 @@ public:
     static constexpr int MAX_REGIONS = 4;
     uint8_t shifts[MAX_REGIONS] = {0};
     const uint8_t rc =
-        m_region_count > MAX_REGIONS ? MAX_REGIONS : m_region_count;
+        region_count > MAX_REGIONS ? MAX_REGIONS : region_count;
     for (uint8_t r = 0; r < rc; ++r) {
-      const BitmapBg::Region& reg = m_regions[r];
+      const BitmapBg::Region& reg = regions[r];
       if (reg.length == 0) continue;
       int32_t s = (static_cast<int32_t>(now_ms) * reg.speed) / 1000;
       int32_t m = s % reg.length;
@@ -61,13 +97,13 @@ public:
     }
 
     for (int y = 0; y < PANEL_HEIGHT; ++y) {
-      const uint8_t* row = m_pixels + y * PANEL_WIDTH;
+      const uint8_t* row = pixels + y * PANEL_WIDTH;
       for (int x = 0; x < PANEL_WIDTH; ++x) {
         const uint8_t b = row[x];
         // Look up the region this index falls into and apply its shift.
         uint8_t cycled = b;
         for (uint8_t r = 0; r < rc; ++r) {
-          const BitmapBg::Region& reg = m_regions[r];
+          const BitmapBg::Region& reg = regions[r];
           if (b >= reg.start && b < reg.start + reg.length) {
             const uint8_t local = static_cast<uint8_t>(b - reg.start);
             const uint8_t rotated =
@@ -76,14 +112,19 @@ public:
             break;
           }
         }
-        matrix.drawPixel(x, y, m_palette[cycled]);
+        matrix.drawPixel(x, y, palette[cycled]);
       }
     }
   }
 
 private:
-  const uint16_t*         m_palette      = nullptr;
-  const uint8_t*          m_pixels       = nullptr;
-  const BitmapBg::Region* m_regions      = nullptr;
+  // Registry-bound path (the default for all on-panel image backgrounds).
+  const ImageEntry* m_entry = nullptr;
+
+  // Raw-pointer path (splash scene's standalone instance, future runtime
+  // assets). Only consulted when m_entry == nullptr.
+  const uint16_t*         m_raw_palette  = nullptr;
+  const uint8_t*          m_raw_pixels   = nullptr;
+  const BitmapBg::Region* m_raw_regions  = nullptr;
   uint8_t                 m_region_count = 0;
 };

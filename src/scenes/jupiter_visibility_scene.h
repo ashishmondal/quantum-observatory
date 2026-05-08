@@ -53,6 +53,7 @@
 #include "backgrounds/image_palette_bg.h"
 #include "bitmaps/_index.h"
 #include "config.h"
+#include "gfx_text.h"
 #include "jupiter_state.h"
 #include "scene.h"
 #include "stars.h"
@@ -69,7 +70,7 @@ public:
     for (int i = 0; i < kImageRegistryCount; ++i) {
       const ImageEntry& e = kImageRegistry[i];
       if (e.name != nullptr && std::strcmp(e.name, "jupiter") == 0) {
-        m_bg.set(e.palette, e.pixels, e.regions, e.region_count);
+        m_bg.set(e);
         return;
       }
     }
@@ -178,21 +179,20 @@ public:
     }
     const bool cursor_on = ((now_ms / 280u) & 1u) == 0u;
 
-    // ── Header: pulsing [JUP] in built-in 5×7 mono ──────────────────
-    // Amber-orange tones — Jupiter's banded look on the BMP is
-    // peach/cream; the header echoes that family while staying
-    // distinct from the green ISS [ISS] and grey moon [MOON].
+    // ── Header: pulsing identity-bracketed name in built-in 5×7 mono ─
+    // JUP identity = STATUS_WARN (amber-orange — echoes Jupiter's
+    // peach/cream banding on the BMP, stays distinct from ISS green /
+    // MOON grey). Pulse-low rides STATUS_WARN_DIM. Brackets / halo /
+    // BLOCK_BARS routing owned by theme via gfx::draw_scene_header
+    // (T.7a).
     const bool header_dim = (now_ms % 1500u) < 200u;
-    constexpr uint16_t kHeaderInk = 0xFD20;  // bright amber
-    constexpr uint16_t kHeaderDim = 0x6A00;  // deep amber
-    matrix.setFont(nullptr);
-    matrix.setTextSize(1);
-    matrix.setTextColor(header_dim ? kHeaderDim : kHeaderInk);
-    matrix.setCursor(1, 0);
-    matrix.print("[JUP]");
+    const uint16_t header_ink     = theme::ink(theme::Ink::STATUS_WARN);
+    const uint16_t header_dim_ink = theme::ink(theme::Ink::STATUS_WARN_DIM);
+    gfx::draw_scene_header(matrix, "JUP", 1, 0,
+                           header_dim ? header_dim_ink : header_ink);
 
-    // ── Three typewriter lines (Picopixel) ──────────────────────────
-    matrix.setFont(&Picopixel);
+    // ── Three typewriter lines (theme BODY font) ─────────────────────
+    matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
     constexpr uint16_t kVisibleInk = 0x07E0;  // green — banner when overhead + dark
