@@ -186,14 +186,14 @@ private:
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
-    // Per-font baseline correction (THEME.md §2.3): nostromo_green's
-    // BODY = TomThumb sits one row above Picopixel/Org_01.
-    const int8_t  dy = theme::baseline_y_shift(theme::FontRole::BODY);
-    const int16_t y1 = kY1 + dy;
-    const int16_t y2 = kY2 + dy;
-    const int16_t y3 = kY3 + dy;
-    const int16_t y4 = kY4 + dy;
-    const int16_t y5 = kY5 + dy;
+    // Cross-theme baseline alignment is the font's job
+    // (fonts/tomthumb_shifted.h, THEME.md §2.3) — no per-call y bias
+    // here.
+    const int16_t y1 = kY1;
+    const int16_t y2 = kY2;
+    const int16_t y3 = kY3;
+    const int16_t y4 = kY4;
+    const int16_t y5 = kY5;
 
     // BODY is the active theme's data-line ink — same role the
     // typewriter scenes use for their value rows. Halo is plain

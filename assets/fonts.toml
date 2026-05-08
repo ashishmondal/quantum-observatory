@@ -54,12 +54,12 @@ output = "include/fonts/press_start_2p_8pt7b.h"
 note   = "APOLLO header. Native 8x8 pixel design — only 8pt rasterizes cleanly."
 
 [[font]]
-id     = "nostromo_header_vt323"
-input  = "assets/fonts/VT323-Regular.ttf"
-size   = 12
+id     = "nostromo_header_nokiafc22"
+input  = "assets/fonts/nokiafc22.ttf"
+size   = 8
 dpi    = 72
-output = "include/fonts/vt323_8pt7b.h"
-note   = "NOSTROMO header. CRT terminal feel. VT323 is a TTF outline, not a strict pixel grid — small sizes get squished by FreeType hinting; 12pt rasterizes cleanly. Filename keeps the _8pt7b suffix to avoid churning theme.cpp's #include path."
+output = "include/fonts/nokiafc22_8pt7b.h"
+note   = "NOSTROMO header. Nokia 3310/FC22 LCD pixel face — squared, mono-line, reads as a phosphor terminal at 8 px cap height. Pixel-design TTF: native 8pt @ 72 dpi rasterizes 1:1 on the design grid."
 
 [[font]]
 id     = "shared_header_pixel_operator"

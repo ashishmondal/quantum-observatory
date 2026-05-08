@@ -199,17 +199,11 @@ public:
     constexpr uint8_t kLabelLen = 4;  // "ILL " / "AGE " (incl. trailing space)
     constexpr int16_t kTextX    = 6;  // global +5 shift from the panel edge
 
-    // Per-font baseline correction (THEME.md §2.3): nostromo_green's
-    // BODY = TomThumb sits one row above Picopixel/Org_01, so every y
-    // we hand to setCursor / getTextBounds picks up this shift to
-    // stay aligned with the per-line backdrop band.
-    const int8_t kBodyDy = theme::baseline_y_shift(theme::FontRole::BODY);
-
     for (int i = 0; i < 3; ++i) {
       if (typed[i] == 0 && active != i) continue;
 
       const uint8_t n = typed[i];
-      const int16_t by = static_cast<int16_t>(kBaselineY[i] + kBodyDy);
+      const int16_t by = static_cast<int16_t>(kBaselineY[i]);
 
       // Measure the typed prefix once (authoritative width for
       // backdrop + cursor placement). Picopixel is variable-width.

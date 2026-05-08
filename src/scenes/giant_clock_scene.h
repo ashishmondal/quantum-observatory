@@ -146,7 +146,7 @@ public:
       date[sizeof(date)-1] = '\0';
     }
     gfx::draw_text_halo(matrix, gfx::centered_x(matrix, date) + date_x_nudge(),
-                        /*y=*/29 + theme::baseline_y_shift(theme::FontRole::BODY),
+                        /*y=*/29,
                         date,
                         theme::ink(theme::Ink::BODY),
                         theme::ink(theme::Ink::BODY_HALO));

@@ -178,18 +178,6 @@ uint16_t        ink(Ink role);
 const GFXfont*  font(FontRole r);   // nullptr = use built-in 5x7
 bool            has(Hint h);
 
-// Per-font baseline correction (THEME.md §2.3 BODY-font table). GFX
-// fonts encode their glyph cells relative to a baseline that varies
-// from face to face: TomThumb sits one row above the baseline used
-// by Picopixel / Org_01, so a scene that draws TomThumb at the same
-// y as the other BODY fonts ends up one pixel high. Scenes add this
-// shift to the y they pass to setCursor() / draw_text_halo() after
-// `setFont(theme::font(role))` so the visual baseline stays put
-// across themes (FR-15.4 next-frame switch, no torn-up baseline).
-// Returns 0 for fonts that don't need correction. Hot-path safe —
-// one pointer load + one compare.
-int8_t          baseline_y_shift(FontRole r);
-
 // Bracket strings for headers. Returns "" for themes that use
 // BLOCK_BARS instead of glyph brackets.
 const char*     bracket_open();

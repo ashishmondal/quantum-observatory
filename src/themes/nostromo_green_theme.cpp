@@ -4,13 +4,13 @@
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_Protomatter.h>
-#include <Fonts/TomThumb.h>
 #include <Fonts/Tiny3x3a2pt7b.h>
 
 #include "buzzer.h"
 #include "config.h"
 #include "fonts/digital_7__mono_14pt7b.h"
-#include "fonts/vt323_8pt7b.h"
+#include "fonts/nokiafc22_8pt7b.h"
+#include "fonts/tomthumb_shifted.h"
 
 namespace theme {
 
@@ -49,13 +49,18 @@ constexpr uint16_t kInks[static_cast<int>(Ink::COUNT)] = {
   /*SAFETY         */ 0x4000,
 };
 
-// VT323 binds to HEADER per THEME.md §2.2. BODY is TomThumb — 3×5,
+// NokiaFC22 binds to HEADER per THEME.md §2.2 — the Nokia 3310 LCD
+// pixel face reads as a green-phosphor terminal at 8 px cap height
+// (squared, mono-line, no anti-aliasing). BODY is TomThumb — 3×5,
 // no descenders, thinner grid than Picopixel — to read as a CRT
-// terminal under green phosphor (THEME.md §5).
+// terminal under green phosphor (THEME.md §5). We bind to the
+// baseline-shifted variant (THEME.md §2.3 / fonts/tomthumb_shifted.h)
+// so glyphs share a baseline with the other BODY-role fonts — no
+// per-call-site +1 plumbing required.
 constexpr const GFXfont* kFonts[static_cast<int>(FontRole::COUNT)] = {
   /*MICRO */ &Tiny3x3a2pt7b,
-  /*BODY  */ &TomThumb,
-  /*HEADER*/ &VT323_Regular12pt7b,
+  /*BODY  */ &fonts::TomThumbShifted,
+  /*HEADER*/ &nokiafc228pt7b,
   /*CLOCK */ &digital_7__mono_14pt7b,
 };
 

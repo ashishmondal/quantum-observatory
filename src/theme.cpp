@@ -17,7 +17,6 @@
 
 #include <Arduino.h>           // millis()
 #include <Adafruit_Protomatter.h>
-#include <Fonts/TomThumb.h>     // baseline_y_shift() identifies this face
 
 #include "backgrounds.h"        // BgType
 #include "bitmaps/_index.h"
@@ -247,17 +246,6 @@ const GFXfont* font(FontRole r) {
   const uint8_t i = static_cast<uint8_t>(r);
   if (i >= static_cast<uint8_t>(FontRole::COUNT)) return nullptr;
   return active_theme_ref().font(r);
-}
-
-int8_t baseline_y_shift(FontRole r) {
-  // TomThumb's GFX glyph cells are encoded one pixel above the
-  // baseline used by Picopixel / Org_01 / the bundled HEADER faces,
-  // so any scene that swapped fonts at a fixed y would see TomThumb
-  // text float one row high. Compensate by shifting the cursor
-  // down by 1. All other faces are baseline-aligned to each other
-  // and need no correction.
-  return (font(r) == &TomThumb) ? static_cast<int8_t>(1)
-                                : static_cast<int8_t>(0);
 }
 
 bool has(Hint h) {

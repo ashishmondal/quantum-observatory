@@ -139,12 +139,9 @@ public:
       // No drawable lines — render a WAIT placeholder.
       matrix.setFont(theme::font(theme::FontRole::BODY));
       matrix.setTextColor(theme::ink(theme::Ink::STATUS_STALE));
-      // Per-font baseline correction (THEME.md §2.3): TomThumb sits
-      // one row above other BODY faces.
-      const int8_t kBodyDy = theme::baseline_y_shift(theme::FontRole::BODY);
-      matrix.setCursor(2, 14 + kBodyDy);
+      matrix.setCursor(2, 14);
       matrix.print("CONST");
-      matrix.setCursor(2, 22 + kBodyDy);
+      matrix.setCursor(2, 22);
       matrix.print("WAIT");
       return;
     }
@@ -311,10 +308,6 @@ public:
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
-    // Per-font baseline correction (THEME.md §2.3): nostromo_green's
-    // BODY = TomThumb sits one row above Picopixel/Org_01.
-    const int8_t kBodyDy = theme::baseline_y_shift(theme::FontRole::BODY);
-
     const uint16_t kNameInk      = theme::ink(theme::Ink::ACCENT);          // white pop
     const uint16_t kLatinInk     = theme::ink(theme::Ink::VALUE);           // ~80% white sub-name
     const uint16_t kHighlightInk = theme::ink(theme::Ink::ALERT);           // red — named star highlight
@@ -327,7 +320,7 @@ public:
       const uint8_t n = typed[i];
       memcpy(prefix, lines[i], n);
       prefix[n] = '\0';
-      const int16_t by = static_cast<int16_t>(kBaselineY[i] + kBodyDy);
+      const int16_t by = static_cast<int16_t>(kBaselineY[i]);
 
       int16_t  bx, by_unused;
       uint16_t bw, bh;

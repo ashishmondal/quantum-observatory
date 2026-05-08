@@ -196,9 +196,6 @@ public:
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
-    // Per-font baseline correction (THEME.md §2.3): nostromo_green's
-    // BODY = TomThumb sits one row above Picopixel/Org_01.
-    const int8_t kBodyDy = theme::baseline_y_shift(theme::FontRole::BODY);
 
     const uint16_t kVisibleInk = theme::ink(theme::Ink::STATUS_OK);    // overhead
     const uint16_t kWaitInk    = theme::ink(theme::Ink::STATUS_STALE); // no fresh data
@@ -214,7 +211,7 @@ public:
       const uint8_t n = typed[i];
       memcpy(prefix, lines[i], n);
       prefix[n] = '\0';
-      const int16_t by = static_cast<int16_t>(kBaselineY[i] + kBodyDy);
+      const int16_t by = static_cast<int16_t>(kBaselineY[i]);
 
       // Measure the partial string so the black background hugs the
       // glyphs and the cursor lines up exactly. Picopixel has variable

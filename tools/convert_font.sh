@@ -12,8 +12,8 @@
 #   tools/convert_font.sh assets/fonts/PressStart2P.ttf 8 \
 #       include/fonts/press_start_2p_8pt7b.h
 #
-#   tools/convert_font.sh assets/fonts/VT323.ttf 8 \
-#       include/fonts/vt323_8pt7b.h 32 126
+#   tools/convert_font.sh assets/fonts/nokiafc22.ttf 8 \
+#       include/fonts/nokiafc22_8pt7b.h 32 126
 #
 # Builds tools/fontconvert/fontconvert on first use (one-time gcc + FreeType).
 # Writes the converted header to the requested path.

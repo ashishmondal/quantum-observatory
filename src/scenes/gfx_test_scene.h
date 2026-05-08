@@ -186,9 +186,7 @@ public:
     // FPS + theme tag readout in BODY ink.
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
-    // Per-font baseline correction (THEME.md §2.3): TomThumb sits one
-    // row above other BODY faces.
-    const int16_t by = 30 + theme::baseline_y_shift(theme::FontRole::BODY);
+    const int16_t by = 30;
     char line[16];
     snprintf(line, sizeof(line), "%lu",
              static_cast<unsigned long>(m_fps_display));

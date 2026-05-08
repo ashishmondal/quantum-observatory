@@ -50,7 +50,7 @@ with cursor blocks, scanlines, and command-line voice.
 - **Fonts:**
   - `MICRO`  — Tiny3x3
   - `BODY`   — TomThumb
-  - `HEADER` — VT323 (CRT terminal, larger size)
+  - `HEADER` — NokiaFC22 (Nokia 3310 LCD pixel face, 8 px cap)
   - `CLOCK`  — Digital-7 mono 14pt (recolored green)
 - **Inks:** phosphor green `0x07E0`, dim green `0x0560`, yellow alert `0xFFE0`
 - **Brackets:** `>` `_`
@@ -252,12 +252,14 @@ fonts, picked to match each theme's identity:
 | `blade_runner`    | Org_01 (5×6 sans, true lowercase)|
 | `lcars_tos`       | Org_01                           |
 
-> **TomThumb baseline quirk.** TomThumb's GFX glyphs sit one pixel
-> *above* the baseline that Picopixel/Org_01 use, so any scene that
-> swaps fonts at a fixed `y` will see TomThumb text float one row
-> high. When drawing TomThumb (directly or via the BODY role on
-> `nostromo_green`), add **+1 to `y`** so it lines up with the other
-> BODY fonts at the same baseline.
+> **TomThumb baseline quirk.** Adafruit's bundled TomThumb encodes
+> its glyph cells one pixel *above* the baseline used by Picopixel /
+> Org_01, so a naive font swap at a fixed `y` would float TomThumb
+> text one row high. We ship a corrected variant —
+> [include/fonts/tomthumb_shifted.h](../include/fonts/tomthumb_shifted.h) —
+> with `+1` baked into every glyph's `yOffset`. `nostromo_green`
+> binds its BODY role to `fonts::TomThumbShifted`, so scenes need
+> no per-call-site `y` adjustment.
 
 `HEADER` is the biggest theme differentiator but draws from a fixed
 roster of **only three** TTF conversions — deliberately small so the
@@ -267,7 +269,7 @@ picks one:
 | Theme              | HEADER font           |
 |---|---|
 | `apollo_amber`     | Press Start 2P        |
-| `nostromo_green`   | VT323                 |
+| `nostromo_green`   | NokiaFC22             |
 | `vectrex_neon`     | Pixel Operator        |
 | `blade_runner`     | Pixel Operator        |
 | `lcars_tos`        | Pixel Operator        |
@@ -281,7 +283,7 @@ the bundled-TTF count at three.
 |---|---|---|
 | `digital_7__mono_14pt7b.h` *(shipped)* | `digital-7 (mono).ttf` *(shipped)* | All themes (`CLOCK`) |
 | `press_start_2p_8pt7b.h`       | `PressStart2P.ttf` (codeman38, OFL)         | APOLLO `HEADER` |
-| `vt323_8pt7b.h`                | `VT323-Regular.ttf` (Peter Hull, OFL)       | NOSTROMO `HEADER` |
+| `nokiafc22_8pt7b.h`            | `nokiafc22.ttf` *(verify license before redistribution)* | NOSTROMO `HEADER` |
 | `pixel_operator_8pt7b.h`       | `PixelOperator8.ttf` (Jayvee Enaguas, CC0)  | VECTREX + BLADE_RUNNER + LCARS `HEADER` |
 
 License attribution stubs land alongside each header in T-6. All
@@ -291,7 +293,7 @@ Blade Runner and LCARS marquee fonts are deliberately **not** bundled
 ink/hint primitives.
 
 PROGMEM cost (measured from `// Approx. N bytes` in each generated
-header): Press Start 2P 2508 B + VT323 1065 B + Pixel Operator 1998 B
+header): Press Start 2P 2508 B + NokiaFC22 1052 B + Pixel Operator 1998 B
 ≈ **5.6 KB** flash for the three HEADER fonts. Zero SRAM cost (read
 directly from flash via Adafruit_GFX). The three BODY fonts and the
 MICRO font are already linked because they ship with Adafruit_GFX —

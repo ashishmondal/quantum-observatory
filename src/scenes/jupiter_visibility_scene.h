@@ -196,10 +196,6 @@ public:
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
 
-    // Per-font baseline correction (THEME.md §2.3): nostromo_green's
-    // BODY = TomThumb sits one row above Picopixel/Org_01.
-    const int8_t kBodyDy = theme::baseline_y_shift(theme::FontRole::BODY);
-
     constexpr uint16_t kVisibleInk = 0x07E0;  // green — banner when overhead + dark
     constexpr uint16_t kBelowInk   = 0x630C;  // dim grey — below horizon
     constexpr uint16_t kDayInk     = 0xFD20;  // amber — above horizon, in daylight
@@ -214,7 +210,7 @@ public:
       const uint8_t n = typed[i];
       memcpy(prefix, lines[i], n);
       prefix[n] = '\0';
-      const int16_t by = static_cast<int16_t>(kBaselineY[i] + kBodyDy);
+      const int16_t by = static_cast<int16_t>(kBaselineY[i]);
 
       // Measure typed prefix (Picopixel is variable-width).
       int16_t  bx, by_unused;
