@@ -81,6 +81,17 @@ public:
 
   void init(Adafruit_Protomatter& matrix) override {
     matrix.setTextWrap(false);
+    m_cache.entry_idx = kCacheInvalid;
+  }
+
+  // FR-16.4 / phase D.7: pre-pack the projection of the most-likely
+  // entry so the first post-swap render() finds the cache primed.
+  // Idempotent — same-entry calls short-circuit on the cache hit.
+  // Touches no framebuffer state (only m_cache); safe to call while
+  // the previous scene is still rendering.
+  void prepare(uint32_t now_ms) override {
+    const uint8_t idx = pick_entry_idx(now_ms);
+    if (m_cache.entry_idx != idx) compute_projection(idx);
   }
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
@@ -109,26 +120,19 @@ public:
 
     matrix.fillScreen(0x0000);
 
-    // ── Collect unique star indices referenced by this entry ───────
-    // Each LineSegment has two star-indices into stars::kStars[].
-    // For a 28-star max constellation the dedup is a tiny linear
-    // scan — totally fine.
-    constexpr uint8_t kMaxUnique = 64;
-    uint16_t uniques[kMaxUnique];
-    uint8_t  unique_count = 0;
-    for (uint16_t i = 0; i < entry.line_count; ++i) {
-      const uint16_t pair[2] = { entry.lines[i].a, entry.lines[i].b };
-      for (int k = 0; k < 2; ++k) {
-        const uint16_t s = pair[k];
-        bool found = false;
-        for (uint8_t j = 0; j < unique_count; ++j) {
-          if (uniques[j] == s) { found = true; break; }
-        }
-        if (!found && unique_count < kMaxUnique) {
-          uniques[unique_count++] = s;
-        }
-      }
-    }
+    // Projection is cached across frames keyed by entry_idx — the
+    // dedup + insertion sort + cos(dec) projection pass costs ~150 µs
+    // on RP2040 soft-float and used to run every frame; with the
+    // cache it only runs on entry change (every 30 s in fallback,
+    // or on MQTT push). Phase D.7 prepare() primes this cache during
+    // the fade-out window of a swap so the first post-swap frame
+    // hits the same fast path as steady-state.
+    if (m_cache.entry_idx != entry_idx) compute_projection(entry_idx);
+
+    const uint8_t   unique_count = m_cache.unique_count;
+    const uint16_t* const uniques = m_cache.uniques;
+    const int16_t*  const spx     = m_cache.spx;
+    const int16_t*  const spy     = m_cache.spy;
 
     if (unique_count == 0) {
       // No drawable lines — render a WAIT placeholder.
@@ -139,108 +143,6 @@ public:
       matrix.setCursor(2, 22);
       matrix.print("WAIT");
       return;
-    }
-
-    // ── Sort unique stars by brightness (lowest mag first) ─────────
-    // Insertion sort — 28 elements max, runs once per frame, simple
-    // beats heap-allocating a qsort context. After this `uniques[0]`
-    // is the brightest star in the constellation, which is exactly
-    // what `highlight_rank` indexes into.
-    for (uint8_t i = 1; i < unique_count; ++i) {
-      for (uint8_t j = i; j > 0; --j) {
-        if (stars::kStars[uniques[j]].mag_x100 <
-            stars::kStars[uniques[j - 1]].mag_x100) {
-          const uint16_t tmp = uniques[j];
-          uniques[j] = uniques[j - 1];
-          uniques[j - 1] = tmp;
-        } else break;
-      }
-    }
-
-    // ── Project (RA, Dec) → panel coords ───────────────────────────
-    // Use cos(dec_center) so RA spans don't stretch near the poles.
-    // One float call per frame (NFR-1.3 forbids float in the per-
-    // pixel hot loop; this is once-per-frame setup, not the loop).
-    int64_t dec_sum_mas = 0;
-    for (uint8_t i = 0; i < unique_count; ++i) {
-      dec_sum_mas += stars::kStars[uniques[i]].dec_mas;
-    }
-    const int32_t dec_c_mas =
-        static_cast<int32_t>(dec_sum_mas / unique_count);
-    const float dec_c_rad =
-        static_cast<float>(dec_c_mas) *
-        (3.14159265358979f / (180.0f * 3600000.0f));
-    int32_t cos_q15 =
-        static_cast<int32_t>(cosf(dec_c_rad) * 32768.0f + 0.5f);
-    if (cos_q15 < 1) cos_q15 = 1;  // poles → clamp to avoid div-zero
-
-    // Project each unique star into a "flat sky" coord system in
-    // milliarcseconds. RA gets cos(dec_center) compression.
-    // No RA wrap handling — none of the IAU constellations span
-    // > 180° in RA, and the few that touch RA=0 (Pisces, Pegasus)
-    // don't have line segments crossing the wrap.
-    int32_t flat_x[kMaxUnique], flat_y[kMaxUnique];
-    int32_t x_min = INT32_MAX, x_max = INT32_MIN;
-    int32_t y_min = INT32_MAX, y_max = INT32_MIN;
-    for (uint8_t i = 0; i < unique_count; ++i) {
-      const stars::Star& s = stars::kStars[uniques[i]];
-      const int64_t fx =
-          (static_cast<int64_t>(s.ra_mas) * cos_q15) >> 15;
-      flat_x[i] = static_cast<int32_t>(fx);
-      flat_y[i] = s.dec_mas;
-      if (flat_x[i] < x_min) x_min = flat_x[i];
-      if (flat_x[i] > x_max) x_max = flat_x[i];
-      if (flat_y[i] < y_min) y_min = flat_y[i];
-      if (flat_y[i] > y_max) y_max = flat_y[i];
-    }
-    int32_t x_span = x_max - x_min; if (x_span < 1) x_span = 1;
-    int32_t y_span = y_max - y_min; if (y_span < 1) y_span = 1;
-
-    // Render region inside the right-half panel. 1 px margin on
-    // each side; top of region is y=5 to leave the chrome's y=0..6
-    // band clear.
-    constexpr int16_t kRegionX = 33;
-    constexpr int16_t kRegionY = 5;
-    constexpr int16_t kRegionW = 30;
-    constexpr int16_t kRegionH = 26;
-
-    // Pick the limiting axis so the projection is isotropic (shapes
-    // don't distort). We need pixels-per-mas to be the SAME on both
-    // axes, so the axis whose pixel-budget runs out first dictates
-    // the scale.
-    //
-    // Earlier revision tried a precomputed Q16 scale factor, but
-    // kRegionW << 16 ~= 2e6 divided by an x_span on the order of
-    // 1e7..1e8 milliarcseconds underflows to zero — every star
-    // collapsed to the panel center. Doing the multiply-then-divide
-    // in int64 per-axis keeps the precision without the underflow,
-    // and the scene only runs this loop ~30 times per frame.
-    //
-    // x is limiting iff kRegionW * y_span < kRegionH * x_span.
-    const int64_t lhs = static_cast<int64_t>(kRegionW) * y_span;
-    const int64_t rhs = static_cast<int64_t>(kRegionH) * x_span;
-    const bool   x_limits = (lhs < rhs);
-    const int32_t scale_num = x_limits ? kRegionW : kRegionH;
-    const int32_t scale_den = x_limits ? x_span   : y_span;
-
-    const int32_t bbox_xc = (x_min + x_max) / 2;
-    const int32_t bbox_yc = (y_min + y_max) / 2;
-    const int16_t px_center = kRegionX + kRegionW / 2;
-    const int16_t py_center = kRegionY + kRegionH / 2;
-
-    int16_t spx[kMaxUnique], spy[kMaxUnique];
-    for (uint8_t i = 0; i < unique_count; ++i) {
-      const int32_t dx = static_cast<int32_t>(
-          (static_cast<int64_t>(flat_x[i] - bbox_xc) * scale_num) /
-          scale_den);
-      const int32_t dy = static_cast<int32_t>(
-          (static_cast<int64_t>(flat_y[i] - bbox_yc) * scale_num) /
-          scale_den);
-      // East-on-left + North-on-top → invert both axes:
-      //  RA increases eastward → screen x decreases (east on left).
-      //  Dec increases northward → screen y decreases (top is north).
-      spx[i] = static_cast<int16_t>(px_center - dx);
-      spy[i] = static_cast<int16_t>(py_center - dy);
     }
 
     // ── Lines first (so star marks draw on top) ────────────────────
@@ -266,6 +168,12 @@ public:
       // Highlight wins over magnitude.
       const bool is_highlight = (have_highlight && i == highlight_rank);
       if (is_highlight) {
+        // Region clip bounds — must mirror the kRegionX/kRegionY in
+        // compute_projection() and in_region(). Local rather than
+        // class-level so the projection geometry stays a single
+        // self-contained block.
+        constexpr int16_t kRegionX = 33;
+        constexpr int16_t kRegionY = 5;
         const bool blink_on = ((now_ms / 400u) & 1u) == 0u;
         const uint16_t hl_center = blink_on ? 0xF800 : 0x8000;
         const uint16_t hl_arm    = blink_on ? 0x8000 : 0x4000;
@@ -450,6 +358,154 @@ public:
   bool wants_clock_chrome() const override { return true; }
 
 private:
+  // Max unique stars per constellation entry. The IAU set tops out
+  // at ~28 (Hercules); 64 is generous head-room and keeps the cache
+  // a single ~512-byte instance member.
+  static constexpr uint8_t kMaxUnique = 64;
+  static constexpr uint8_t kCacheInvalid = 0xFF;
+
+  // FR-16.4 / D.7 projection cache. Populated by compute_projection()
+  // (idempotent — same entry_idx → same output). render() and
+  // prepare() both consult this; on a hit, render() skips the dedup +
+  // sort + cos(dec) trig and goes straight to drawing.
+  struct ProjectionCache {
+    uint8_t  entry_idx;             // kCacheInvalid until first compute
+    uint8_t  unique_count;
+    uint16_t uniques[kMaxUnique];   // brightness-sorted (uniques[0] = brightest)
+    int16_t  spx[kMaxUnique];       // projected screen x
+    int16_t  spy[kMaxUnique];       // projected screen y
+  };
+  ProjectionCache m_cache{kCacheInvalid, 0, {0}, {0}, {0}};
+
+  // Reproduce render()'s entry pick exactly so prepare() and render()
+  // agree on which constellation gets cached.
+  static uint8_t pick_entry_idx(uint32_t now_ms) {
+    using constellations_iau::kCatalogCount;
+    constellation_state::Snapshot snap;
+    if (constellation_state::get(now_ms, &snap)
+        && snap.index < kCatalogCount) {
+      return snap.index;
+    }
+    return static_cast<uint8_t>((now_ms / 30000u) % kCatalogCount);
+  }
+
+  // Dedup → brightness-sort → cos(dec) project the IAU entry into
+  // m_cache. Cost: ~150 µs on RP2040 soft-float for a typical
+  // ~12-star entry. NOT called from the per-pixel hot loop —
+  // run-once-per-entry-change semantics, gated by the m_cache
+  // entry_idx check at every call site.
+  void compute_projection(uint8_t entry_idx) {
+    using constellations_iau::kCatalog;
+    using constellations_iau::kCatalogCount;
+    if (entry_idx >= kCatalogCount) {
+      m_cache.entry_idx    = entry_idx;
+      m_cache.unique_count = 0;
+      return;
+    }
+    const constellations_iau::Entry& entry = kCatalog[entry_idx];
+
+    // ── Collect unique star indices ────────────────────────────────
+    uint16_t* uniques = m_cache.uniques;
+    uint8_t   unique_count = 0;
+    for (uint16_t i = 0; i < entry.line_count; ++i) {
+      const uint16_t pair[2] = { entry.lines[i].a, entry.lines[i].b };
+      for (int k = 0; k < 2; ++k) {
+        const uint16_t s = pair[k];
+        bool found = false;
+        for (uint8_t j = 0; j < unique_count; ++j) {
+          if (uniques[j] == s) { found = true; break; }
+        }
+        if (!found && unique_count < kMaxUnique) {
+          uniques[unique_count++] = s;
+        }
+      }
+    }
+
+    if (unique_count == 0) {
+      m_cache.entry_idx    = entry_idx;
+      m_cache.unique_count = 0;
+      return;
+    }
+
+    // ── Brightness sort (insertion; uniques[0] = brightest) ────────
+    for (uint8_t i = 1; i < unique_count; ++i) {
+      for (uint8_t j = i; j > 0; --j) {
+        if (stars::kStars[uniques[j]].mag_x100 <
+            stars::kStars[uniques[j - 1]].mag_x100) {
+          const uint16_t tmp = uniques[j];
+          uniques[j] = uniques[j - 1];
+          uniques[j - 1] = tmp;
+        } else break;
+      }
+    }
+
+    // ── Project (RA, Dec) → panel coords ───────────────────────────
+    int64_t dec_sum_mas = 0;
+    for (uint8_t i = 0; i < unique_count; ++i) {
+      dec_sum_mas += stars::kStars[uniques[i]].dec_mas;
+    }
+    const int32_t dec_c_mas =
+        static_cast<int32_t>(dec_sum_mas / unique_count);
+    const float dec_c_rad =
+        static_cast<float>(dec_c_mas) *
+        (3.14159265358979f / (180.0f * 3600000.0f));
+    int32_t cos_q15 =
+        static_cast<int32_t>(cosf(dec_c_rad) * 32768.0f + 0.5f);
+    if (cos_q15 < 1) cos_q15 = 1;  // poles → clamp to avoid div-zero
+
+    int32_t flat_x[kMaxUnique], flat_y[kMaxUnique];
+    int32_t x_min = INT32_MAX, x_max = INT32_MIN;
+    int32_t y_min = INT32_MAX, y_max = INT32_MIN;
+    for (uint8_t i = 0; i < unique_count; ++i) {
+      const stars::Star& s = stars::kStars[uniques[i]];
+      const int64_t fx =
+          (static_cast<int64_t>(s.ra_mas) * cos_q15) >> 15;
+      flat_x[i] = static_cast<int32_t>(fx);
+      flat_y[i] = s.dec_mas;
+      if (flat_x[i] < x_min) x_min = flat_x[i];
+      if (flat_x[i] > x_max) x_max = flat_x[i];
+      if (flat_y[i] < y_min) y_min = flat_y[i];
+      if (flat_y[i] > y_max) y_max = flat_y[i];
+    }
+    int32_t x_span = x_max - x_min; if (x_span < 1) x_span = 1;
+    int32_t y_span = y_max - y_min; if (y_span < 1) y_span = 1;
+
+    // Render-region constants — must mirror render()'s draw region.
+    constexpr int16_t kRegionX = 33;
+    constexpr int16_t kRegionY = 5;
+    constexpr int16_t kRegionW = 30;
+    constexpr int16_t kRegionH = 26;
+
+    // Isotropic scale: smaller axis budget wins. Same int64 multiply-
+    // then-divide as the previous in-render path to avoid the Q16
+    // underflow trap (see render-side comment archive).
+    const int64_t lhs = static_cast<int64_t>(kRegionW) * y_span;
+    const int64_t rhs = static_cast<int64_t>(kRegionH) * x_span;
+    const bool    x_limits = (lhs < rhs);
+    const int32_t scale_num = x_limits ? kRegionW : kRegionH;
+    const int32_t scale_den = x_limits ? x_span   : y_span;
+
+    const int32_t bbox_xc   = (x_min + x_max) / 2;
+    const int32_t bbox_yc   = (y_min + y_max) / 2;
+    const int16_t px_center = kRegionX + kRegionW / 2;
+    const int16_t py_center = kRegionY + kRegionH / 2;
+
+    for (uint8_t i = 0; i < unique_count; ++i) {
+      const int32_t dx = static_cast<int32_t>(
+          (static_cast<int64_t>(flat_x[i] - bbox_xc) * scale_num) /
+          scale_den);
+      const int32_t dy = static_cast<int32_t>(
+          (static_cast<int64_t>(flat_y[i] - bbox_yc) * scale_num) /
+          scale_den);
+      // East-on-left + North-on-top — invert both axes.
+      m_cache.spx[i] = static_cast<int16_t>(px_center - dx);
+      m_cache.spy[i] = static_cast<int16_t>(py_center - dy);
+    }
+
+    m_cache.unique_count = unique_count;
+    m_cache.entry_idx    = entry_idx;
+  }
+
   // Render-region clip used by the single-pixel magnitude bands.
   // The cross-shape helper has its own bounds; this is for the bare
   // pixel cases where a stray projection could land in the chrome

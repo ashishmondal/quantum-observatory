@@ -9,6 +9,7 @@
 #include "gfx_text.h"
 #include "light_sensor.h"
 #include "scene_state.h"
+#include "sky_snapshot.h"
 #include "theme.h"
 #include "thermal_monitor.h"
 #include "time_of_day.h"
@@ -135,6 +136,12 @@ public:
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
     if (g_current_scene != nullptr && g_current_scene->wants_clock_chrome()) {
       gfx::draw_clock_chrome(matrix, now_ms);
+      // FR-16.5 micro-indicator: 1-px sun arc on the top edge,
+      // driven by the sky_snapshot Core 1 publishes once per second.
+      // Cheap (one snapshot read + one drawPixel) and shares the
+      // wants_clock_chrome() opt-out so the giant clock isn't
+      // defaced by stray top-row pixels.
+      gfx::draw_sun_arc_chrome(matrix);
     }
   }
 };
@@ -148,6 +155,15 @@ static SafetyOverlayLayer s_safety_overlay_layer;  // D.3 firmware overrides (FR
 // g_current_scene swap is deferred to the fade midpoint so the panel
 // is fully black during init(), masking any first-frame jitter.
 static scene_state::SceneId s_fade_pending_id = scene_state::SceneId::CLOCK;
+
+// FR-16.4 / phase D.7: armed by the post-swap branch in loop1() so
+// the very next rendered frame logs its elapsed render-time. Lets us
+// quantify the speculative-prepare win — pre-prepared scenes (e.g.
+// ConstellationNow with its projection cache primed during the fade)
+// should clock in close to steady-state, while a scene that bypasses
+// prepare() still pays its first-frame setup cost. One-shot — cleared
+// after the next [scene] first_frame_ms log line.
+static volatile bool s_first_frame_pending = false;
 
 // Compositor stack. Indexed by LayerSlot. Null entries are skipped.
 // File-scope so D.2/D.3/D.8 can install/remove layers from setter
@@ -269,6 +285,28 @@ volatile uint32_t g_render_fps = 0;
 // kill itself before setup1() runs. (added in phase 6.5)
 static volatile uint32_t g_render_alive_ms = 0;
 
+// Core 1 → Core 0 idle-slack telemetry (FR-16.9). Rolling average of
+// `kFrameIntervalMs - actual_render_time` over the last 32 rendered
+// frames, in milliseconds. Same atomic-uint32 pattern as g_render_fps:
+// Core 1 publishes once per frame, Core 0 reads from the MQTT status
+// builder. Quantifies how much headroom D.6 (sky-model) and D.7
+// (Scene::prepare) have to play with on the current scene mix. A
+// rising-with-load `render_slack_ms` falling toward zero is the
+// canary for FR-3.1 violations before they're visible as dropped
+// frames. Skipped frames (frame cap early-return) don't sample —
+// only frames where matrix.show() actually ran. (added in phase D.5)
+//
+// External linkage so mqtt_link.cpp can declare
+// `extern volatile uint32_t g_render_slack_ms` for the §5.4 heartbeat.
+volatile uint32_t g_render_slack_ms = 0;
+
+// Core 1 → Core 0 first-frame-after-swap render time (ms), one-shot.
+// Set by loop1() the frame after a Scene swap; printed and cleared by
+// loop() at its next 1 Hz log tick. Sentinel 0 = no fresh value.
+// Diagnostic only — phase D.7 (FR-16.4) uses this to confirm the
+// speculative prepare() actually amortizes the swap cost.
+static volatile uint32_t g_first_frame_render_ms = 0;
+
 void setup() {
   Serial.begin(115200);
 
@@ -328,6 +366,12 @@ void setup() {
   // local rotation through the catalog every 30 s when no fresh
   // value has been pushed (so the scene works standalone).
   constellation_state::init();
+
+  // Continuous sky-model snapshot (FR-16.5, phase D.6). Seeds an
+  // explicitly-invalid snapshot so first-frame chrome readers don't
+  // observe uninitialised seqlock state. The actual 1 Hz refresh
+  // runs on Core 1 from loop1() during slack windows.
+  sky_snapshot::init();
 
   // DS3231 RTC bring-up (FR-9.5). Battery-backed authoritative time
   // source — every reader (chrome, giant clock, future scenes) goes
@@ -456,6 +500,20 @@ void loop() {
     // Serial output on Core 0 (Protomatter timing protection).
     Serial.print("[render] fps=");
     Serial.println(static_cast<unsigned long>(g_render_fps));
+
+    // FR-16.4 / phase D.7 — flush any pending first-frame timing.
+    // One-shot: cleared after the print so a steady scene with no
+    // swaps stays quiet. Non-zero values prove the speculative
+    // prepare() pass actually amortizes the swap; values close to
+    // a steady-state frame budget mean the cache was warm.
+    {
+      const uint32_t ff = g_first_frame_render_ms;
+      if (ff != 0u) {
+        g_first_frame_render_ms = 0;
+        Serial.print("[scene] first_frame_ms=");
+        Serial.println(static_cast<unsigned long>(ff));
+      }
+    }
 
     // RTC poll cadence:
     //   - Default: every 1 hour. DS3231 drift is ~2 ppm (≈7 s/month),
@@ -696,11 +754,28 @@ void loop1() {
           g_current_scene = next;
           g_current_scene->init(matrix);
           scene_state::mark_current(s_fade_pending_id);
+          // FR-16.4 / phase D.7: arm a one-shot first-frame timer
+          // so the next loop iteration can quantify the swap cost.
+          // The pre-fade prepare() pass below should have warmed any
+          // cache the incoming scene maintains; this confirms.
+          s_first_frame_pending = true;
           Serial.print("[scene] swap -> ");
           Serial.println(g_current_scene->name());
         } else if (next == nullptr) {
           Serial.print("[scene] unknown id=");
           Serial.println(static_cast<int>(s_fade_pending_id));
+        }
+      } else {
+        // FR-16.4 / phase D.7: speculative pre-render of the
+        // incoming scene during the fade-out half. The hook is
+        // idempotent — calling it every frame just re-checks the
+        // scene's internal cache, which is microseconds. The cost
+        // is bounded by Scene::prepare()'s contract (no draw, no
+        // alloc, < ~5 ms one-shot work). For scenes that don't
+        // override prepare() it's literally a virtual no-op call.
+        Scene* incoming = scene_for(s_fade_pending_id);
+        if (incoming != nullptr && incoming != g_current_scene) {
+          incoming->prepare(now_ms);
         }
       }
     } else {
@@ -746,6 +821,59 @@ void loop1() {
     matrix.show();
 
     frames++;
+
+    // Idle-slack instrumentation (FR-16.9, phase D.5). Sample only on
+    // frames that actually rendered (frame-cap early-return doesn't
+    // count — its "slack" is whatever's left of the cap, which is
+    // already accounted for by the next iteration's wait). Use the
+    // pre-show now_ms timestamp captured above as render_start;
+    // millis() now is render_end. Clamp at 0 for over-budget frames so
+    // the rolling average never goes negative when scenes occasionally
+    // blow the cap. uint8_t is enough — kFrameIntervalMs is 42, well
+    // under 256. The 32-frame ring + integer running sum (max
+    // 32*kFrameIntervalMs = 1344, fits uint16_t) is cheaper than an
+    // EMA divide and gives a flat-window average that's easy to
+    // reason about: the published value lags load changes by ~32
+    // frames (~1.3 s at 24 FPS), which is the right scale for HA's
+    // 30 s heartbeat consumer.
+    {
+      const uint32_t render_ms = millis() - now_ms;
+      const uint8_t  sample    = (render_ms >= kFrameIntervalMs)
+                                   ? 0
+                                   : static_cast<uint8_t>(kFrameIntervalMs - render_ms);
+      static uint8_t  s_slack_ring[32] = {0};
+      static uint16_t s_slack_sum      = 0;
+      static uint8_t  s_slack_idx      = 0;
+      s_slack_sum -= s_slack_ring[s_slack_idx];
+      s_slack_ring[s_slack_idx] = sample;
+      s_slack_sum += sample;
+      s_slack_idx = (s_slack_idx + 1u) & 31u;
+      // Single naturally-aligned 32-bit store — atomic on RP2040, no
+      // mutex needed. Reader (mqtt_link::publish_status) tolerates a
+      // slightly stale value; it's a diagnostic, not a control input.
+      g_render_slack_ms = static_cast<uint32_t>(s_slack_sum >> 5);  // /32
+
+      // FR-16.4 / phase D.7: one-shot first-frame timing. Capture
+      // the same render_ms we just sampled and hand it to Core 0
+      // for logging — Serial from Core 1 would race Protomatter
+      // PIO/DMA timing (CODING_PRACTICES §10). Sentinel 0 means
+      // "nothing new"; pin to >=1 so a literal sub-ms render still
+      // logs.
+      if (s_first_frame_pending) {
+        s_first_frame_pending = false;
+        const uint32_t v = (render_ms == 0u) ? 1u : render_ms;
+        g_first_frame_render_ms = v;
+      }
+    }
+
+    // FR-16.5 / phase D.6: continuous sky-model refresh on Core 1.
+    // Internally rate-limited to ~1 Hz and gated on the freshly-
+    // computed slack so it skips frames where the active scene is
+    // already at budget. The trig-heavy sun::compute + iss_geom
+    // cost (~200 µs combined on RP2040 soft-float) lands here once a
+    // second on a slack window — moves it off Core 0 entirely and
+    // off the per-frame render path that scenes currently run.
+    sky_snapshot::tick(now_ms, g_render_slack_ms);
   }
 
   // Publish FPS to Core 0 once per second WITHOUT printing here —

@@ -25,6 +25,7 @@
 #include <Fonts/Picopixel.h>
 
 #include "config.h"
+#include "sky_snapshot.h"
 #include "time_of_day.h"
 
 namespace gfx {
@@ -128,6 +129,51 @@ inline void draw_clock_chrome(Adafruit_Protomatter& matrix, uint32_t now_ms,
   int16_t x = PANEL_WIDTH - static_cast<int16_t>(w) - 1 - x1;
   if (x < 0) x = 0;
   draw_text_halo(matrix, x, 5, buf, fg, halo);
+}
+
+// Always-on micro sun-arc indicator — single pixel along the top edge
+// (row 0) at the column corresponding to the live sun azimuth. Driven
+// by the FR-16.5 sky_snapshot so this costs nothing on the render path
+// beyond a snapshot read + one drawPixel. Below-horizon → no pixel;
+// near horizon → dim warm; above horizon → bright amber.
+//
+// The azimuth→x mapping mirrors sky_bg_render::draw() exactly so the
+// chrome dot lines up with the sun disc when the sky bg is showing.
+// Skipped when the snapshot is invalid (pre-RTC-sync) or when the
+// rendering scene has opted out of chrome — same opt-out as the
+// clock readout, since both share the top edge.
+//
+// (added in phase D.6 — FR-16.5 chrome micro-indicator)
+inline void draw_sun_arc_chrome(Adafruit_Protomatter& matrix) {
+  sky_snapshot::Snapshot snap;
+  sky_snapshot::read(&snap);
+  if (!snap.valid) return;
+
+  // Mirror sky_bg_render::draw()'s linear az→x mapping (az 60°=0,
+  // 180°=31.5, 300°=63). Outside [45°, 315°] the sun is "behind us"
+  // for the south-facing panel — no indicator.
+  const float az = snap.sun_azimuth_deg;
+  if (az < 45.0f || az > 315.0f) return;
+  const float xf = (az - 60.0f) * (63.0f / 240.0f);
+  int x = static_cast<int>(xf + 0.5f);
+  if (x < 0) x = 0;
+  if (x > PANEL_WIDTH - 1) x = PANEL_WIDTH - 1;
+
+  // Top-left corner is reserved by the chrome clock readout (which
+  // we draw on the right) — row 0 is otherwise free. Use a warm
+  // amber that stays legible against any sky-bg gradient. Below
+  // horizon (the snap.observer_dark window or sub-horizon) we just
+  // skip; the indicator is meant for "where IS the sun in the sky",
+  // not "where would it be if it were up" — that's what the
+  // sky_timelapse debug scene is for.
+  if (snap.sun_altitude_deg < -3.0f) return;
+
+  // Two-tier brightness: bright amber when sun > 5° (well up), warm
+  // dim near horizon. Matches the disc gradient in sky_bg.
+  const uint16_t bright = 0xFE60;  // amber (R31 G19 B0)
+  const uint16_t warm   = 0x8200;  // deep orange-red (R16 G16 B0)
+  const uint16_t c = (snap.sun_altitude_deg > 5.0f) ? bright : warm;
+  matrix.drawPixel(x, 0, c);
 }
 
 }  // namespace gfx

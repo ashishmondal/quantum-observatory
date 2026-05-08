@@ -43,4 +43,23 @@ public:
   // scene, which renders its own large HH:MM and would be defaced by an
   // overlapping chrome readout.
   virtual bool wants_clock_chrome() const { return true; }
+
+  // Speculative pre-render hook (FR-16.4, phase D.7). Called by the
+  // compositor on Core 1 during slack windows for the most-likely
+  // *next* scene (heuristic: incoming scene during the fade-through-
+  // black window of a swap; could expand later to default-scene prep
+  // during steady-state idle).
+  //
+  // Contract:
+  //   - Idempotent. May be invoked many times before a swap or zero
+  //     times if the swap is preempted; both must be safe.
+  //   - MUST NOT touch the live framebuffer. The active scene's
+  //     render() is still drawing every frame; any matrix.draw* call
+  //     here would corrupt the visible output.
+  //   - Bounded one-shot work only — palette LUT rebuilds, projection
+  //     pre-pack, asset lookup. The hook runs inside Core 1's frame
+  //     budget, so a >5 ms prep blows FR-3.1.
+  //   - Default = no-op. Scenes that have nothing to amortize leave
+  //     it alone; the compositor still calls it harmlessly.
+  virtual void prepare(uint32_t /*now_ms*/) {}
 };
