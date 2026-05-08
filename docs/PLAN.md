@@ -317,7 +317,7 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 - [x] **7.2** `moon_phase` — phase glyph + name (sticky)
 - [x] **7.3** `jupiter_visibility` — direction + time
 - [x] **7.4** `constellation_now` — overhead constellation art + name (sticky); HA picks current overhead constellation by date + observer lat/lon. See [FUTURE_SCENES.md](FUTURE_SCENES.md) for the long-tail scene backlog.
-- [ ] **7.5** Home Assistant automations & sensors that publish them
+- [x] **7.5** Home Assistant automations & sensors that publish them
 
 ---
 
@@ -421,7 +421,7 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     hammers `observatory/scene` at 20 msg/s. No mutex contention in
     Core 1's hot path.
 
-- [ ] **D.5 Idle-slack instrumentation** (FR-16.9)
+- [x] **D.5 Idle-slack instrumentation** (FR-16.9)
   - Measure per-frame `kFrameIntervalMs − render_time` on Core 1.
     Maintain a 32-frame rolling average; publish to Core 0 via a
     `volatile uint32_t g_render_slack_ms`. Add `render_slack_ms` to
@@ -431,7 +431,7 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     report ~30 ms slack, heavy scenes report < 10 ms — quantifies how
     much budget D.6/D.7 actually have.
 
-- [ ] **D.6 Continuous sky-model on Core 1** (FR-16.5)
+- [x] **D.6 Continuous sky-model on Core 1** (FR-16.5)
   - Run the `sun_position` computation + a moon-phase calculation +
     (if available) the cached ISS look-angle once per second on Core 1
     during a slack window, regardless of active scene. Publish into a
@@ -443,16 +443,19 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
     immediately on the first frame (no stall); the chrome arc visibly
     marches across the day in `sky_timelapse`.
 
-- [ ] **D.7 Speculative `Scene::prepare()`** (FR-16.4)
+- [x] **D.7 Speculative `Scene::prepare()`** (FR-16.4)
   - Add an optional `Scene::prepare(now_ms)` hook (default no-op).
-    During Core 1 slack windows (gated by D.5 floor), call `prepare()`
-    on the most likely next scene — heuristic: if there's a pending
-    request, prep that; else prep the default. `ConstellationNow`
-    pre-packs the next constellation's line-art bitmap;
-    `ImagePaletteBg` pre-builds its themed runtime palette.
-  - **Win:** instrument the first-frame render time after a swap;
-    pre-prepared scenes show a measurable drop (e.g. `ConstellationNow`
-    first frame goes from ~25 ms to < 10 ms). FPS uninterrupted.
+    During the D.2 fade-out window the compositor calls `prepare()` on
+    the *incoming* scene every frame so the cache is warm by the
+    midpoint swap. (The original spec also called for steady-state
+    speculative prep on a peeked pending request — deferred since
+    `scene_state` has no peek API; revisit if first-frame timing
+    shows it's needed.) `ConstellationNow` pre-packs the next
+    constellation's projection (dedup → brightness sort → cos(dec)
+    project), keyed by entry index. `ImagePaletteBg`'s themed runtime
+    palette prep is deferred to T.8.
+  - **Win:** Core 0 logs `[scene] first_frame_ms=N` once after each
+    swap; pre-prepared scenes show a measurable drop. FPS uninterrupted.
 
 - [ ] **D.8 Toast / banner overlay** (FR-16.6)
   - Add `observatory/toast` topic, payload `{"text": "...", "ms": N,
