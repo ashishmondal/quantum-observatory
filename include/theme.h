@@ -1,24 +1,34 @@
 // Retro sci-fi theming system (FR-15).
 //
-// A theme bundles inks, fonts, brackets, layout hints, and a background
-// palette policy. Scenes read theme state via this API every frame —
-// they MUST NOT hardcode ink colors, font selections, or bracket strings
-// (FR-15.3). See docs/THEME.md for the full design.
+// A theme bundles inks, fonts, brackets, layout hints, a background
+// palette policy, and an optional animated clock-screen background.
+// Scenes read theme state via this API every frame — they MUST NOT
+// hardcode ink colors, font selections, or bracket strings (FR-15.3).
+// See docs/THEME.md for the full design.
+//
+// OO model (T.x refactor): each theme is its own class derived from
+// `theme::Theme`. The base class stores the static metadata (inks,
+// fonts, hint mask, brackets, optional duotone bg ramp) via const
+// pointers passed in the ctor; concrete subclasses live one-per-file
+// under include/themes/ + src/themes/ and override the per-theme
+// virtuals (`bg_palette_for`, `init_clock_bg`, `render_clock_bg`).
+// The free-function API (`theme::ink()`, etc.) is preserved — every
+// call delegates to `current_theme()` so existing scene code is
+// unchanged.
 //
 // Concurrency:
-//   set()      — Core 0 writer (MQTT handler, in T.4).
-//   current()  — readable from either core.
-//   ink/font/has/bracket_*/bg_palette_for — readers, called from Core 1
-//   render path every frame.
+//   set()           — Core 0 writer (MQTT / IR handler).
+//   current() /
+//   current_theme() — readable from either core.
+//   ink/font/has/bracket_*/bg_palette_for — readers, called from
+//                     Core 1 render path every frame.
 //
 // The active id is a single naturally-aligned uint8_t — atomic on RP2040,
 // no mutex needed (same rationale as g_render_fps in main.cpp). Theme
 // switches take effect at the next frame boundary, no torn frames
-// (FR-15.4).
-//
-// T.2 skeleton: APOLLO_AMBER only, values chosen to reproduce today's
-// look bit-for-bit so T.3 (the per-scene refactor) is a pure
-// search-and-replace with zero visual delta.
+// (FR-15.4). render_clock_bg() may carry mutable per-theme animation
+// state; it is single-reader (Core 1) so no extra synchronisation is
+// required.
 
 #pragma once
 
@@ -33,8 +43,28 @@
 
 enum class BgType : uint8_t;  // backgrounds.h
 struct ImageEntry;            // bitmaps/_index.h (auto-generated)
+class Adafruit_Protomatter;   // render_clock_bg() target — full include is heavy
+
+// Forward-declared so theme.h doesn't drag buzzer.h into every TU
+// that already pulls theme.h. Concrete definition lives in
+// include/buzzer.h; theme.cpp + each theme .cpp include it where
+// they actually use the type.
+namespace buzzer { struct Note; }
 
 namespace theme {
+
+// Forward decls so the public free functions in this header can
+// reference theme::Theme below.
+class Theme;
+
+// One per-theme signature melody (FR-10.7). Returned by-value so
+// callers don't have to worry about lifetime — the underlying
+// `notes` array is always file-scope `static constexpr` in the
+// owning theme's .cpp, so it outlives the program.
+struct Melody {
+  const buzzer::Note* notes;   // nullptr ⇒ theme has no melody
+  uint8_t             count;
+};
 
 // Ordered append-only — values may be logged or persisted in future.
 enum class Id : uint8_t {
@@ -153,7 +183,7 @@ bool            has(Hint h);
 const char*     bracket_open();
 const char*     bracket_close();
 
-// FR-15.6: maps a logical background type to the palette::Id the active
+// FR-15.6 / THEME.md §6: maps a logical background type to the palette::Id the active
 // theme wants used. Default theme (APOLLO_AMBER) returns the same ids
 // the existing renderers already use — passthrough, no visual change
 // until non-default themes ship.
@@ -166,5 +196,102 @@ palette::Id     bg_palette_for(BgType bg);
 // recent theme switch (double-buffered, atomic flip — FR-15.4 next-frame
 // swap, no torn frames). Reader-side; safe from Core 1 every frame.
 const uint16_t* active_image_palette(const ImageEntry& e);
+
+// FR-10.7 signature-melody accessor. Returns the per-theme audible
+// signature played non-blockingly on the rising edge of `set()`. Out-
+// of-range ids and themes that declare no melody return `{nullptr, 0}`.
+// The trigger lives inside `set()` itself so every theme-switch path
+// (MQTT, IR remote, future button) shares one chokepoint.
+Melody signature_melody(Id id);
+
+// ── Theme class hierarchy ──────────────────────────────────────────
+//
+// One concrete subclass per Id (see include/themes/*.h). All inks /
+// fonts / hints / brackets live in the base class as const data
+// pointers (set once via the ctor); the only per-theme overridable
+// behaviour is the optional duotone bg ramp + the animated clock-screen
+// background. Subclasses live as global non-const singletons so the
+// per-frame render_clock_bg() can carry mutable animation state without
+// extra heap allocation.
+
+// 4-stop background duotone ramp (THEME.md §6). Stops are 0xRRGGBB
+// (24-bit) — converted to RGB565 once, at theme-switch time. Apollo
+// passes nullptr for the ramp pointer to keep its image backgrounds
+// in passthrough mode (FR-15.6, default theme is bit-for-bit unchanged).
+struct BgRamp {
+  uint32_t stop[4];   // BG_BLACK, BG_SHADOW, BG_HIGHLIGHT, BG_WHITE
+};
+
+class Theme {
+ public:
+  // Subclasses pass pointers to their own static const data. The
+  // arrays MUST be sized to Ink::COUNT / FontRole::COUNT respectively;
+  // the base class indexes into them without re-checking the arity.
+  // `bg_ramp` may be nullptr — that signals "passthrough", same
+  // behaviour as APOLLO_AMBER's image backgrounds.
+  Theme(Id id,
+        const char* wire_id,
+        const char* display_name,
+        const uint16_t* inks,
+        const GFXfont* const* fonts,
+        uint32_t hint_mask,
+        const char* bracket_open,
+        const char* bracket_close,
+        const BgRamp* bg_ramp);
+
+  virtual ~Theme() = default;
+
+  // Static metadata accessors — non-virtual, one byte / one pointer
+  // load each. Hot-path (Core 1, every frame).
+  Id              id()            const { return m_id; }
+  const char*     wire_id()       const { return m_wire_id; }
+  const char*     display_name()  const { return m_display_name; }
+  uint16_t        ink(Ink role)   const { return m_inks[static_cast<int>(role)]; }
+  const GFXfont*  font(FontRole r) const { return m_fonts[static_cast<int>(r)]; }
+  bool            has(Hint h)     const { return (m_hint_mask & (1u << static_cast<uint32_t>(h))) != 0u; }
+  const char*     bracket_open()  const { return m_bracket_open; }
+  const char*     bracket_close() const { return m_bracket_close; }
+  const BgRamp*   bg_ramp()       const { return m_bg_ramp; }
+
+  // Per-theme virtuals.
+  //
+  //   bg_palette_for: the palette `BackgroundXxxBg` should render
+  //   under this theme. Default impl reproduces APOLLO's table; any
+  //   subclass with non-passthrough image plans overrides.
+  //
+  //   init_clock_bg / render_clock_bg: optional per-theme animated
+  //   background drawn behind the giant HH:MM. Default impls clear
+  //   to black and do nothing — themes that want an animation override
+  //   render_clock_bg() and (if they need RNG/state seeding) init_clock_bg().
+  //   render_clock_bg() is responsible for fillScreen(); it MUST NOT
+  //   call matrix.show() — same contract as the other *Bg classes.
+  virtual palette::Id bg_palette_for(BgType bg) const;
+  virtual void        init_clock_bg() {}
+  virtual void        render_clock_bg(Adafruit_Protomatter& matrix, uint32_t now_ms);
+
+  // FR-10.7 per-theme signature melody. Default = no melody (silent
+  // theme swap). Concrete themes override to return a static-storage
+  // `Note[]` defined in their .cpp. The melody is played by the
+  // free-function `set()` chokepoint, never by subclasses themselves.
+  virtual Melody melody() const { return {nullptr, 0}; }
+
+ private:
+  Id                    m_id;
+  const char*           m_wire_id;
+  const char*           m_display_name;
+  const uint16_t*       m_inks;
+  const GFXfont* const* m_fonts;
+  uint32_t              m_hint_mask;
+  const char*           m_bracket_open;
+  const char*           m_bracket_close;
+  const BgRamp*         m_bg_ramp;
+};
+
+// Active-theme accessor used by the dispatcher (e.g. backgrounds.cpp's
+// THEME_CLOCK case calls `current_theme().render_clock_bg(...)`).
+// Same atomic single-byte read as current(); safe from Core 1 every
+// frame. Always returns a valid reference — out-of-range ids fall
+// back to APOLLO_AMBER.
+Theme& current_theme();
 
 }  // namespace theme

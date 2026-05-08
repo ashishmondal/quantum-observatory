@@ -85,6 +85,14 @@
 #define THERMAL_THRESHOLD_C_DEFAULT  50
 #define THERMAL_HYSTERESIS_C_DEFAULT  5
 
+// ---- Piezo buzzer (GP27, active-high) ------------------------------------
+// On-board buzzer on the Waveshare carrier (HARDWARE.md "Buzzer"). Driven
+// as a passive piezo via Arduino tone() so we get pitch control; works on
+// an active buzzer too (carrier just rectifies the PWM into its fixed
+// pitch). All firmware tones stay above 8 kHz — see buzzer.h for the
+// rationale and the chirp envelope.
+#define PIN_BUZZER  27
+
 // ---- IR receiver (GP28 / IRM) --------------------------------------------
 // On-board 38 kHz IR demodulator wired to GP28 (silkscreen "IRM") on the
 // Waveshare carrier. Output is active-low, already squared by the

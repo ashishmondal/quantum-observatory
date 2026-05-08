@@ -64,6 +64,15 @@ public:
 
   const char* name() const override { return "safety_overlay"; }
 
+  // Returns the override scene whose pixels are *fully* covering the
+  // panel as of the most recent render() (i.e. ON state, or the
+  // draw_override half of a fade). nullptr otherwise. ChromeLayer
+  // uses this so the theme-decorations umbrella pass (FRAME_BORDER,
+  // SCANLINES) consults the override scene's wants_theme_decorations()
+  // — the underlying Director scene that g_current_scene points at
+  // is invisible during ON, so its hint settings are wrong to use.
+  Scene* covering_override() const { return m_covering_override; }
+
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
     Scene* target = pick_target();
 
@@ -98,6 +107,10 @@ private:
 
   Scene*   m_scenes[kSlotCount] = {nullptr, nullptr, nullptr, nullptr};
   Scene*   m_visible    = nullptr;
+  // Snapshot of the override scene whose opaque content covered the
+  // panel on the most recent draw() call (see covering_override()).
+  // nullptr when no override painted, or only the Bayer overlay did.
+  Scene*   m_covering_override = nullptr;
   State    m_state      = State::OFF;
   uint32_t m_phase_started_ms = 0;
   bool     m_first_call = true;
@@ -175,6 +188,7 @@ private:
   }
 
   void draw(Adafruit_Protomatter& matrix, uint32_t now_ms) {
+    m_covering_override = nullptr;
     if (m_state == State::OFF || m_visible == nullptr) return;
 
     bool     draw_override = false;
@@ -218,6 +232,7 @@ private:
       // content — they completely overwrite whatever the fg layer
       // drew below. Then we Bayer-black on top.
       m_visible->render(matrix, now_ms);
+      m_covering_override = m_visible;
     }
 
     bayer::apply_black_overlay(matrix, alpha);

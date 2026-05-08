@@ -24,8 +24,8 @@
 #include "backgrounds/nebula_bg.h"
 #include "backgrounds/bitmap_bg.h"
 #include "backgrounds/image_palette_bg.h"
-#include "backgrounds/theme_clock_bg.h"
 #include "bitmaps/_index.h"
+#include "theme.h"
 
 class Adafruit_Protomatter;
 
@@ -47,7 +47,12 @@ public:
     m_star.init();
     m_para.init();
     m_neb.init();
-    m_theme_clock.init();
+    // Per-theme animated clock background (THEME_CLOCK) state lives
+    // on each Theme subclass. theme::set()/cycle() re-init the new
+    // theme's animator on every switch, but seed the boot-active
+    // theme here so the very first render frame doesn't see uninit'd
+    // member arrays.
+    theme::current_theme().init_clock_bg();
     init_bitmap_demo();
     init_image_default();
   }
@@ -61,7 +66,7 @@ public:
       case BgType::NEBULA:    m_neb.render(matrix, now_ms);  break;
       case BgType::BITMAP:    m_bmp.render(matrix, now_ms);         break;
       case BgType::IMAGE:     m_img.render(matrix, now_ms);         break;
-      case BgType::THEME_CLOCK: m_theme_clock.render(matrix, now_ms); break;
+      case BgType::THEME_CLOCK: theme::current_theme().render_clock_bg(matrix, now_ms); break;
       case BgType::NONE:
       default:                matrix.fillScreen(0x0000);            break;
     }
@@ -92,7 +97,6 @@ private:
   NebulaBg        m_neb;
   BitmapBg        m_bmp;
   ImagePaletteBg  m_img;
-  ThemeClockBg    m_theme_clock;
 
   // Built-in demo bitmap. Splits the 192-entry BG ramp of NEBULA_CLOUDS
   // into two cycling sub-regions and lays out the panel as horizontal

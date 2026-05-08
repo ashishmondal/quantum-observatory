@@ -115,12 +115,13 @@ public:
     matrix.print(hhmm);
 
     // ── Divider ─────────────────────────────────────────────────────
-    // Suppressed under Apollo — the animated CRT raster scan already
-    // provides a moving horizontal element between the giant digits
-    // and the date strip, so a static divider line on top of it just
-    // reads as visual clutter. Other themes still get the divider as
-    // their backgrounds are quieter near row 22.
-    if (theme::current() != theme::Id::APOLLO_AMBER) {
+    // Suppressed under themes whose animated background already provides
+    // strong horizontal motion behind the giant digits — Apollo (CRT
+    // raster scan) and Vectrex (perspective grid lines). A static
+    // divider on top of those just reads as visual clutter.
+    const theme::Id tid = theme::current();
+    if (tid != theme::Id::APOLLO_AMBER &&
+        tid != theme::Id::VECTREX_NEON) {
       matrix.drawFastHLine(0, 22, PANEL_WIDTH,
                            theme::ink(theme::Ink::DIVIDER));
     }

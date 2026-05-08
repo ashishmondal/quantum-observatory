@@ -20,6 +20,7 @@
 #include "constellation_state.h"
 #include "moon_state.h"
 #include "ir_remote.h"
+#include "buzzer.h"
 #include "scenes/scene.h"
 #include "scenes/layer.h"
 #include "scenes/fade_black_layer.h"
@@ -135,6 +136,11 @@ public:
 // active scene's wants_clock_chrome() opt-out so the giant clock isn't
 // defaced. Future link-health dot work layers in here; keeping it as
 // a Layer means those additions don't touch loop1().
+//
+// Forward-declared first so ChromeLayer::render() can query its
+// covering_override() — the actual instance lives below.
+static SafetyOverlayLayer s_safety_overlay_layer;  // D.3 firmware overrides (FR-16.2)
+
 class ChromeLayer final : public Layer {
 public:
   const char* name() const override { return "chrome"; }
@@ -145,15 +151,25 @@ public:
     // Theme-level decorations (FRAME_BORDER, SCANLINES) layer on top
     // of every scene including chrome opt-outs — the giant clock
     // gets a Blade Runner cyan frame just like everything else.
-    // (added in phase T.7)
-    gfx::draw_theme_decorations(matrix);
+    //
+    // When a safety override (NIGHT/THERMAL/OFFLINE/SPLASH) is fully
+    // covering the panel, the override scene's wants_theme_decorations()
+    // wins instead of the underlying Director scene's — otherwise
+    // Blade Runner's cyan FRAME_BORDER would paint over a NIGHT
+    // overlay even though NIGHT opted out, because g_current_scene
+    // still points at the (invisible) bg scene.
+    // (added in phase T.7; override-aware in phase 6.6)
+    Scene* deco_scene = s_safety_overlay_layer.covering_override();
+    if (deco_scene == nullptr) deco_scene = g_current_scene;
+    if (deco_scene == nullptr || deco_scene->wants_theme_decorations()) {
+      gfx::draw_theme_decorations(matrix);
+    }
   }
 };
 
 static SceneFgLayer s_layer_fg;
 static ChromeLayer  s_layer_chrome;
 static FadeBlackLayer s_fade_black_layer;  // D.2 scene transition (FR-16.3)
-static SafetyOverlayLayer s_safety_overlay_layer;  // D.3 firmware overrides (FR-16.2)
 static InfoOverlayLayer  s_info_overlay_layer;  // IR.4 operator diagnostic overlay (FR-17.8)
 
 // Cross-core IR.4 trigger. Core 0's action_ir_info_toggle() writes the
@@ -552,6 +568,11 @@ void setup() {
   // events are NOT yet wired into scene_state — that lands once the
   // EMI characterisation against bright HUB75 frames is complete.
   ir_remote::begin();
+  // Piezo buzzer on GP27 — used by ir_remote::poll() to chirp on
+  // every accepted IR press (FR-17.5 `accepted` path). Bring up
+  // BEFORE set_dispatch() so a stray frame between begin() and the
+  // first loop() can't call into an uninitialised buzzer module.
+  buzzer::begin();
   // FR-17.5 — install the local-fast dispatch table for IR.3. Each
   // accepted press routes through scene_state::request() at priority
   // 1 / duration 120 s so a real ISS pass (priority 4) can still
@@ -631,6 +652,13 @@ void loop() {
   // IR remote drain (phase IR.1 — POC). Cheap when no frame is
   // pending; counters surface in the 1 Hz [ir] log line below.
   ir_remote::poll();
+
+  // Drive the buzzer's non-blocking melody scheduler (FR-10.7).
+  // Cheap when nothing is playing (one millis() compare). Lives
+  // alongside ir_remote::poll() because the chirp path is the
+  // dominant caller; theme-switch melodies (B.3) ride the same
+  // tick.
+  buzzer::tick(now_ms);
 
   // FR-17.5 / IR.3 — the IrTestScene learning wizard (phase IR.2)
   // captures NEC frames directly off ir_remote::stats() and would be

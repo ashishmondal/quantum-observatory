@@ -44,6 +44,14 @@ public:
   // overlapping chrome readout.
   virtual bool wants_clock_chrome() const { return true; }
 
+  // Should the theme-level decorations umbrella pass (FRAME_BORDER,
+  // SCANLINES, …) draw on top of this scene? Default true so themes
+  // get their signature look on every view. Currently overridden only
+  // by the night scene, which forces every visible pixel to deep red
+  // for dark-adaptation reasons (FR-7.2) — a Blade Runner cyan or
+  // LCARS orange frame would defeat that.
+  virtual bool wants_theme_decorations() const { return true; }
+
   // Speculative pre-render hook (FR-16.4, phase D.7). Called by the
   // compositor on Core 1 during slack windows for the most-likely
   // *next* scene (heuristic: incoming scene during the fade-through-

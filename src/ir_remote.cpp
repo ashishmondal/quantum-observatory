@@ -8,6 +8,7 @@
 
 #include <Arduino.h>
 
+#include "buzzer.h"
 #include "config.h"
 #include "ir_remote.h"
 
@@ -101,6 +102,17 @@ bool poll() {
         // FR-17.4: discrete actions ignore repeats so a long-press
         // doesn't stampede. Continuous actions (none in v1) opt in.
         if (is_repeat && !e.honour_repeats) break;
+        // Audible feedback: chirp BEFORE the action runs (FR-10.6).
+        // Order matters — buzzer::chirp() and buzzer::play() share
+        // one scheduler, and any new sound cancels the in-flight
+        // one (latest-wins). If the chirp came AFTER the action, an
+        // action that itself plays a melody (theme::cycle → set →
+        // buzzer::play, FR-10.7 / B.3) would have its melody
+        // immediately killed by the chirp. Putting the chirp first
+        // means non-melody actions (scene cycle, overlay toggle)
+        // still get the tick, while melody actions cleanly replace
+        // the brief chirp with their longer cue.
+        buzzer::chirp();
         if (e.action != nullptr) {
           e.action(d.address, d.command);
         }

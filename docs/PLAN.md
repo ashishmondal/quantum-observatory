@@ -610,6 +610,80 @@ top of that foundation in commit-sized steps, ordered by
 
 ---
 
+## Phase B — Audible Feedback (FR-10)
+
+The carrier ships a piezo buzzer on GP27 (HARDWARE.md "Buzzer"). The
+firmware drives it as a passive piezo via Arduino `tone()` so we get
+pitch control; works on an active buzzer too (the carrier just
+rectifies the PWM into its fixed pitch). All firmware tones live
+above 8 kHz (FR-10.5) so the buzzer reads as "device tick" rather
+than competing with foreground room audio. Bound + driven on Core 0
+only (no cross-core safety needed).
+
+- [x] **B.1 Driver + IR-press chirp** (FR-10.5, FR-10.6) —
+  `buzzer::begin()` + `buzzer::chirp()` in `src/buzzer.{h,cpp}`,
+  `PIN_BUZZER 27` in `config.h`, brought up in `setup()` right
+  after `ir_remote::begin()`. `ir_remote::poll()` calls
+  `buzzer::chirp()` exactly where it bumps `s_stats.accepted` —
+  i.e. ONLY when a press passed every gate AND fired a dispatch
+  action AND wasn't suppressed as an unhonoured repeat. Repeats /
+  unmapped / address-rejected frames stay silent. Single tone, 12 ms
+  @ 9 kHz, non-blocking (`tone(pin, hz, dur_ms)` on arduino-pico
+  schedules the stop on a hardware timer). **Exit:** holding ▲
+  produces one tick + a stream of silent repeats; pressing an
+  unmapped key produces no tick; a neighbour remote produces no
+  tick.
+
+- [x] **B.2 Non-blocking melody scheduler** (FR-10.7 plumbing) —
+  extend `buzzer.{h,cpp}` with a `play(const Note* notes, uint8_t n)`
+  API that accepts a flash-resident sequence of `{freq_hz, ms}`
+  pairs (with `freq_hz == 0` meaning rest). State machine ticked
+  by `buzzer::tick()` from Core-0 `loop()`: at each note boundary
+  call `tone(pin, hz, ms)` for the next note, advance the cursor
+  on a `millis()` deadline, and stop cleanly when the sequence
+  ends. A new `play()` call cancels any in-flight melody (call
+  `noTone()` first) so theme-cycle spam from the IR remote can't
+  stack melodies. Hard-cap each note frequency at the 8 kHz floor
+  inside `play()` so violations never reach the pin. Boot self-test
+  (FR-10.4): one ≤ 50 ms tone at the chirp pitch fired at the end
+  of `setup()` — confirms wiring without being annoying. **Exit:**
+  a synthetic 4-note test sequence plays end-to-end without
+  blocking the IR poll loop or scene render; `noTone()` cancellation
+  works (rapid back-to-back `play()` calls don't overlap).
+
+- [ ] **B.3 Per-theme signature melodies** (FR-10.7 data + trigger) —
+  add `theme::signature_melody(Id) -> {const Note*, uint8_t}` and
+  declare the five canonical sequences in `theme.cpp` next to the
+  per-theme ink/font tables (one source of truth per theme). Notes
+  match the FR-10.7 table verbatim (Apollo: lonely hero interval;
+  Nostromo: dissonant two-note call; Vectrex: arpeggio shimmer;
+  Blade Runner: falling swell; LCARS: Star Trek climb). Wire the
+  trigger inside `theme::set(id)` itself: on the rising edge of
+  *id changed* (idempotent set-to-same is silent), call
+  `buzzer::play(...)` with the new theme's melody. This puts the
+  trigger at the single source-of-truth chokepoint so every theme
+  switch path (MQTT topic in `mqtt_link.cpp`, IR remote dispatch
+  in `main.cpp`, future on-board button) gets the audible cue for
+  free. **Exit:** publishing `observatory/theme nostromo_green`
+  produces the two-note Goldsmith echo; cycling themes with the IR
+  remote produces a different motif per theme; setting the active
+  theme to itself stays silent.
+
+- [ ] **B.4 Mute + safety cap** (FR-10.2, FR-10.3) — subscribe
+  `observatory/buzzer` `{"mode":"off"|"chirp"|"siren","count":N}`
+  in `mqtt_link.cpp`. `"off"` flips a `buzzer::set_muted(true)`
+  flag that short-circuits `chirp()` AND `play()` at the driver
+  boundary (theme melodies, IR chirps, alerts — all silenced
+  uniformly). Hard-cap inside the driver: ≤ 200 ms ON for any
+  single tone, ≥ 800 ms OFF between alert chirps, ≤ 3 chirps per
+  scene activation, regardless of payload — so a malformed
+  `count: 999` can't run away. Add a `buzzer_mute` MQTT switch in
+  `homeassistant/setup_mqtt.py`. **Exit:** muting from HA silences
+  both IR-press chirps and theme melodies within one frame; a
+  `count: 50` payload is clamped to 3.
+
+---
+
 ## Phase 9 — Hardening (final)
 
 - [ ] **9.1 Memory audit** — log free heap; confirm ≥ 32 KB headroom under all scenes; also flash budget — each `assets/*.bmp` costs ~2.4 KB; track total registry size
