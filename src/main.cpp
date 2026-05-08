@@ -19,6 +19,7 @@
 #include "jupiter_state.h"
 #include "constellation_state.h"
 #include "moon_state.h"
+#include "ir_remote.h"
 #include "scenes/scene.h"
 #include "scenes/layer.h"
 #include "scenes/fade_black_layer.h"
@@ -35,6 +36,7 @@
 #include "scenes/jupiter_visibility_scene.h"
 #include "scenes/moon_phase_scene.h"
 #include "scenes/constellation_now_scene.h"
+#include "scenes/ir_test_scene.h"
 #include "scenes/sky_timelapse_scene.h"
 #include "scenes/splash_scene.h"
 #include "scenes/text_demo_scene.h"
@@ -85,6 +87,7 @@ static IssPassScene    s_iss_pass_scene;    // phase 7.1 — "ISS NOW" callout
 static MoonPhaseScene  s_moon_phase_scene;  // phase 7.2 — sticky moon disc + phase
 static JupiterVisibilityScene s_jupiter_visibility_scene; // phase 7.3 — Jupiter look-angles
 static ConstellationNowScene  s_constellation_now_scene;  // phase 7.4 — dynamic constellation art
+static IrTestScene            s_ir_test_scene;            // phase IR.1 — IR receiver POC readout
 
 // Single "current scene" pointer; loop() just delegates to it. Swapping
 // scenes is one assignment — no other code changes. (NFR-5.1)
@@ -202,6 +205,7 @@ static Scene* scene_for(scene_state::SceneId id) {
     case SI::MOON_PHASE:   return &s_moon_phase_scene;
     case SI::JUPITER_VISIBILITY: return &s_jupiter_visibility_scene;
     case SI::CONSTELLATION_NOW:  return &s_constellation_now_scene;
+    case SI::IR_TEST:            return &s_ir_test_scene;
   }
   return nullptr;
 }
@@ -388,6 +392,13 @@ void setup() {
   // which preempts everything else (FR-7.5) with THERMAL_SAFE.
   thermal_monitor::begin();
 
+  // IR remote receiver bring-up (phase IR.1 — POC, logging only).
+  // Bound on Core 0 so the IRremote library's pin-change ISR + µs
+  // timer cannot preempt Core 1's render loop mid-frame. Decoded
+  // events are NOT yet wired into scene_state — that lands once the
+  // EMI characterisation against bright HUB75 frames is complete.
+  ir_remote::begin();
+
   // Optional one-shot bootstrap. Define RTC_SEED_LOCAL_EPOCH (e.g. via
   // platformio.ini build_flags or secrets.h) to seed the chip with a
   // local-time epoch on this boot, then REMOVE the define and reflash
@@ -456,6 +467,10 @@ void loop() {
   if (thermal_monitor::poll(now_ms)) {
     scene_state::set_thermal_active(thermal_monitor::is_hot());
   }
+
+  // IR remote drain (phase IR.1 — POC). Cheap when no frame is
+  // pending; counters surface in the 1 Hz [ir] log line below.
+  ir_remote::poll();
 
   // Phase 6.4: MQTT-disconnect override (FR-5.1). Edge-detect on
   // mqtt_link::connected() so we only wake the renderer when the
@@ -568,6 +583,11 @@ void loop() {
     } else {
       Serial.println("[thermal] read FAILED");
     }
+
+    // IR receiver counters are surfaced live on-panel by the
+    // IrTestScene (scene_id=ir_test, phase IR.1) — see
+    // src/scenes/ir_test_scene.h. No serial mirror by design: the
+    // panel readout is the diagnostic.
   }
 
   // Phase 4.3 stress test: hammer Core 0 with a CPU-bound loop that

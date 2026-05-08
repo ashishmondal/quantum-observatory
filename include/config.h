@@ -83,6 +83,21 @@
 #define THERMAL_THRESHOLD_C_DEFAULT  50
 #define THERMAL_HYSTERESIS_C_DEFAULT  5
 
+// ---- IR receiver (GP28 / IRM) --------------------------------------------
+// On-board 38 kHz IR demodulator wired to GP28 (silkscreen "IRM") on the
+// Waveshare carrier. Output is active-low, already squared by the
+// receiver's internal AGC + bandpass — no carrier demodulation needed in
+// firmware. Driven by the IRremote v4 library, whose ISR attaches a
+// pin-change interrupt and a microsecond timer; steady-state cost is zero
+// because the ISR fires only on IR edges (~30 edges per NEC frame, all
+// within ~70 ms of a button press).
+//
+// Bound on Core 0 from setup() so Core 1's render loop can't be preempted
+// mid-frame. Bare logging-only POC for now (phase IR.1) — once the EMI
+// behaviour vs. a bright HUB75 frame is characterised, decoded events
+// will feed scene_state alongside the buttons.
+#define PIN_IR_RX  28
+
 // ---- Observer location (sun position) ------------------------------------
 // Drives the sky-gradient + sun-arc background on the giant clock.
 // Default: Houston, TX. Will become MQTT-settable in a later phase.

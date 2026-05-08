@@ -20,6 +20,7 @@ that motivate them.
 | **Light sensor** (photoresistor) | 26 | ADC0 | 12-bit raw, demo subtracts a 700 offset |
 | **Buzzer** | 27 | GPIO push-pull (active high) | demo toggles bare; no PWM driver |
 | **Buttons** | KEY0=15 (MENU), KEY1=19 (DOWN), KEY2=21 (UP) | GPIO input | demo polls `gpio_get` |
+| **IR receiver** | IRM=28 | GPIO input, edge-triggered | 38 kHz demod, active-low envelope, NEC/Sony/RC5 via IRremote v4 |
 
 None of these collide with the HUB75 pin map already in
 [include/config.h](../include/config.h). Safe to add when needed.
@@ -197,6 +198,79 @@ call `gpio_pull_up` for them, suggesting external pulls).
 
 Earlephilhower core: `pinMode(15, INPUT_PULLUP)` then `digitalRead(15)`
 — pressed = 0.
+
+---
+
+## IR receiver (GP28 / silkscreen "IRM")
+
+**Why we care:** standard 38 kHz IR demodulator on the carrier — opens
+the door to driving the device with any commodity IR remote (NEC / Sony /
+RC5 / etc.) without adding hardware. First use case: room-side scene
+navigation + brightness override + info overlay, mirroring the on-board
+buttons but from across the room.
+
+The sensor is a typical TSOP-style module: built-in bandpass filter +
+AGC + demodulator. Output is active-low — idle high, pulled low for the
+duration of each 38 kHz burst the remote emits. No carrier handling in
+firmware; just edge-timing.
+
+### Wiring
+
+```c
+#define IRM 28   // GP28, digital input, no pull needed (open-drain on receiver)
+```
+
+### Library
+
+We use [Arduino-IRremote v4.x](https://github.com/Arduino-IRremote/Arduino-IRremote)
+(pinned in [platformio.ini](../platformio.ini)). It registers a
+pin-change ISR + microsecond timer to capture edge timings and runs the
+protocol decoder synchronously inside `IrReceiver.decode()`. The ISR is
+cheap (only fires on IR activity), but **must be bound on Core 0** —
+our Core 1 owns Protomatter timing and cannot tolerate ISR jitter
+mid-frame.
+
+### Init (logging-only POC, phase IR.1)
+
+```cpp
+// once, from setup() — Core 0
+IrReceiver.begin(PIN_IR_RX, /*enableLEDFeedback=*/false);
+
+// every loop() iteration — Core 0
+if (IrReceiver.decode()) {
+  const auto& d = IrReceiver.decodedIRData;
+  // d.protocol, d.address, d.command, d.flags (REPEAT, PARITY_FAILED…)
+  IrReceiver.resume();   // arm for next frame
+}
+```
+
+### Known-unknowns to characterise in POC
+
+Three HUB75-EMI failure modes the bare driver alone can't predict:
+
+1. **Vcc ripple** desensitising the AGC → receiver works panel-off,
+   dies panel-bright. Mitigation: LC filter on receiver Vcc, ferrite
+   bead on signal line.
+2. **Radiated noise** from the HUB75 ribbon → ghost decodes / corrupted
+   command bytes with no remote pressed (look for `PARITY_FAILED` or
+   `UNKNOWN` protocol in the [ir] log).
+3. **AGC dead-time** after sustained noise → every Nth press missed.
+
+POC pass criteria documented in [PLAN.md](PLAN.md) phase IR.1.
+
+### Roku remote caveat
+
+Roku ships two families:
+
+- **Standard IR remote** (no mic, no headphone jack) → 38 kHz NEC-ish,
+  decodes fine.
+- **"Enhanced" / voice remote** (mic button, headphone jack, TV power
+  passthrough) → Wi-Fi Direct or Bluetooth, **no IR LED at all**. Won't
+  work no matter what we do.
+
+If the Roku remote turns out to be the enhanced one, fall back to any
+cheap NEC remote (Adafruit mini, Apple Remote A1156, old TV remote) to
+validate the receiver path.
 
 ---
 

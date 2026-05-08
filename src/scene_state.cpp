@@ -322,6 +322,7 @@ constexpr IdMapping kIdMap[] = {
   { "moon_phase",    SceneId::MOON_PHASE    },
   { "jupiter_visibility", SceneId::JUPITER_VISIBILITY },
   { "constellation_now",  SceneId::CONSTELLATION_NOW  },
+  { "ir_test",            SceneId::IR_TEST            },
 };
 }  // namespace
 

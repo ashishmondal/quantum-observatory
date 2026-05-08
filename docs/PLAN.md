@@ -490,6 +490,130 @@ Scenes consume `theme::*`, never hardcode color/font/brackets.
 
 ---
 
+## Phase IR — IR Remote Input (FR-17)
+
+The carrier ships a 38 kHz IR demodulator on GP28. The interaction
+model is **hybrid** (FR-17.5): a local fast path for viewer-ergonomics
+actions so the device stays useful when MQTT is down, plus an MQTT
+round-trip for Director-class intent so HA's history and automations
+stay authoritative. The remote in scope for v1 is an old Roku IR-only
+remote (no Bluetooth, no volume/mute keys) — 8 buttons total: 4 arrows,
+OK, Back, Home, and Options/Replay.
+
+Phase IR.1 already landed (logging-only POC, on-panel `ir_test`
+diagnostic). The rest of Phase IR builds the operator interface on
+top of that foundation in commit-sized steps, ordered by
+"each step unlocks the next".
+
+- [x] **IR.1 Receiver POC + diagnostic scene** — `ir_remote::poll()` on
+  Core 0 (FR-17.1); IRremote v4 pinned in [platformio.ini](../platformio.ini);
+  `IrTestScene` shows live `decoded/unknown/parity/overflow` counters,
+  flash-strip on every new decode, last-decode protocol/addr/cmd
+  readout, and a green-vs-red 5 s rolling health bar so EMI behaviour
+  reads at a glance from across the room. **Win:** `mosquitto_pub …
+  '{"scene_id":"ir_test"}'` brings up the POC; pressing remote keys
+  increments `decoded` and updates `last`.
+
+- [ ] **IR.2 Characterise & lock the remote** — sit in front of the
+  device with the target Roku, hit every button under three panel
+  conditions (off / black scene / brightest scene at full brightness),
+  log per-button command codes + EMI ratios. Outputs:
+    - Update [docs/HARDWARE.md](HARDWARE.md) "IR receiver" section with
+      the per-button NEC command table for the as-built remote.
+    - Pin `#define IR_REMOTE_ADDR_EXPECTED` and one
+      `kIrButton<Name>Cmd` constant per button in
+      [include/config.h](../include/config.h) so the dispatch table in
+      IR.3 has nothing to discover at runtime (FR-17.3).
+    - Decision gate against FR-17.13: if bright-scene reliability is
+      below 90 %, escalate to a hardware mitigation (LC filter on
+      receiver Vcc, ferrite bead on signal line, physical shielding)
+      before proceeding to IR.3.
+  - **Win:** `IR_REMOTE_ADDR_EXPECTED` + 8 `kIrButton*Cmd` constants
+    committed; HARDWARE.md table populated; FR-17.13 cell marked pass.
+
+- [ ] **IR.3 Dispatch table + scene cycle (`▲`/`▼`) + `Back`/`Home`**
+  (FR-17.2, FR-17.3, FR-17.4, FR-17.5, FR-17.6, FR-17.11)
+  - New `ir_remote::set_dispatch(...)` API: a fixed table of
+    `{cmd, lane, action_fn, honour_repeats}` entries; lookup is a
+    linear scan of ≤ 16 entries, no hashing, all static.
+  - `kRemoteCycle[]` in `config.h`: ordered list of operator-facing
+    `SceneId`s for `▲/▼`. Excludes overrides + diagnostics per
+    FR-17.6. Default: `{CLOCK, MOON_PHASE, JUPITER_VISIBILITY,
+    CONSTELLATION_NOW, ISS_PASS, SKY_TIMELAPSE}`.
+  - `ir_remote::poll()` gains the FR-17.2 discipline filter (NEC only,
+    no parity/overflow) + FR-17.3 address gate. Frames that pass the
+    filters increment a separate `accepted` counter (visible in
+    `IrTestScene`); rejects increment the existing diagnostic
+    counters but never reach the dispatch table.
+  - Cycle requests use `priority=1, duration=120, sticky=false`.
+    Smallest possible patch that proves end-to-end dispatch works.
+  - **Win:** `▲/▼` walks the curated list with the same fade
+    transition the MQTT path uses. `Back` clears any sticky and
+    returns to `CLOCK`; `Home` jumps to `CLOCK` immediately.
+  - **Verify:** scope test — bright scene active, 30 deliberate
+    presses, ≥ 27 produce the expected scene swap (FR-17.13).
+
+- [ ] **IR.4 Info overlay (`OK`)** (FR-17.8, FR-16.1)
+  - New `InfoOverlayLayer` slotting between SCENE and
+    OVERLAY_TRANSITION in the compositor stack.
+  - Content lines: IP, RSSI, MQTT state (✓/✗ + reconnect age),
+    uptime, FPS, scene id, theme id, free heap. Picopixel font.
+  - 5 s linear-α fade-in (~300 ms) → hold → fade-out (~600 ms);
+    second `OK` press while visible cancels the hold and starts the
+    fade-out immediately.
+  - State lives in the layer itself (no cross-core seqlock needed
+    — Core 0 sets a "show until ms_X" flag, Core 1 reads it once
+    per frame; single-uint32 atomicity is sufficient).
+  - **Win:** press `OK` in front of the device → 5 s diagnostic
+    overlay over whatever scene is active. Highest debug-payoff
+    feature in Phase IR — pays for the entire IR effort the first
+    time something breaks at the in-laws' place.
+
+- [ ] **IR.5 Theme cycle (`◄`/`►`)** (FR-17.10, FR-15.2, FR-15.4)
+  - Wire `◄` → `theme::set(prev)`, `►` → `theme::set(next)`. Same
+    `theme::set()` path MQTT uses (FR-15.4 next-frame swap, no scene
+    re-init). Order from `theme::all_ids()` — append-only.
+  - Status heartbeat already echoes theme (FR-15.7) so HA reflects
+    the operator's choice without extra wiring.
+  - **Caveat:** depends on T.8 `theme::set()` being live at runtime.
+    If T.8 hasn't landed when IR.5 is scheduled, IR.5 falls back to
+    publishing `observatory/theme` and routing through HA — slower
+    by one round-trip but still demos the action.
+  - **Win:** room guest can switch the look-and-feel from the
+    couch without learning HA.
+
+- [ ] **IR.6 MQTT echo + remote-event topic** (FR-17.5 mqtt-routed
+  lane, FR-17.7, §5.5)
+  - Add `mqtt_link::publish_remote_event(button, action, accepted,
+    lane, proto, addr, cmd)`. JSON encoding via the existing static
+    buffer pattern; QoS 0 (echo, not authoritative).
+  - Local-fast actions echo asynchronously after dispatch (no block
+    on publish).
+  - MQTT-routed buttons (`*` Options, `↺` Replay, streaming
+    shortcuts if the remote has them) only publish — no local state
+    change. HA decides what they do.
+  - Visual feedback per FR-17.9: 1 px chrome flash green on
+    publish-accepted, red if MQTT is currently disconnected. Reuses
+    the chrome layer; no new compositor slot.
+  - HA package (`homeassistant/packages/quantum_observatory.yaml`)
+    gets an example automation showing how to wire `*` to a useful
+    action (e.g. "toggle bedroom lamp") so the integration story
+    is concrete.
+  - **Win:** subscribe to `observatory/remote/event` from
+    `mosquitto_sub` and watch every accepted press appear in real
+    time; HA history tab shows the same.
+
+- [ ] **IR.7 Streaming-button shortcuts (optional)** — only if the
+  Roku in scope happens to emit unique IR for any of its
+  Netflix/Disney/etc. shortcut buttons (most older IR-only Rokus
+  do, but verify in IR.2). Each becomes an mqtt-routed entry in
+  the dispatch table mapping to a friendly `button` name in the
+  MQTT echo. HA decides the action. No firmware-side scene
+  hardcoding — keeps the contract clean.
+  - **Skip if:** IR.2 shows the streaming buttons emit no IR.
+
+---
+
 ## Phase 9 — Hardening (final)
 
 - [ ] **9.1 Memory audit** — log free heap; confirm ≥ 32 KB headroom under all scenes; also flash budget — each `assets/*.bmp` costs ~2.4 KB; track total registry size

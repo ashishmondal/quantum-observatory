@@ -243,6 +243,120 @@ so Core 0's network jitter cannot perturb the frame.
   (FR-16.2) is the only behavioural change visible at the MQTT surface,
   and only for the case where an override clears mid-scene.
 
+### FR-17 IR Remote Input
+
+The carrier board ships a 38 kHz IR demodulator on GP28 (silkscreen
+"IRM"). FR-17 graduates the phase IR.1 logging-only POC into a
+first-class operator interface, while preserving HA as the source of
+truth for scene scheduling. The interaction model is **hybrid**: a
+local fast path for viewer-ergonomics actions (theme switch, info
+overlay, splash dismiss) so the device stays useful when MQTT is down,
+plus an MQTT round-trip for Director-class intent (jump-to-specific-
+scene) so HA's history and automations stay authoritative.
+
+- **FR-17.1 Receiver binding.** The firmware SHALL bind the IR receiver
+  on Core 0 (Gatekeeper). The decoder's pin-change ISR + microsecond
+  timer SHALL NOT run on Core 1 — Core 1 owns Protomatter timing and
+  cannot tolerate ISR jitter mid-frame (FR-3.1, NFR-1.2).
+
+- **FR-17.2 Decoder discipline.** Decoded frames SHALL be acted upon
+  only when `protocol == NEC`, `flags & PARITY_FAILED == 0`, and
+  `flags & WAS_OVERFLOW == 0`. All other decodes (UNKNOWN, parity
+  failures, overflows) SHALL be counted for diagnostics and discarded.
+  This is the contract that defends the dispatch table against
+  HUB75-EMI ghost decodes.
+
+- **FR-17.3 Per-remote address gate.** The firmware SHALL ignore NEC
+  frames whose address byte does not match a configured expected
+  address (`config.h::IR_REMOTE_ADDR_EXPECTED`, captured from the
+  intended remote during phase IR.2). This stops a neighbour's TV
+  remote from accidentally driving the panel.
+
+- **FR-17.4 Repeat-frame policy.** NEC repeat frames
+  (`flags & IS_REPEAT`) SHALL be honoured or ignored on a per-action
+  basis declared in the dispatch table, never globally. Actions that
+  ramp continuously (none in v1) MAY honour repeats; actions that
+  step state discretely (theme cycle, scene cycle, info overlay)
+  SHALL ignore repeats so a long-press does not stampede.
+
+- **FR-17.5 Hybrid lane assignment.** Each mapped button SHALL be
+  classified as either **local-fast** (acts on local state directly
+  on Core 0) or **mqtt-routed** (publishes to `observatory/remote/event`
+  and lets HA decide). The v1 mapping for the Roku-style 8-button
+  remote SHALL be:
+
+  | Button | Lane | Action |
+  |---|---|---|
+  | `▲` / `▼` | local-fast | scene cycle (next / prev in `kRemoteCycle[]`) |
+  | `◄` / `►` | local-fast | theme cycle (prev / next theme, FR-15.1) |
+  | `OK` | local-fast | toggle info overlay (5 s, FR-17.8) |
+  | `Back` | local-fast | clear sticky + return to default `CLOCK`; also dismiss splash if active |
+  | `Home` | local-fast | force default `CLOCK` immediately (no sticky clear) |
+  | `*` (Options) | mqtt-routed | publish `{"button":"options"}` — HA-defined behaviour |
+  | `↺` (Replay) | mqtt-routed | publish `{"button":"replay"}` — HA-defined behaviour |
+  | streaming-service shortcuts | mqtt-routed | publish `{"button":"<svc>"}` if remote emits unique IR |
+
+  Local-fast actions SHALL also publish an echo to
+  `observatory/remote/event` (FR-17.7) for observability, but SHALL NOT
+  block on the publish.
+
+- **FR-17.6 Curated cycle list.** Scene cycle (`▲`/`▼`) SHALL walk a
+  fixed list of operator-facing scenes declared in `config.h`
+  (`kRemoteCycle[]`). The list SHALL exclude all firmware-owned
+  override scenes (`BOOT`, `NIGHT`, `THERMAL_SAFE`, `OFFLINE`, `SPLASH`)
+  and the diagnostic scenes (`GFX_TEST`, `IR_TEST`) by default.
+  Cycle requests SHALL use `priority=1` and `duration=120s` so a real
+  ISS pass (priority 4) can still preempt.
+
+- **FR-17.7 MQTT echo.** Every accepted IR press SHALL publish to
+  `observatory/remote/event` (§5.5) with `{button, action, accepted,
+  protocol, address, command}`. Discarded frames (FR-17.2 / FR-17.3)
+  SHALL NOT publish; they SHALL only update the diagnostic counters
+  surfaced by `IrTestScene`.
+
+- **FR-17.8 Info overlay.** The firmware SHALL provide an
+  `InfoOverlayLayer` compositor layer (FR-16.1 slot above SCENE,
+  below OVERLAY_TRANSITION) that fades in on `OK` press and out
+  after 5 s. Content SHALL include: IP address, RSSI, MQTT link
+  state, uptime, FPS, current scene id, current theme id, free heap.
+  A second `OK` press while visible SHALL dismiss it immediately.
+
+- **FR-17.9 Visual feedback.** Every accepted IR press SHALL produce a
+  visible change within one frame (≤ 1/24 s):
+  - Scene cycle / theme cycle / overlay toggle / dismiss — the action
+    itself is the feedback.
+  - MQTT-routed presses — a single chrome-row pixel SHALL flash green
+    on accept, or red if MQTT is currently disconnected (the press is
+    queued for retry per the publisher's existing semantics).
+
+- **FR-17.10 Theme persistence.** Theme cycle (`◄`/`►`) SHALL invoke
+  the same `theme::set()` path that MQTT uses (FR-15.2, FR-15.4) so
+  the next-frame swap and the status-heartbeat echo (FR-15.7) are
+  preserved. The remote-driven theme is NOT persisted across reboots
+  (NFR-3 — no flash wear); on boot the device SHALL return to
+  `apollo_amber` until either MQTT or the remote pushes a choice.
+
+- **FR-17.11 IR vs. on-board buttons.** FR-17 SHALL coexist with
+  FR-11 (on-board buttons) without overlap: on-board buttons remain
+  as documented; the IR mapping is independent. Both input paths
+  publish to topic-distinct echoes (`observatory/button` for the
+  on-board buttons per FR-11.2, `observatory/remote/event` for IR per
+  FR-17.7) so HA can distinguish them.
+
+- **FR-17.12 Diagnostic scene.** The `ir_test` scene (phase IR.1)
+  SHALL remain available in v1 as the on-panel diagnostic for
+  receiver behaviour and EMI characterisation. It SHALL NOT be in
+  the curated cycle list (FR-17.6) and SHALL be reachable only via
+  explicit MQTT request.
+
+- **FR-17.13 EMI tolerance.** The end-to-end IR system (receiver +
+  decoder + dispatch) SHALL accept a deliberate user press with
+  ≥ 90% reliability under the brightest production scene at full
+  brightness, measured over 30 presses. Failure to meet this bar
+  SHALL escalate to a hardware mitigation (LC filter on receiver
+  Vcc, ferrite bead on signal line, or physical shielding) before
+  FR-17 is declared complete.
+
 ---
 
 ## 3. Non-Functional Requirements
@@ -341,6 +455,27 @@ Topic: `observatory/status` — JSON heartbeat every 30 s:
 `render_slack_ms` is the rolling average per-frame idle window on Core 1
 (FR-16.9); HA can use it as a budget gauge for adding new layers / heavier
 scenes. `theme` is the active theme id (FR-15.7).
+
+### 5.5 Remote Event (Pico → HA, FR-17.7)
+Topic: `observatory/remote/event` — published once per accepted IR press:
+```json
+{ "button": "up", "action": "scene_cycle_next", "accepted": true, "lane": "local",
+  "protocol": 8, "address": 85, "command": 10 }
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `button` | string | Logical name from FR-17.5 mapping (`up`, `down`, `left`, `right`, `ok`, `back`, `home`, `options`, `replay`, ...) |
+| `action` | string | Resolved action (`scene_cycle_next`, `theme_cycle_prev`, `info_overlay_toggle`, `mqtt_passthrough`, ...) |
+| `accepted` | bool | False only if dispatch table rejected the press (e.g. unmapped command id from a known-but-partial remote model) |
+| `lane` | string | `"local"` (FR-17.5 local-fast) or `"mqtt"` (HA-defined behaviour) |
+| `protocol` | int | `decode_type_t` value (8 = NEC) |
+| `address` | int | NEC address byte (FR-17.3 expected-address gate has already passed) |
+| `command` | int | NEC command byte |
+
+Discarded frames (FR-17.2 wrong protocol / parity / overflow, FR-17.3
+wrong address) SHALL NOT be published; they're only counted by the
+diagnostic in `IrTestScene`.
 
 ---
 

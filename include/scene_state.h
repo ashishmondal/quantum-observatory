@@ -58,6 +58,7 @@ enum class SceneId : uint8_t {
   MOON_PHASE    = 16,  // sticky moon disc + phase readout (phase 7.2)
   JUPITER_VISIBILITY = 17,  // Jupiter look-angles + magnitude readout (phase 7.3)
   CONSTELLATION_NOW  = 18,  // dynamic constellation art + name (phase 7.4)
+  IR_TEST            = 19,  // IR receiver POC readout (phase IR.1)
 };
 
 // One-time mutex init. Call from setup() before either core spins.
