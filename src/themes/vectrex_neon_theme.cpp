@@ -253,10 +253,13 @@ void VectrexNeonTheme::render_clock_bg(Adafruit_Protomatter& matrix,
 // 60 ms grace notes ramping into a 120 ms held top, total 300 ms.
 namespace {
 constexpr buzzer::Note kMelody[] = {
-  { 8372,  60 },
-  { 9956,  60 },
-  {12543,  60 },
-  {14917, 120 },
+  // "Insert coin" — fast ascending C major arpeggio (C5 E5 G5 C6).
+  // The 1980s-cabinet "credit accepted" shape: three short staccato
+  // notes then a held bright top. Total = 70+70+70+240 = 450 ms.
+  { 523,  70 },   // C5
+  { 659,  70 },   // E5
+  { 784,  70 },   // G5
+  {1047, 240 },   // C6 — held
 };
 }  // namespace
 

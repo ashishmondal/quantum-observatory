@@ -145,8 +145,14 @@ void NostromoGreenTheme::render_clock_bg(Adafruit_Protomatter& matrix,
 // → low, total 1000 ms.
 namespace {
 constexpr buzzer::Note kMelody[] = {
-  { 9397, 400 },
-  { 8372, 600 },
+  // "MOTHER wakeup" — slow A3 → C4 → Eb4 climb. A3 to Eb4 is a
+  // tritone, the canonical "danger / unease" interval; the
+  // intermediate C4 keeps it from sounding like a clean minor third
+  // and gives the motif a held, brooding tail. Total = 380+380+700
+  // = 1460 ms (just under the 1500 ms FR-10.7 cap).
+  { 220, 380 },   // A3  — low hum
+  { 262, 380 },   // C4  — minor third up
+  { 311, 700 },   // Eb4 — held dissonance (tritone vs A3)
 };
 }  // namespace
 

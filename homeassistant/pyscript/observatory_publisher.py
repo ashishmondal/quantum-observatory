@@ -265,6 +265,216 @@ def _compute_constellation(lat_deg, lon_deg):
 
 
 # ---------------------------------------------------------------------
+# ISS — TLE fetch + next-visible-pass prediction (replaces the dead
+# open-notify /iss-pass.json endpoint, which has been HTTP 404 since
+# ~2021). We pull the current TLE for catalog 25544 from CelesTrak
+# (the canonical free TLE re-host for the ISS) and run skyfield's
+# SGP4 propagator to find the next time the station rises ≥ 10° above
+# the observer's horizon AND is itself sunlit AND the observer is in
+# civil twilight or darker — i.e. when the on-device three-way AND
+# would actually flip true.
+#
+# Two module-level caches keep the cost down:
+#   * _TLE_CACHE      — refreshed every 6 h. CelesTrak refreshes
+#                       several times daily; 6 h is the cadence
+#                       they recommend for non-rendezvous use.
+#   * _NEXT_PASS_CACHE — refreshed every 30 min by
+#                       refresh_iss_next_pass(). The 30 s publisher
+#                       reads it without re-running find_events.
+#                       Find_events over a 7-day window is the
+#                       expensive part (~2-3 s); we don't need it
+#                       on every publish since pass times only shift
+#                       seconds across an hour.
+# ---------------------------------------------------------------------
+
+# CelesTrak's "GP" (general perturbations) endpoint. CATNR=25544 is
+# the ISS (ZARYA module — the original 1998 launch). Asking for plain
+# TLE format gives us two ~70-char lines we feed straight into
+# skyfield's EarthSatellite constructor.
+_ISS_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE"
+_TLE_TTL_SEC = 6 * 3600     # 6 h
+_NEXT_PASS_TTL_SEC = 30 * 60  # 30 min
+
+# Mutable module state — pyscript runs this file in a single
+# interpreter, so a top-level dict is the right shape for "value
+# computed by trigger A, read by trigger B". Both refresh_* and
+# publish_iss touch only their own keys, no locks needed.
+_TLE_CACHE: dict = {"line1": None, "line2": None, "fetched_at": 0.0}
+_NEXT_PASS_CACHE: dict = {
+    "lat": None, "lon": None,
+    "unix": None,           # unix timestamp of next visible rise, or None
+    "computed_at": 0.0,     # monotonic-ish; we use time.time()
+}
+
+
+@pyscript_executor
+def _fetch_iss_tle():
+    """Fetch the current ISS TLE from CelesTrak. Returns (line1, line2)
+    or None on any error. Network I/O lives behind @pyscript_executor
+    so the HA event loop never blocks on it.
+
+    CelesTrak occasionally returns a "No GP data found" plain-text
+    body when their backend is briefly stale — we treat that as a
+    transient error and reuse the previous cached TLE.
+    """
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            _ISS_TLE_URL,
+            headers={"User-Agent": "quantum-observatory/1.0 (+https://github.com)"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("ascii", errors="replace").strip()
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        # Expect 3 lines: name, line1, line2. Be defensive — some
+        # CelesTrak responses omit the name when the format query
+        # is set, others include it. Match the two real TLE lines
+        # by their leading "1 " / "2 " markers.
+        l1 = next((ln for ln in lines if ln.startswith("1 25544")), None)
+        l2 = next((ln for ln in lines if ln.startswith("2 25544")), None)
+        if not l1 or not l2:
+            return {"_error": f"CelesTrak response missing TLE lines: {body[:120]!r}"}
+        return {"line1": l1, "line2": l2}
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
+@pyscript_executor
+def _compute_iss_next_pass(lat_deg, lon_deg, tle_line1, tle_line2):
+    """Find the next time (unix UTC) the ISS will be visible from the
+    observer in the next 7 days. Returns {"unix": int} or
+    {"unix": None} if no visible pass falls in the window (e.g. high
+    summer at low latitudes when twilight never goes deep enough).
+
+    "Visible" matches the firmware's three-way AND from
+    src/scenes/iss_pass_scene.h:
+      A. ISS sunlit at the rise time (sat.at(t).is_sunlit(eph))
+      B. Sun ≤ -6° at observer at the rise time (civil twilight)
+      C. Implicit — find_events with altitude_degrees=10° guarantees
+         the station rises high enough for a comfortable pass.
+
+    altitude_degrees=10 (vs 0) filters out grazing horizon-skimmers
+    that most pass-prediction sites also exclude — they never get
+    bright enough to notice over local light pollution.
+    """
+    try:
+        from skyfield.api import wgs84, Loader, EarthSatellite
+
+        loader = Loader(SKYFIELD_CACHE)
+        eph = loader('de421.bsp')
+        ts = loader.timescale()
+
+        sat = EarthSatellite(tle_line1, tle_line2, "ISS (ZARYA)", ts)
+        observer = wgs84.latlon(lat_deg, lon_deg)
+        sun = eph['sun']
+        earth = eph['earth']
+
+        from datetime import timedelta
+        t0 = ts.now()
+        t1 = ts.from_datetime(t0.utc_datetime() + timedelta(days=7))
+
+        # find_events returns (Time array, event-code array) where
+        # event codes are 0=rise, 1=culminate, 2=set. We only care
+        # about rises here — each rise is a candidate pass start.
+        times, events = sat.find_events(observer, t0, t1, altitude_degrees=10.0)
+
+        observer_topos = earth + wgs84.latlon(lat_deg, lon_deg)
+
+        for ti, ev in zip(times, events):
+            if ev != 0:
+                continue
+            # Gate A: is the station itself sunlit at this moment?
+            if not bool(sat.at(ti).is_sunlit(eph)):
+                continue
+            # Gate B: sun ≤ -6° (civil twilight or darker) at observer?
+            sun_alt, _, _ = observer_topos.at(ti).observe(sun).apparent().altaz()
+            if sun_alt.degrees > -6.0:
+                continue
+            # Both pass — this is the next *visible* pass start.
+            return {"unix": int(ti.utc_datetime().timestamp())}
+
+        # No visible pass in 7 days — honest answer is "none".
+        return {"unix": None}
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
+def _compose_iss(lat_deg, lon_deg):
+    """Read live state from the WTIA + astros REST sensors (defined
+    in ../packages/quantum_observatory.yaml), combine with the
+    cached next-pass time, and return the observatory/iss payload
+    dict matching docs/MQTT_TOPICS.md.
+
+    Returns {"_error": ...} if WTIA hasn't cached a position yet
+    (cold boot, first 30 s) — _publish() then logs and skips, the
+    firmware shows WAIT, which is exactly the documented behaviour.
+    """
+    try:
+        import time
+
+        # WTIA: position + altitude + visibility tri-state. The HA
+        # REST sensor caches every 30 s; we read its attributes.
+        # state.getattr returns a dict, or None if the entity is
+        # unknown/unavailable.
+        attrs = state.getattr("sensor.iss_position")
+        if not attrs:
+            return {"_error": "sensor.iss_position not yet available"}
+        try:
+            lat = float(attrs["latitude"])
+            lon = float(attrs["longitude"])
+            alt = int(round(float(attrs["altitude"])))
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"_error": f"WTIA attrs malformed: {exc}"}
+
+        # Three-state visibility: "daylight" | "visible" | "eclipsed".
+        # ISS is sunlit in the first two — only "eclipsed" means it's
+        # in Earth's shadow and physically invisible from anywhere.
+        # The previous YAML mapping (visibility == "daylight") was
+        # backwards: it returned False for "visible", which is the
+        # exact dusk/dawn case the firmware's three-way AND is
+        # designed to catch.
+        vis_str = attrs.get("visibility", "eclipsed")
+        sunlit = (vis_str != "eclipsed")
+
+        # Cached next-pass unix time (refreshed every 30 min by
+        # refresh_iss_next_pass). On cold boot it can be None for up
+        # to one refresh cycle — treat that as "no countdown known"
+        # and clamp seconds_until_next to the doc's max (604800 = 7d),
+        # which the firmware renders as "VIS IN 7D".
+        next_unix = _NEXT_PASS_CACHE.get("unix")
+        if next_unix is None:
+            sec_to_next = 604800
+        else:
+            sec_to_next = max(0, int(next_unix - time.time()))
+            sec_to_next = min(sec_to_next, 604800)
+
+        payload = {
+            "lat_deg": round(lat, 4),
+            "lon_deg": round(lon, 4),
+            "altitude_km": max(0, min(999, alt)),
+            "sunlit": sunlit,
+            "seconds_until_next": sec_to_next,
+        }
+
+        # Optional crew_count from the astros REST sensor. Absent
+        # rather than guessed if the sensor hasn't polled yet — the
+        # firmware renders "CREW ?" in that case (partial-update
+        # rule per docs/MQTT_TOPICS.md).
+        crew_raw = state.get("sensor.iss_crew_count")
+        if crew_raw not in (None, "unknown", "unavailable"):
+            try:
+                crew = int(crew_raw)
+                if 0 <= crew <= 99:
+                    payload["crew_count"] = crew
+            except (TypeError, ValueError):
+                pass
+
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
+# ---------------------------------------------------------------------
 # Time-driven publish triggers. Pyscript runs each as its own task,
 # so the three are independent — a slow skyfield call on one topic
 # never delays the others.
@@ -380,3 +590,112 @@ def publish_constellation(**_):
     Also exposed as service `pyscript.publish_constellation`."""
     lat, lon = _observer_lat_lon()
     _publish("observatory/constellation", _compute_constellation(lat, lon))
+
+
+@service
+@time_trigger("startup", "cron(*/30 * * * *)")
+def refresh_iss_next_pass(**_):
+    """Refresh the cached next-visible-pass time every 30 min.
+
+    Two-stage refresh:
+      1. If the in-memory TLE is older than 6 h (or absent), fetch a
+         fresh one from CelesTrak. On network failure the previous
+         TLE keeps being used — SGP4 accuracy degrades slowly (the
+         common rule of thumb is ~1 km/day position error for ISS),
+         so a TLE up to a day stale still gives pass times accurate
+         to the second.
+      2. Run skyfield's find_events over the next 7 days and stash
+         the unix timestamp of the next visible rise in
+         _NEXT_PASS_CACHE. publish_iss reads this on every 30 s tick.
+
+    Exposed as service `pyscript.refresh_iss_next_pass` so
+    setup_mqtt.py --verify-publisher can force-call it.
+    """
+    import time
+
+    now = time.time()
+    lat, lon = _observer_lat_lon()
+
+    # Stage 1: TLE refresh if stale.
+    age = now - _TLE_CACHE.get("fetched_at", 0.0)
+    if not _TLE_CACHE.get("line1") or age > _TLE_TTL_SEC:
+        result = _fetch_iss_tle()
+        if "_error" in result:
+            log.warning(
+                f"observatory_publisher: TLE refresh failed: {result['_error']}"
+                + (" (using stale TLE)" if _TLE_CACHE.get("line1") else " (no TLE yet)")
+            )
+            if not _TLE_CACHE.get("line1"):
+                # Nothing to compute against — bail until next cycle.
+                return
+        else:
+            _TLE_CACHE["line1"] = result["line1"]
+            _TLE_CACHE["line2"] = result["line2"]
+            _TLE_CACHE["fetched_at"] = now
+            log.info("observatory_publisher: ISS TLE refreshed from CelesTrak")
+
+    # Stage 2: find next visible pass.
+    pass_result = _compute_iss_next_pass(
+        lat, lon, _TLE_CACHE["line1"], _TLE_CACHE["line2"]
+    )
+    if "_error" in pass_result:
+        log.warning(
+            f"observatory_publisher: next-pass compute failed: {pass_result['_error']}"
+        )
+        return
+
+    _NEXT_PASS_CACHE["lat"] = lat
+    _NEXT_PASS_CACHE["lon"] = lon
+    _NEXT_PASS_CACHE["unix"] = pass_result["unix"]
+    _NEXT_PASS_CACHE["computed_at"] = now
+
+    # Stash on a witness entity for operator visibility (Developer
+    # Tools → States → pyscript.iss_next_pass_unix shows when the
+    # next visible pass is, in human-readable ISO).
+    if pass_result["unix"] is not None:
+        from datetime import datetime, timezone
+        iso = datetime.fromtimestamp(
+            pass_result["unix"], tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        state.set(
+            "pyscript.iss_next_pass_unix",
+            str(pass_result["unix"]),
+            new_attributes={"iso_utc": iso, "computed_at": now},
+        )
+        log.info(f"observatory_publisher: next ISS visible pass at {iso}")
+    else:
+        state.set(
+            "pyscript.iss_next_pass_unix",
+            "none",
+            new_attributes={"note": "no visible pass in 7-day window",
+                            "computed_at": now},
+        )
+        log.info("observatory_publisher: no visible ISS pass in next 7 days")
+
+
+@service
+@time_trigger("startup", "period(now, 30sec)")
+def publish_iss(**_):
+    """Publish observatory/iss every 30 s.
+
+    Combines:
+      - WTIA position + sunlit (from sensor.iss_position, polled by
+        the rest: block in ../packages/quantum_observatory.yaml)
+      - Cached next-visible-pass time (from refresh_iss_next_pass)
+      - Crew count (from sensor.iss_crew_count, polled hourly)
+
+    Replaces the YAML `observatory_iss` automation that used to live
+    in quantum_observatory.yaml. Two reasons for the move:
+      1. The sunlit mapping needed to be (visibility != "eclipsed"),
+         not (visibility == "daylight") — the latter silently dropped
+         visibility=="visible", which is exactly the dusk/dawn case
+         that makes the station observable in the first place.
+      2. open-notify's /iss-pass.json (the YAML's source for
+         seconds_until_next) returns HTTP 404 — has been dead since
+         ~2021. We now compute next-pass on-host with skyfield + a
+         CelesTrak TLE.
+
+    Also exposed as service `pyscript.publish_iss`.
+    """
+    lat, lon = _observer_lat_lon()
+    _publish("observatory/iss", _compose_iss(lat, lon))

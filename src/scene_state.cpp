@@ -118,7 +118,8 @@ void init() {
   mutex_exit(&s_mutex);
 }
 
-bool request(SceneId id, uint8_t priority, uint16_t duration_s, bool sticky) {
+bool request(SceneId id, uint8_t priority, uint16_t duration_s, bool sticky,
+             bool user_intent) {
   if (priority > 5) priority = 5;  // FR-2.1 clamp
   // FR-2.3: 0 or absurd duration → default. Cap at the hard TTL.
   uint32_t soft_ms;
@@ -135,7 +136,15 @@ bool request(SceneId id, uint8_t priority, uint16_t duration_s, bool sticky) {
   // FR-2.1 preemption: a request with strictly-lower priority than
   // the active Director scene is dropped. Equal-priority is accepted
   // (latest-wins) per REQUIREMENTS §9 default.
-  if (priority < s_state.mqtt_priority) {
+  //
+  // EXCEPTION: user-initiated requests (IR remote dispatch, MQTT
+  // observatory/scene topic) bypass the priority gate. Rationale:
+  // sticky high-priority firmware-initiated scenes (the ISS
+  // visibility auto-switch lands at priority 4 sticky) must NOT
+  // lock the user out of normal scene navigation. The user's
+  // explicit ▼/▲/Back press is always honoured; the auto-switch
+  // simply doesn't re-fire until the next visibility rising edge.
+  if (!user_intent && priority < s_state.mqtt_priority) {
     accepted = false;
   } else if (s_state.mqtt_requested == id
           && s_state.mqtt_priority  == priority

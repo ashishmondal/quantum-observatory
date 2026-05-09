@@ -10,15 +10,21 @@
 // just rectifies our PWM into its fixed pitch) — we lose tone control
 // but the on/off envelope is still right.
 //
-// Project policy (FR-10.5): every tone the firmware produces stays
-// >= 8 kHz. The floor is enforced inside play() / chirp() so a future
-// caller can't accidentally drop below it. Tones < 8 kHz are dropped
-// (treated as a rest of the same duration).
+// Tone-pitch policy: there is no driver-side floor. Each call site
+// picks a pitch that suits the cue — feedback chirps stay high
+// (~9 kHz) so a key-press tick still reads as a tick over ambient
+// audio; signature melodies (FR-10.7) and the boot melody (FR-10.4)
+// use the C4..C7 musical octaves where the carrier piezo's 4 kHz
+// resonant envelope can faithfully reproduce pitch and the human
+// ear actually parses the motif as a tune. The only forbidden
+// frequency in `Note::freq_hz` is 0, reserved as the rest sentinel.
 //
 // Bound + called on Core 0 only — no cross-core safety. Callers:
 //   - ir_remote::poll()  — single-tone chirp on accepted press (FR-10.6).
 //   - theme::set()       — per-theme signature melody on rising-edge
 //                          theme change (FR-10.7, wired in B.3).
+//   - setup()            — Westminster boot melody (FR-10.4 audible
+//                          "device awake" cue).
 
 #pragma once
 
@@ -30,7 +36,11 @@ namespace buzzer {
 // (silent gap of `ms`). Both fields are uint16_t so a `Note[]` is
 // 4 bytes per entry — a 4-note melody costs 16 bytes of flash.
 struct Note {
-  uint16_t freq_hz;   // tone pitch (>= 8 kHz, else dropped to a rest)
+  uint16_t freq_hz;   // tone pitch in Hz; 0 ⇒ rest. No driver-side
+                      // floor (see policy block above). Useful range
+                      // on the carrier piezo is roughly 200 Hz ..
+                      // 16 kHz; below ~200 Hz the mechanical envelope
+                      // barely registers.
   uint16_t ms;        // note duration; also used as the rest duration when freq_hz == 0
 };
 
@@ -46,16 +56,15 @@ void begin();
 // beats a stale theme cue).
 void chirp();
 
-// Start playing a flash-resident note sequence (FR-10.7). `notes`
-// MUST outlive the playback (use a file-scope `static constexpr
-// Note[]`). `n` is silently clamped to kMaxMelodyNotes. Cancels
-// any in-flight melody by calling noTone() first, so rapid
-// back-to-back play() calls don't overlap — the latest cue wins.
-// Non-blocking: tick() drives note advancement.
+// Start playing a flash-resident note sequence (FR-10.7 / FR-10.4
+// boot melody). `notes` MUST outlive the playback (use a file-scope
+// `static constexpr Note[]`). `n` is silently clamped to
+// kMaxMelodyNotes. Cancels any in-flight melody by calling noTone()
+// first, so rapid back-to-back play() calls don't overlap — the
+// latest cue wins. Non-blocking: tick() drives note advancement.
 //
-// Notes whose freq_hz is below the 8 kHz floor are emitted as
-// rests of the same duration (FR-10.5 enforcement at the driver
-// boundary, not at the call site).
+// `freq_hz == 0` is honoured as a silent rest of the requested
+// duration; all other frequencies pass straight through to tone().
 void play(const Note* notes, uint8_t n);
 
 // Drive the playback state machine. Call from Core 0 loop() every

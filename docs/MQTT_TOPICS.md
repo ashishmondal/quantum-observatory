@@ -124,16 +124,35 @@ that is computed on-device every frame in the `iss_pass` scene.
 - `lat_deg` / `lon_deg` / `altitude_km` / `sunlit` —
   `https://api.wheretheiss.at/v1/satellites/25544` →
   `.latitude`, `.longitude`, `round(.altitude)`,
-  `.visibility == "daylight"`. Default units are kilometers.
-  **Rate limit ≈ 1 req/s** per the WTIA docs (watch the
-  `X-Rate-Limit-*` response headers); poll every 30 s and you'll have
-  ~99% margin.
-- `seconds_until_next` —
-  `http://api.open-notify.org/iss-pass.json?lat=…&lon=…` → next
-  `response[0].risetime` minus `now()`. Use the same lat/lon you
-  baked into firmware `config.h` LATITUDE_DEG/LONGITUDE_DEG.
+  `.visibility != "eclipsed"`. WTIA's `visibility` field is
+  tri-state: `"daylight"` (sub-satellite point in daylight, ISS
+  sunlit), `"visible"` (sub-satellite point at night but ISS still
+  catches the sun — i.e. the dusk/dawn case where you can actually
+  see it), `"eclipsed"` (ISS in Earth's shadow, invisible from
+  anywhere). Mapping `sunlit = (visibility != "eclipsed")` is the
+  only correct collapse to a boolean. Default units are kilometers.
+  **Rate limit ≈ 350 req / 5 min** per the WTIA docs (watch the
+  `X-Rate-Limit-*` response headers); the publisher polls every 30 s
+  for ~97% headroom.
+- `seconds_until_next` — computed in pyscript by propagating the
+  ISS orbit forward 7 days with skyfield + a CelesTrak TLE
+  (`https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=TLE`,
+  cached for 6 h). For each rise event from
+  `EarthSatellite.find_events(observer, t0, t1, altitude_degrees=10°)`
+  we filter for `is_sunlit(eph)` AND sun ≤ −6° at the observer at
+  the rise instant — i.e. the same three-way AND the firmware
+  evaluates per frame, applied to the future. The first rise that
+  passes is the next *visible* pass; its unix time minus `now()`
+  is the published value. Capped at 604800 (= 7 d, the doc max);
+  if no visible pass falls in the window (e.g. high summer at low
+  latitudes when twilight never goes deep enough) we publish that
+  cap, which the firmware renders as `VIS IN 7D` rather than lying.
+  *Was previously sourced from `http://api.open-notify.org/iss-pass.json`
+  which has been HTTP 404 since ~2021.*
 - `crew_count` — `http://api.open-notify.org/astros.json` →
-  `.number` filtered to `craft == "ISS"`.
+  `.people | selectattr('craft','eq','ISS') | count`. Note the
+  filter is necessary — the top-level `.number` field also includes
+  Tiangong crew. Polled hourly by an HA REST sensor.
 
 **On-device derivation (no firmware TLE math, no HA template
 math).** Every render frame the scene computes:

@@ -144,19 +144,28 @@ automation observatory_time:
 #           payload: "{{ payload | tojson }}"
 
 # ---------------------------------------------------------------------
-# observatory/iss — REST sensors + 30 s push
+# observatory/iss — REST sensors feed pyscript publisher
 # ---------------------------------------------------------------------
 #
-# Three public REST endpoints (all free, no key required):
-#   * api.wheretheiss.at  — current sub-satellite lat/lon/altitude/sunlit
-#                           (rate limit ~1 req/s — we poll every 30 s)
-#   * api.open-notify.org/iss-pass — next pass risetime (we send
-#     the same lat/lon the firmware was compiled with, via zone.home)
-#   * api.open-notify.org/astros  — current ISS crew count
+# Two public REST endpoints (both free, no key required):
+#   * api.wheretheiss.at  — current sub-satellite lat/lon/altitude/
+#                           visibility (rate limit 350 req / 5 min;
+#                           we poll every 30 s with 97% headroom)
+#   * api.open-notify.org/astros — current ISS crew count (poll hourly)
 #
-# All three are wrapped in HA `rest` sensors so the polling cadence is
-# explicit and HA caches the values. The automation below builds the
-# observatory/iss payload from those cached values every 30 s.
+# Both wrap into HA `rest` sensors so the polling cadence is explicit
+# and HA caches/retries the values. The pyscript publisher
+# (../pyscript/observatory_publisher.py → publish_iss) reads these
+# sensor states every 30 s, combines them with a skyfield-computed
+# next-pass time (from a CelesTrak TLE, refreshed every 6 h), and
+# publishes the full observatory/iss payload per docs/MQTT_TOPICS.md.
+#
+# The previous YAML automation that did the publish lived here and
+# had two bugs: it mapped sunlit = (visibility == "daylight"), which
+# silently dropped the visibility=="visible" dusk/dawn case (i.e. the
+# entire reason ISS is observable from the ground); and it sourced
+# next-pass from open-notify's /iss-pass.json, which has been HTTP 404
+# since ~2021 and made the panel render "VIS SOON" forever.
 
 rest:
   # Live ISS sub-satellite point (poll every 30 s).
@@ -166,7 +175,7 @@ rest:
       - name: "ISS Position"
         unique_id: observatory_iss_position
         # Compact value_template — HA truncates long ones in the UI.
-        # The full payload lives in attributes for the automation.
+        # The full payload lives in attributes for the publisher.
         value_template: "{{ value_json.latitude | round(2) }}"
         json_attributes:
           - latitude
@@ -174,22 +183,7 @@ rest:
           - altitude
           - visibility   # WTIA's misleadingly-named field — really
                          # means "is the satellite itself sunlit"
-
-  # Next visible pass risetime for the configured location.
-  # open-notify is occasionally flaky — `scan_interval: 600` (10 min)
-  # is plenty since pass times don't shift second-to-second.
-  - resource_template: >-
-      http://api.open-notify.org/iss-pass.json?lat={{ state_attr('zone.home','latitude')
-      }}&lon={{ state_attr('zone.home','longitude') }}&n=1
-    scan_interval: 600
-    sensor:
-      - name: "ISS Next Pass"
-        unique_id: observatory_iss_next_pass
-        value_template: "{{ value_json.response[0].risetime | default(0) | int }}"
-        json_attributes_path: "$.response[0]"
-        json_attributes:
-          - risetime
-          - duration
+                         # (tri-state: daylight | visible | eclipsed)
 
   # Current ISS crew count.
   - resource: http://api.open-notify.org/astros.json
@@ -200,51 +194,12 @@ rest:
         value_template: >-
           {{ value_json.people | selectattr('craft','eq','ISS') | list | count }}
 
-automation observatory_iss:
-  - id: observatory_iss
-    alias: "Observatory — push ISS state every 30 s"
-    description: >-
-      Combines the three REST sensors into the firmware's
-      observatory/iss contract (see docs/MQTT_TOPICS.md). The firmware
-      computes look-angles + visibility on-device from the sub-satellite
-      lat/lon and the configured observer location (FR-14).
-    triggers:
-      - trigger: time_pattern
-        seconds: "/30"
-      - trigger: homeassistant
-        event: start
-    # Skip the publish entirely if the live position sensor hasn't yet
-    # cached a value (cold boot, first 30 s) — the firmware shows
-    # `WAIT` until fresh data arrives, which is exactly the right UX.
-    conditions:
-      - condition: template
-        value_template: >-
-          {{ states('sensor.iss_position') not in ['unknown','unavailable'] }}
-    variables:
-      lat:  "{{ state_attr('sensor.iss_position', 'latitude')  | float(0) }}"
-      lon:  "{{ state_attr('sensor.iss_position', 'longitude') | float(0) }}"
-      alt:  "{{ state_attr('sensor.iss_position', 'altitude')  | float(408) | round(0) | int }}"
-      vis:  "{{ state_attr('sensor.iss_position', 'visibility') | default('eclipsed') }}"
-      # `seconds_until_next` = max(0, risetime - now). Floor at 0 so a
-      # late HA poll never publishes a negative.
-      rise: "{{ states('sensor.iss_next_pass') | int(0) }}"
-      now_s: "{{ as_timestamp(utcnow()) | int }}"
-      sec_to_next: "{{ [rise - now_s, 0] | max }}"
-      crew: "{{ states('sensor.iss_crew_count') | int(7) }}"
-    actions:
-      - action: mqtt.publish
-        data:
-          topic: observatory/iss
-          qos: 1            # see observatory/time block for rationale
-          payload: >-
-            {{ {
-              "lat_deg": lat,
-              "lon_deg": lon,
-              "altitude_km": alt,
-              "sunlit": (vis == "daylight"),
-              "seconds_until_next": sec_to_next,
-              "crew_count": crew
-            } | tojson }}
+# observatory_iss automation — SUPERSEDED BY PYSCRIPT
+# (see ../pyscript/observatory_publisher.py → publish_iss).
+# Re-enable here only if you uninstall pyscript; in that case you
+# also lose seconds_until_next (no skyfield → no SGP4 propagation),
+# and you must restore the `sunlit = (visibility != "eclipsed")`
+# mapping noted in the comment header above.
 
 # ---------------------------------------------------------------------
 # observatory/jupiter — SUPERSEDED BY PYSCRIPT (see pyscript/observatory_publisher.py)

@@ -16,6 +16,8 @@
 #include "wifi_link.h"
 #include "mqtt_link.h"
 #include "iss_state.h"
+#include "iss_geometry.h"
+#include "sun_position.h"
 #include "jupiter_state.h"
 #include "constellation_state.h"
 #include "moon_state.h"
@@ -254,13 +256,136 @@ static Scene* scene_for(scene_state::SceneId id) {
   return nullptr;
 }
 
+// ─── ISS visibility auto-switch (phase 7.1++) ────────────────────────
+//
+// When the on-device three-way AND for ISS visibility flips true
+// (sunlit ∧ observer in twilight ∧ above horizon — same logic the
+// iss_pass scene's render path uses every frame), pre-empt whatever
+// is on-screen with the ISS_PASS scene at priority 4 sticky and play
+// a short "ta-da" alert melody. The user can leave the scene any
+// time via IR or MQTT — those paths set user_intent=true on
+// scene_state::request() so they bypass the priority gate. Once the
+// user overrides, the auto-switch does NOT re-yank them back; it
+// only fires again on the NEXT visibility rising edge (i.e. the
+// next pass).
+//
+// Cadence: rate-limited to ~1 Hz inside the tick (passes are
+// minute-scale events; sub-second poll is pointless and just burns
+// trig). ~150 µs per evaluation when it does run.
+//
+// FR-10.1 (priority ≥ 4 scenes get audible alerts) + FR-10.5
+// (≥ 8 kHz floor) + FR-10.7-style melody scheduler (≤ 1500 ms,
+// non-blocking via buzzer::play()).
+namespace {
+
+// "Ta-da!" — three rising notes that read as a triumphant alert.
+// All ≥ 8 kHz per FR-10.5; sum (60+30+220 = 310 ms note + ~30 ms
+// inter-note gaps from start_current_note's deadline math) well
+// under the 1500 ms FR-10.7 cap. Distinct from any theme melody so
+// the operator can tell ISS-rise from theme-change by ear alone.
+// "Ta-da!" — G5 → B5 → E6 ascending major triad. Real musical
+// pitches in the C5..C6 sweet spot of the carrier piezo so the
+// rising shape is actually parsed as triumphant rather than as
+// "another shrill beep". Distinct from any theme melody so the
+// operator can tell ISS-rise from theme-change by ear. Total =
+// 80+40+240 = 360 ms (well under the 1500 ms FR-10.7 cap).
+constexpr buzzer::Note kIssVisibleMelody[] = {
+    { 784,  80},   // G5  — "ta"
+    { 988,  40},   // B5  — (lift)
+    {1319, 240},   // E6  — "da!" held
+};
+constexpr uint8_t kIssVisibleMelodyCount =
+    sizeof(kIssVisibleMelody) / sizeof(kIssVisibleMelody[0]);
+
+// True iff (a) we have a fresh iss_state snapshot, (b) ISS is
+// sunlit, (c) observer's local sun elevation ≤ -6° (civil twilight
+// or darker), AND (d) ISS is above the observer horizon. Mirrors
+// the scene's per-frame logic in iss_pass_scene.h::render() — kept
+// in one helper to avoid the rule drifting in two places.
+bool iss_visible_now(uint32_t now_ms) {
+  iss_state::Snapshot iss;
+  if (!iss_state::get(now_ms, &iss)) return false;
+  if (!iss.sunlit) return false;
+
+  const tod::Reading r = tod::now(now_ms);
+  if (!r.valid) return false;
+
+  const iss_geom::LookAngles la = iss_geom::look_angles(
+      LATITUDE_DEG, LONGITUDE_DEG,
+      iss.iss_lat_deg, iss.iss_lon_deg,
+      static_cast<float>(iss.altitude_km));
+  if (la.elevation_deg < 0.0f) return false;
+
+  const int32_t utc_epoch = r.local_epoch
+      - static_cast<int32_t>(LOCAL_TZ_OFFSET_MIN) * 60;
+  const sun::Position sp =
+      sun::compute(utc_epoch, LATITUDE_DEG, LONGITUDE_DEG);
+  return sp.altitude_deg <= -6.0f;
+}
+
+// Edge-detector + auto-switch + ta-da. Call from Core 0 loop().
+// Internal 1 Hz rate-limit keeps the trig cost under the radar.
+void iss_visibility_tick(uint32_t now_ms) {
+  static uint32_t s_last_check_ms = 0;
+  static bool     s_was_visible   = false;
+  static bool     s_initialized   = false;
+
+  // 1 Hz cadence; first call always evaluates so the boot snapshot
+  // doesn't sit on an artificial "not visible" assumption.
+  if (s_initialized && (now_ms - s_last_check_ms) < 1000u) return;
+  s_last_check_ms = now_ms;
+
+  const bool now_visible = iss_visible_now(now_ms);
+
+  // Suppress the rising edge on the very first evaluation: if the
+  // panel boots into an in-progress pass we don't want a stale
+  // ta-da on second 1. The user can navigate to the ISS scene
+  // manually, and the next pass's true rising edge will fire.
+  if (!s_initialized) {
+    s_was_visible = now_visible;
+    s_initialized = true;
+    return;
+  }
+
+  if (now_visible && !s_was_visible) {
+    // Rising edge — fire the auto-switch + ta-da. Sticky at
+    // priority 4 so a low-priority Director cycle can't yank us
+    // out, but user_intent=true on IR/MQTT requests defeats the
+    // sticky lock if the operator wants to look at something else.
+    Serial.println("[iss] visibility rising edge → auto-switch + ta-da");
+    scene_state::request(scene_state::SceneId::ISS_PASS,
+                         /*priority=*/4,
+                         /*duration_s=*/0,   // ignored when sticky
+                         /*sticky=*/true,
+                         /*user_intent=*/false);  // firmware-initiated
+    buzzer::play(kIssVisibleMelody, kIssVisibleMelodyCount);
+  } else if (!now_visible && s_was_visible) {
+    // Falling edge — pass ended. If we're still on the auto-switched
+    // ISS scene (i.e. the operator didn't navigate away during the
+    // pass) clear the sticky so the default CLOCK takes over after
+    // the standard fade. If they DID navigate away, leave their
+    // chosen scene alone.
+    Serial.println("[iss] visibility falling edge");
+    if (scene_state::current() == scene_state::SceneId::ISS_PASS) {
+      scene_state::clear_sticky();
+    }
+  }
+
+  s_was_visible = now_visible;
+}
+
+}  // namespace
+
 // ─── IR remote dispatch (FR-17.5, phase IR.3) ────────────────────────
 //
 // Each accepted IR press lands in one of the action_ir_* functions
 // below via the dispatch table installed in setup(). All actions
 // route through scene_state::request() at the operator-cycle
-// priority/duration documented in FR-17.6 so a real Director-class
-// scene (e.g. iss_pass at priority 4) can still preempt.
+// priority/duration documented in FR-17.6 — and pass user_intent=true
+// so they bypass the FR-2.1 priority gate even when a sticky
+// firmware-initiated scene (e.g. the priority-4 ISS auto-switch) is
+// active. The remote is the operator's "I am here, I am driving"
+// signal; sticky scenes must never lock it out.
 //
 // `kRemoteCycle` lives in config.h so any future input mode (on-board
 // buttons, voice, etc.) can share the same ordered list.
@@ -295,7 +420,8 @@ static void remote_cycle_step(int8_t delta) {
   scene_state::request(kRemoteCycle[next],
                        kRemoteCyclePriority,
                        kRemoteCycleDurationS,
-                       /*sticky=*/false);
+                       /*sticky=*/false,
+                       /*user_intent=*/true);  // IR press always wins
 }
 
 static void action_ir_scene_next(uint16_t /*addr*/, uint16_t /*cmd*/) {
@@ -317,7 +443,8 @@ static void action_ir_back(uint16_t /*addr*/, uint16_t /*cmd*/) {
   scene_state::request(scene_state::SceneId::CLOCK,
                        kRemoteCyclePriority,
                        kRemoteCycleDurationS,
-                       /*sticky=*/false);
+                       /*sticky=*/false,
+                       /*user_intent=*/true);  // IR press always wins
 }
 
 // FR-17.5 Home: jump straight to default CLOCK without clearing any
@@ -328,7 +455,8 @@ static void action_ir_home(uint16_t /*addr*/, uint16_t /*cmd*/) {
   scene_state::request(scene_state::SceneId::CLOCK,
                        kRemoteCyclePriority,
                        kRemoteCycleDurationS,
-                       /*sticky=*/false);
+                       /*sticky=*/false,
+                       /*user_intent=*/true);  // IR press always wins
 }
 
 // FR-17.8 / IR.4 — toggle the diagnostic info overlay. Hand the press
@@ -573,6 +701,28 @@ void setup() {
   // BEFORE set_dispatch() so a stray frame between begin() and the
   // first loop() can't call into an uninitialised buzzer module.
   buzzer::begin();
+  // FR-10.4 audible "device awake" cue — Westminster Quarters first
+  // phrase (G#5, F#5, E5, B4). The bell-like descending stepwise
+  // motif followed by the leap to the lower B4 reads instantly as
+  // "clock chime", which fits the observatory + clock identity. Sits
+  // in the C5..C7 sweet spot of the carrier piezo (4 kHz mechanical
+  // resonance) so the notes actually carry the pitch instead of
+  // collapsing to a single shrill beep, the way an >8 kHz melody
+  // does. Total wall-clock = 4*350 + 600 = 2000 ms but the last note
+  // is the longest "bong" — perceptually the chime is over by ~1.4 s
+  // and the rest is just the final bell ringing out. Non-blocking
+  // (buzzer::tick() in loop()) so this does not delay scene_state
+  // init or first-frame render. Cancels the FR-10.4 self-test chirp
+  // fired inside buzzer::begin() (play() calls stop_internal()
+  // first), which is fine — the first Westminster note IS the
+  // wiring witness.
+  static constexpr buzzer::Note kBootMelody[] = {
+      { 831, 350 },   // G#5  — "ding"
+      { 740, 350 },   // F#5  — "dong"
+      { 659, 350 },   // E5   — "ding"
+      { 494, 600 },   // B4   — "dong" (held; bell tail)
+  };
+  buzzer::play(kBootMelody, sizeof(kBootMelody) / sizeof(kBootMelody[0]));
   // FR-17.5 — install the local-fast dispatch table for IR.3. Each
   // accepted press routes through scene_state::request() at priority
   // 1 / duration 120 s so a real ISS pass (priority 4) can still
@@ -659,6 +809,15 @@ void loop() {
   // dominant caller; theme-switch melodies (B.3) ride the same
   // tick.
   buzzer::tick(now_ms);
+
+  // Phase 7.1++ — ISS visibility auto-switch + ta-da. Internally
+  // rate-limited to 1 Hz; rising edge of (sunlit ∧ twilight ∧
+  // above-horizon) requests SceneId::ISS_PASS at priority 4 sticky
+  // and plays the kIssVisibleMelody. User can navigate away via
+  // IR/MQTT at any time (those paths set user_intent=true so they
+  // beat the sticky); a falling edge clears the sticky only when
+  // ISS_PASS is still the active scene.
+  iss_visibility_tick(now_ms);
 
   // FR-17.5 / IR.3 — the IrTestScene learning wizard (phase IR.2)
   // captures NEC frames directly off ir_remote::stats() and would be

@@ -149,10 +149,13 @@ void LcarsTosTheme::render_clock_bg(Adafruit_Protomatter& matrix,
 // stepping notes into a held top, total 850 ms.
 namespace {
 constexpr buzzer::Note kMelody[] = {
-  { 8372, 150 },
-  {11175, 150 },
-  { 9956, 150 },
-  {14080, 400 },
+  // "Courage hero call" — the iconic TOS opening shape: F5 → D6 leap
+  // (perfect eleventh) then resolve down to A5. Three notes, but the
+  // big interval jump is what makes Alexander Courage's fanfare
+  // recognizable. Total = 200+200+600 = 1000 ms.
+  { 698, 200 },   // F5
+  {1175, 200 },   // D6 — the leap
+  { 880, 600 },   // A5 — held resolution
 };
 }  // namespace
 

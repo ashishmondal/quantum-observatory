@@ -200,9 +200,15 @@ MIN_HA_OS   = (17, 1)        # Home Assistant OS (host); skipped on Container/Co
 # out in the YAML. Re-add them here if you re-enable the YAML stubs.
 EXPECTED_AUTOMATION_IDS = [
     "observatory_time",
-    "observatory_iss",
     "observatory_evening_rotation",
 ]
+
+# observatory_iss used to live in the list above; it was superseded
+# by the pyscript publisher (publish_iss in observatory_publisher.py)
+# after the open-notify /iss-pass.json endpoint went HTTP 404 and the
+# YAML's sunlit = (visibility == "daylight") mapping was found to drop
+# the dusk/dawn "visible" case. Re-add here if you re-enable the YAML
+# automation in packages/quantum_observatory.yaml.
 
 # Where the package goes inside HA's config directory.
 HA_PACKAGE_DEST = "/config/packages/quantum_observatory.yaml"
@@ -229,6 +235,15 @@ PYSCRIPT_PUBLISHERS = [
     ("publish_jupiter",       "observatory/jupiter"),
     ("publish_moon",          "observatory/moon"),
     ("publish_constellation", "observatory/constellation"),
+    # ISS publisher (replaces the YAML observatory_iss automation).
+    # Combines WTIA + astros REST sensors with a skyfield-propagated
+    # next-pass time from the CelesTrak TLE. The first publish after
+    # pyscript reload may carry seconds_until_next=604800 (the doc's
+    # max, ≈ "VIS IN 7D") if refresh_iss_next_pass hasn't finished
+    # warming the cache yet — subsequent 30 s ticks pick up the real
+    # value once skyfield + the TLE fetch complete (~5-15 s warm,
+    # up to 90 s cold while DE421 downloads).
+    ("publish_iss",           "observatory/iss"),
 ]
 
 

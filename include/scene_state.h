@@ -76,6 +76,15 @@ void init();
 //   seconds (FR-2.3, default 30). Ignored when sticky.
 // sticky:     when true, scene only ends via clear_sticky, the FR-2.4
 //   hard 1 h TTL, or another sticky preempting it.
+// user_intent: when true, bypass the FR-2.1 priority gate so the
+//   request ALWAYS wins. This is the "user pressed a button / sent
+//   a deliberate MQTT scene command" lane — sticky high-priority
+//   firmware-initiated scenes (e.g. the priority-4 ISS auto-switch
+//   on visibility rising edge) MUST yield to it. Without this flag,
+//   a sticky priority-4 ISS pass would lock the IR remote out for
+//   the entire pass, which is hostile to the operator. (added in
+//   phase 7.1++ — was implicit in IR.5/IR.6 design; made explicit
+//   when the auto-switch landed.)
 //
 // All scenes are capped by a hard kHardTtlSec (1 h, FR-2.4) regardless
 // of duration / sticky.
@@ -84,7 +93,8 @@ void init();
 // default). No-op (returns true) when id + priority + sticky already
 // match the current Director intent.
 bool request(SceneId id, uint8_t priority = 1,
-             uint16_t duration_s = 30, bool sticky = false);
+             uint16_t duration_s = 30, bool sticky = false,
+             bool user_intent = false);
 
 // Writer (Core 0). Drives FR-2.3/FR-2.4 expiry. Call once per
 // loop() iteration with millis(); cheap when no deadline is pending.

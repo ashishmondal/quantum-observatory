@@ -11,22 +11,20 @@ namespace {
 
 bool s_begun = false;
 
-// Project policy (FR-10.5, see buzzer.h): every tone the firmware
-// produces stays above 8 kHz. 9 kHz sits comfortably in the
-// high-tick range while remaining well within the bandwidth of the
-// typical 4 kHz resonant-peak passive piezo on this carrier
-// (response is poor past the resonant peak but still audible at
-// room volume — and "quieter than max" is exactly what we want for
-// a key-press tick).
+// Single-tone feedback chirp pitch (FR-10.6 key-press tick + FR-10.4
+// boot self-test). 9 kHz sits well above conversational pitch and
+// the dominant peaks of typical TV / music content, so the chirp
+// reads as a "device tick" rather than competing with foreground
+// audio in the room. It's also past the typical 4 kHz resonant peak
+// of the carrier piezo so the response is intentionally quieter
+// than max — exactly what a key-press tick should be. (No project-
+// wide pitch floor any more — see buzzer.h policy block.)
 constexpr uint16_t kChirpFreqHz   = 9000;
 // 12 ms ≈ one-and-a-bit cycles at the 108 ms NEC frame interval —
 // short enough that even a fast finger-tap doesn't run two chirps
 // into each other, long enough that the piezo's mechanical envelope
 // can actually start producing sound before we cut it.
 constexpr uint16_t kChirpMs       = 12;
-// FR-10.5 floor enforced at the driver boundary. Notes below this
-// are emitted as silence (see play() / advance_to_current_note()).
-constexpr uint16_t kMinFreqHz     = 8000;
 // FR-10.4 boot self-test: a single short tone at the chirp pitch
 // fired once from begin(). 30 ms <= 50 ms cap; long enough to be
 // audible across the room, short enough to not be annoying.
@@ -71,10 +69,12 @@ inline void stop_internal() {
 inline void start_current_note(uint32_t now_ms) {
   const Note& n = s_seq[s_seq_idx];
   const uint16_t dur_ms = n.ms == 0 ? 1 : n.ms;  // guard div-by-zero in deadline math
-  if (n.freq_hz >= kMinFreqHz) {
+  if (n.freq_hz != 0) {
+    // No floor here on purpose — see kMinChirpHz comment above.
+    // 0 is the only value that means "rest".
     tone(PIN_BUZZER, n.freq_hz, dur_ms);
   } else {
-    noTone(PIN_BUZZER);              // explicit silence (rest, or sub-floor reject)
+    noTone(PIN_BUZZER);              // explicit silence (freq_hz == 0 sentinel)
     digitalWrite(PIN_BUZZER, LOW);
   }
   s_note_end_ms = now_ms + dur_ms;

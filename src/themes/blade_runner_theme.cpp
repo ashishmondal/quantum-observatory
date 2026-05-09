@@ -163,9 +163,13 @@ void BladeRunnerTheme::render_clock_bg(Adafruit_Protomatter& matrix,
 // "Vangelis CS-80 Sweep" — three-step falling swell, total 800 ms.
 namespace {
 constexpr buzzer::Note kMelody[] = {
-  { 8869, 200 },
-  { 9397, 200 },
-  { 8372, 400 },
+  // "CS-80 descent" — noir minor-key fall D5 → C5 → G#4. The drop to
+  // G#4 is a tritone below D5 (the Vangelis "End Titles" mood interval)
+  // and the long held tail leaves it unresolved — reads as the
+  // signature replicant-noir cue. Total = 280+280+700 = 1260 ms.
+  { 587, 280 },   // D5
+  { 523, 280 },   // C5
+  { 415, 700 },   // G#4 — held, unresolved
 };
 }  // namespace
 

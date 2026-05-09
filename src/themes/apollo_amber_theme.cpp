@@ -130,10 +130,16 @@ void ApolloAmberTheme::render_clock_bg(Adafruit_Protomatter& matrix,
 // 8372 Hz tonic statements before the climb to 12543 Hz.
 namespace {
 constexpr buzzer::Note kMelody[] = {
-  { 8372, 150 },
-  {11087,  50 },   // grace
-  { 8372, 150 },
-  {12543, 300 },
+  // "DSKY uplink" — two short mission-control beeps then a confirm
+  // tone an octave up. The 1 kHz / 2 kHz pair is the actual Apollo
+  // Display-Keyboard "key release" / "uplink activity" pitch family,
+  // so this reads as flight-deck console immediately. Total =
+  // 220+80+220+80+360 = 960 ms (well under the 1500 ms FR-10.7 cap).
+  { 1000, 220 },   // beep 1 — "key accepted"
+  {    0,  80 },   // gap
+  { 1000, 220 },   // beep 2 — "key accepted"
+  {    0,  80 },   // gap
+  { 2000, 360 },   // confirm — octave up, "go for orbit"
 };
 }  // namespace
 

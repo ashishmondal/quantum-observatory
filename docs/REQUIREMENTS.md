@@ -83,24 +83,24 @@ The device also doubles as **the only clock in the room**. The current time MUST
 - **FR-10.1** The firmware SHALL drive the on-board buzzer (GP27, active-high) for short attention chirps tied to high-priority scenes (priority ≥ 4, e.g. `iss_pass`).
 - **FR-10.2** Buzzer behaviour (mute / chirp pattern) SHALL be remotely controllable via MQTT (e.g. `observatory/buzzer`, payload = `{"mode": "off"|"chirp"|"siren", "count": N}`). HA owns the policy; firmware owns the timing.
 - **FR-10.3** A firmware mute switch SHALL hard-cap any chirp to ≤ 200 ms ON / ≥ 800 ms OFF and ≤ 3 chirps per scene activation, regardless of MQTT command, to avoid runaway noise from a malformed payload.
-- **FR-10.4** The buzzer SHALL default to off after boot. A boot-time self-test chirp is allowed but MUST be ≤ 50 ms.
-- **FR-10.5** Every audible tone produced by the firmware (chirps, alerts, theme melodies, self-test) SHALL have a fundamental frequency ≥ 8 kHz. Rationale: this seats every cue solidly above conversational pitch and above the dominant peaks of typical TV / music content, so the buzzer always reads as a "device tick" rather than competing with foreground audio in the room. The 8 kHz floor is enforced at the buzzer driver boundary (`buzzer::*` ignores any tone below it), not just by convention at call sites.
-- **FR-10.6** Each input gesture that successfully drives a firmware action (e.g. an IR press that survives the FR-17.2 / FR-17.3 / FR-17.5 dispatch gates and fires) SHALL emit a single short feedback chirp (≤ 20 ms, single tone ≥ 8 kHz). Inputs that the firmware drops (unmapped buttons, address-rejected frames, repeats suppressed by `honour_repeats=false`, frames received while dispatch is disabled) SHALL stay silent — the buzzer is the "did the press take" witness, paired with the visible scene response.
+- **FR-10.4** The buzzer SHALL default to off after boot. A boot-time self-test chirp is allowed but MUST be ≤ 50 ms. In addition the firmware MAY play a single short non-blocking **boot melody** as the audible "device awake" cue (e.g. the Westminster Quarters first phrase). The boot melody SHALL be ≤ 2000 ms wall-clock and SHALL be cancellable by any subsequent `buzzer::play()` call (latest-wins).
+- **FR-10.5** *(reserved — was the ≥ 8 kHz "device tick" floor; removed because it forced every melody into the C9..Bb9 octave where the carrier piezo's mechanical envelope collapses every motif into the same shrill beep. Pitch is now chosen per-cue by its author: feedback chirps stay high (≥ ~6 kHz) so a key-press tick still reads as a tick, melodies use the C4..C7 musical octaves so the human ear actually parses them as a tune.)*
+- **FR-10.6** Each input gesture that successfully drives a firmware action (e.g. an IR press that survives the FR-17.2 / FR-17.3 / FR-17.5 dispatch gates and fires) SHALL emit a single short feedback chirp (≤ 20 ms, single tone). Inputs that the firmware drops (unmapped buttons, address-rejected frames, repeats suppressed by `honour_repeats=false`, frames received while dispatch is disabled) SHALL stay silent — the buzzer is the "did the press take" witness, paired with the visible scene response.
 - **FR-10.7** Each theme (FR-15) SHALL define a short **signature melody** played non-blockingly when the theme becomes active (i.e. on the rising edge of `theme::set()` to a *different* id; idempotent set-to-same is silent). The melody is the audible counterpart of the visual theme swap and SHALL satisfy:
-  - All notes are ≥ 8 kHz (FR-10.5).
+  - Notes are real musical pitches chosen for the theme's identity (typically C4..C7, where the carrier piezo's mechanical envelope reproduces pitch faithfully).
   - Total melody duration ≤ 1500 ms wall-clock (sum of note durations + inter-note gaps), so a fast theme cycle from the IR remote can't stack melodies on top of each other; if a new melody is requested while one is still playing, the in-flight melody SHALL be cancelled and the new one started immediately.
   - The melody is **non-blocking** — playback is driven by a Core-0 scheduler ticked from `loop()`, not by `delay()` inside `tone()`. Core 1's render loop is never observed.
   - The melody respects the same mute / cap discipline as FR-10.3: a global mute SHALL silence theme melodies the same way it silences chirps and alerts.
 
-  The five v1 melodies (all frequencies ≥ 8 kHz, all built from the C9–Bb9 octave so the math + note enum stay shared):
+  The five v1 melodies (re-tuned into C4..C7 so each motif is actually recognizable on the carrier piezo):
 
   | Theme | Motif | Notes (Hz / ms) |
   |---|---|---|
-  | `apollo_amber`   | "James Horner Signal" — lonely rising hero interval (Apollo 13) | 8372 / 150, 11087 / 50 (grace), 8372 / 150, 12543 / 300 |
-  | `nostromo_green` | "Jerry Goldsmith Echo" — dissonant two-note call (Alien)         | 9397 / 400, 8372 / 600 |
-  | `vectrex_neon`   | "Arcade Attract" — minor-7th arpeggio shimmer                    | 8372 / 60, 9956 / 60, 12543 / 60, 14917 / 120 |
-  | `blade_runner`   | "Vangelis CS-80 Sweep" — three-step falling swell                | 8869 / 200, 9397 / 200, 8372 / 400 |
-  | `lcars_tos`      | "Courage Fanfare" — Star Trek opening climb                      | 8372 / 150, 11175 / 150, 9956 / 150, 14080 / 400 |
+  | `apollo_amber`   | "DSKY uplink" — two mission-control beeps + confirm tone (Apollo) | 1000 / 220, 0 / 80, 1000 / 220, 0 / 80, 2000 / 360 |
+  | `nostromo_green` | "MOTHER wakeup" — slow minor-third climb to a held dissonance (Alien) | 220 / 380, 262 / 380, 311 / 700 |
+  | `vectrex_neon`   | "Insert coin" — fast major arpeggio (1980s arcade cabinet)            | 523 / 70, 659 / 70, 784 / 70, 1047 / 240 |
+  | `blade_runner`   | "CS-80 descent" — noir minor-key fall (Vangelis)                      | 587 / 280, 523 / 280, 415 / 700 |
+  | `lcars_tos`      | "Courage hero call" — perfect-eleventh leap then resolve (TOS)         | 698 / 200, 1175 / 200, 880 / 600 |
 
   These are the canonical values; the per-theme melody tables live next to the per-theme color/font tables in `theme.cpp` (one source of truth per theme) and are exposed to the buzzer scheduler via a `theme::signature_melody()` accessor.
 

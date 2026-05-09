@@ -884,7 +884,8 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
   else if (duration > 3600) dur_u16 = 3600;
   else                      dur_u16 = static_cast<uint16_t>(duration);
 
-  const bool accepted = scene_state::request(id, prio_u8, dur_u16, sticky);
+  const bool accepted = scene_state::request(id, prio_u8, dur_u16, sticky,
+                                             /*user_intent=*/true);  // explicit operator command always wins
   if (!accepted) {
     ++s_scene_rejects;
     Serial.print("[mqtt] scene preempted id=");
