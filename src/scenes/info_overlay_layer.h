@@ -83,6 +83,16 @@ extern volatile int32_t  g_info_rssi_dbm;
 extern volatile uint32_t g_info_link_flags;  // bit 0 wifi, bit 1 mqtt
 extern volatile uint32_t g_info_free_heap_b;
 
+// Packed network status for the line-2 error readout (see main.cpp
+// for the byte layout). When both layers are up the layer keeps its
+// original "RSS%d MQ OK" rendering; on any outage it switches to a
+// short failure tag sourced from wifi_link::state() / mqtt_link's
+// captured PubSubClient rc so the operator sees the actual reason
+// the device is offline (SOCKET vs AUTH vs DENY vs TIMEOUT …), not
+// just "MQ NO".
+extern volatile uint32_t g_info_net_status;
+extern volatile uint32_t g_info_net_backoff_s;
+
 class InfoOverlayLayer final : public Layer {
 public:
   const char* name() const override { return "info_overlay"; }
@@ -218,15 +228,82 @@ private:
       gfx::draw_text_halo(matrix, 0, y1, buf, fg, halo);
     }
 
-    // Line 2 — RSSI (dBm) + MQTT state. RSSI reads 0 before the
-    // first publish (matches "not connected"). MQ tag is 2 chars
-    // (OK / NO) so the whole line stays under ~14 chars wide at
-    // Picopixel's ~3 px advance.
+    // Line 2 — RSSI (dBm) + MQTT state when fully online; the
+    // actual short failure tag when not. We can't say "device is
+    // healthy" without both layers being up, so we shadow the
+    // RSSI/MQ OK readout with the precise reason for the outage
+    // sourced from the packed g_info_net_status snapshot. Keeps
+    // the line under ~14 chars so it fits at Picopixel's ~3 px
+    // advance. The boot-loop case that motivated this readout
+    // (HA host down, TCP connect refused) prints as "MQ SOCKET 8s"
+    // — operator immediately knows it's the broker, not Wi-Fi
+    // creds or auth, and roughly when the next attempt fires.
     {
       const uint32_t flags = g_info_link_flags;
-      const long     rssi  = static_cast<long>(g_info_rssi_dbm);
-      const char*    mq    = (flags & 0x2u) ? "OK" : "NO";
-      snprintf(buf, sizeof(buf), "RSS%ld MQ %s", rssi, mq);
+      const bool     wifi_ok = (flags & 0x1u) != 0u;
+      const bool     mqtt_ok = (flags & 0x2u) != 0u;
+      if (wifi_ok && mqtt_ok) {
+        const long rssi = static_cast<long>(g_info_rssi_dbm);
+        snprintf(buf, sizeof(buf), "RSS%ld MQ OK", rssi);
+      } else {
+        const uint32_t net = g_info_net_status;
+        const uint8_t  wifi_st = static_cast<uint8_t>((net      ) & 0xFFu);
+        const uint8_t  mqtt_st = static_cast<uint8_t>((net >>  8) & 0xFFu);
+        const int8_t   mqtt_rc = static_cast<int8_t >((net >> 16) & 0xFFu);
+        const uint32_t backoff_s = g_info_net_backoff_s;
+        if (!wifi_ok) {
+          // wifi_link::State enum: 0 IDLE, 1 CONNECTING, 2 CONNECTED, 3 DISCONNECTED.
+          const char* tag;
+          switch (wifi_st) {
+            case 0:  tag = "IDLE";       break;
+            case 1:  tag = "JOIN";       break;
+            case 3:  tag = "DOWN";       break;
+            default: tag = "?";          break;
+          }
+          if (wifi_st == 3 && backoff_s > 0u) {
+            snprintf(buf, sizeof(buf), "WIFI %s %lus", tag,
+                     static_cast<unsigned long>(backoff_s));
+          } else {
+            snprintf(buf, sizeof(buf), "WIFI %s", tag);
+          }
+        } else {
+          // Wi-Fi up, MQTT not. Prefer the captured rc — that's
+          // the exact failure mode (HA host down → -2 SOCKET; bad
+          // creds → 4 AUTH; broker overloaded → 3 BUSY; …) — and
+          // fall back to the state machine label for the
+          // pre-first-failure cases (WAIT_WIFI / first CONNECTING).
+          const char* tag = nullptr;
+          if (mqtt_st == 3 /*CONNECTED*/) {
+            tag = "OK";  // shouldn't reach here (mqtt_ok would be true)
+          } else if (mqtt_st == 1 /*WAIT_WIFI*/) {
+            tag = "WAIT";
+          } else if (mqtt_st == 2 /*CONNECTING*/ && mqtt_rc == 0) {
+            tag = "JOIN";
+          } else {
+            // Map PubSubClient rc — see mqtt_link.h::last_rc() for
+            // the value table. Names chosen so each fits ≤ 6 chars
+            // and is unambiguous at a glance.
+            switch (mqtt_rc) {
+              case -4: tag = "TMOUT";  break;  // MQTT_CONNECTION_TIMEOUT
+              case -3: tag = "LOST";   break;  // MQTT_CONNECTION_LOST
+              case -2: tag = "SOCKET"; break;  // MQTT_CONNECT_FAILED  (TCP refused / no route)
+              case -1: tag = "DISC";   break;  // MQTT_DISCONNECTED
+              case  1: tag = "PROTO";  break;  // MQTT_CONNECT_BAD_PROTOCOL
+              case  2: tag = "BADID";  break;  // MQTT_CONNECT_BAD_CLIENT_ID
+              case  3: tag = "BUSY";   break;  // MQTT_CONNECT_UNAVAILABLE
+              case  4: tag = "AUTH";   break;  // MQTT_CONNECT_BAD_CREDENTIALS
+              case  5: tag = "DENY";   break;  // MQTT_CONNECT_UNAUTHORIZED
+              default: tag = "?";      break;
+            }
+          }
+          if (mqtt_st == 4 /*DISCONNECTED*/ && backoff_s > 0u) {
+            snprintf(buf, sizeof(buf), "MQ %s %lus", tag,
+                     static_cast<unsigned long>(backoff_s));
+          } else {
+            snprintf(buf, sizeof(buf), "MQ %s", tag);
+          }
+        }
+      }
       gfx::draw_text_halo(matrix, 0, y2, buf, fg, halo);
     }
 

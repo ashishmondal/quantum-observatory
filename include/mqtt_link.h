@@ -46,6 +46,30 @@ void poll(uint32_t now_ms);
 // True iff the broker session is up.
 bool connected();
 
+// Current state machine value. Read by the IR.4 InfoOverlayLayer
+// (via the 1 Hz Core 0 → Core 1 snapshot in main.cpp) so an operator
+// staring at the panel can tell WAIT_WIFI ("MQTT WAIT") apart from
+// CONNECTING / DISCONNECTED ("MQTT RETRY 8s") apart from CONNECTED.
+State state();
+
+// Current retry-backoff delay in milliseconds (FR-5.2 schedule).
+// Returns 0 when the broker session is up. Surfaced on the panel as
+// "RETRY %us" so the operator can sanity-check the schedule from
+// across the room without serial console access.
+uint32_t backoff_ms();
+
+// PubSubClient::state() captured at the moment of the most recent
+// failed connect / dropped session. Values follow the PubSubClient
+// rc convention:
+//    -4 timeout, -3 lost, -2 socket/connect_failed,  -1 disconnected,
+//     0 connected,  1 bad_protocol, 2 bad_client_id, 3 unavailable,
+//     4 bad_credentials, 5 unauthorized.
+// Returns 0 ("connected", the int8 sentinel for "no error captured
+// yet") on a fresh boot before any outage. Used by the IR.4
+// InfoOverlayLayer to render the precise failure mode in 7 chars
+// (SOCKET / AUTH / PROTO / …) instead of a generic "offline".
+int8_t last_rc();
+
 // Cross-core one-shot publish to `observatory/debug`. Safe to call
 // from Core 1 (e.g. from a scene's render() path). Copies `payload`
 // into a static buffer guarded by a sentinel-0 atomic flag; Core 0's

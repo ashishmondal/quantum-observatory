@@ -89,6 +89,14 @@ PubSubClient s_client(s_tcp);
 State    s_state            = State::IDLE;
 uint32_t s_next_attempt_ms  = 0;
 uint32_t s_backoff_ms       = kBackoffStartMs;
+// PubSubClient rc captured at the moment of the most recent failed
+// connect / dropped session. See mqtt_link.h::last_rc() for the value
+// table. Sentinel 0 ("connected") = no outage observed yet — fine on
+// a fresh boot, becomes meaningful as soon as the first
+// schedule_retry() runs. Single-writer (poll() on Core 0), volatile
+// because Core 0's 1 Hz snapshot publisher in main.cpp reads it for
+// the InfoOverlayLayer.
+volatile int8_t s_last_rc   = 0;
 uint32_t s_last_status_ms   = 0;
 uint32_t s_status_publishes = 0;
 uint32_t s_scene_msgs       = 0;
@@ -927,10 +935,15 @@ void log_session_info(const char* event) {
 }
 
 void schedule_retry(uint32_t now_ms, const char* reason) {
+  // Snapshot the PubSubClient rc BEFORE we change state — once we
+  // flip s_state to DISCONNECTED, future reads from the layer should
+  // see "the reason this attempt failed", not whatever the client's
+  // internal field decays to on the next loop().
+  s_last_rc = static_cast<int8_t>(s_client.state());
   Serial.print("[mqtt] ");
   Serial.print(reason);
   Serial.print(" rc=");
-  Serial.print(s_client.state());
+  Serial.print(static_cast<int>(s_last_rc));
   Serial.print(" — retry in ");
   Serial.print(s_backoff_ms / 1000u);
   Serial.println("s");
@@ -1002,6 +1015,23 @@ void begin() {
   if (s_state != State::IDLE) return;
   s_client.setServer(MQTT_HOST, MQTT_PORT);
   s_client.setBufferSize(kPubSubBufferSize);  // sized for the §5.1 scene payload
+  // PubSubClient defaults MQTT_SOCKET_TIMEOUT to 15 s, which is the
+  // wall-clock budget for the blocking TCP connect() inside
+  // s_client.connect(). When the broker is unreachable (e.g. HA host
+  // down, but Wi-Fi still up) that call blocks the whole Core 0
+  // loop() for the full 15 s — longer than the 8 s NFR-3.2 watchdog
+  // (see main.cpp::setup() rp2040.wdt_begin). The WDT then resets
+  // the chip before mqtt_link::poll() ever returns, the new boot
+  // hits the same code path, and the device boot-loops for as long
+  // as the broker is gone (instead of falling through to the
+  // OfflineScene override per FR-5.1). 3 s is plenty for a same-LAN
+  // broker, fits in the WDT budget with the FR-3.1 frame work, and
+  // a failed connect just falls back into the FR-5.2 backoff
+  // schedule. PubSubClient::loop()/publish() are non-blocking on a
+  // healthy session (they peek at WiFiClient::available() first),
+  // so this only narrows the connect path that was actually
+  // misbehaving.
+  s_client.setSocketTimeout(3);
   s_client.setCallback(on_mqtt_message);
   s_state = State::WAIT_WIFI;
   Serial.print("[mqtt] configured broker=");
@@ -1118,6 +1148,14 @@ void poll(uint32_t now_ms) {
 }
 
 bool connected() { return s_state == State::CONNECTED; }
+
+State state() { return s_state; }
+
+uint32_t backoff_ms() {
+  return s_state == State::CONNECTED ? 0u : s_backoff_ms;
+}
+
+int8_t last_rc() { return s_last_rc; }
 
 void queue_debug(const char* payload) {
   if (payload == nullptr) return;

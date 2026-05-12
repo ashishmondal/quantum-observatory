@@ -199,6 +199,19 @@ volatile int32_t  g_info_rssi_dbm    = 0;  // 0 when wifi not connected
 volatile uint32_t g_info_link_flags  = 0;  // bit 0 = wifi connected, bit 1 = mqtt connected
 volatile uint32_t g_info_free_heap_b = 0;  // bytes
 
+// Packed network status for IR.4 line 2. Bytes (LE):
+//   byte 0: wifi_link::State (0..3 — IDLE/CONNECTING/CONNECTED/DISCONNECTED)
+//   byte 1: mqtt_link::State (0..4 — IDLE/WAIT_WIFI/CONNECTING/CONNECTED/DISCONNECTED)
+//   byte 2: int8_t mqtt rc (PubSubClient::state() at last failure;
+//           re-interpret bits as int8_t on the reader side — 0xFE = -2 = SOCKET, etc.)
+//   byte 3: reserved (0)
+// Combined retry-backoff seconds — whichever layer is currently
+// retrying (wifi outage takes precedence; once wifi is up the mqtt
+// backoff drives the readout). 16-bit headroom; capped at the
+// FR-5.2 60 s ceiling so no clamping needed in practice.
+volatile uint32_t g_info_net_status    = 0;
+volatile uint32_t g_info_net_backoff_s = 0;
+
 // Pending swap target stashed when a fade starts. The actual
 // g_current_scene swap is deferred to the fade midpoint so the panel
 // is fully black during init(), masking any first-frame jitter.
@@ -914,6 +927,34 @@ void loop() {
       g_info_link_flags  = (wifi_link::connected() ? 0x1u : 0u) |
                            (mqtt_link::connected() ? 0x2u : 0u);
       g_info_free_heap_b = static_cast<uint32_t>(rp2040.getFreeHeap());
+
+      // Packed net status for the IR.4 line-2 error readout (see
+      // g_info_net_status declaration above for the byte layout).
+      // Wi-Fi outage takes precedence — until the link is back up
+      // the broker can't be reached anyway, so showing the MQTT
+      // failure mode would be misleading. Once Wi-Fi is up we
+      // surface mqtt_link's last_rc() so the panel distinguishes
+      // "HA host unreachable" (rc=-2 SOCKET — the boot-loop case
+      // that motivated this readout) from "auth refused" (rc=4),
+      // "broker overloaded" (rc=3), etc.
+      {
+        const uint8_t wifi_st = static_cast<uint8_t>(wifi_link::state());
+        const uint8_t mqtt_st = static_cast<uint8_t>(mqtt_link::state());
+        const uint8_t mqtt_rc = static_cast<uint8_t>(mqtt_link::last_rc());
+        g_info_net_status = static_cast<uint32_t>(wifi_st)
+                          | (static_cast<uint32_t>(mqtt_st) <<  8)
+                          | (static_cast<uint32_t>(mqtt_rc) << 16);
+        const uint32_t wifi_backoff_ms = wifi_link::backoff_ms();
+        const uint32_t mqtt_backoff_ms = mqtt_link::backoff_ms();
+        // Show whichever layer is currently the bottleneck. If
+        // Wi-Fi is down its backoff is what the operator is waiting
+        // on; if Wi-Fi is up but MQTT is retrying, the MQTT
+        // backoff is the live timer.
+        const uint32_t backoff_ms_eff = wifi_link::connected()
+                                          ? mqtt_backoff_ms
+                                          : wifi_backoff_ms;
+        g_info_net_backoff_s = (backoff_ms_eff + 999u) / 1000u;
+      }
     }
 
     // FR-16.4 / phase D.7 — flush any pending first-frame timing.
