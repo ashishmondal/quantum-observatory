@@ -130,6 +130,47 @@ volatile uint32_t s_debug_pending = 0;
 uint32_t          s_debug_publishes = 0;
 uint32_t          s_debug_drops     = 0;
 
+// ── Inbound JSON parse helper ──────────────────────────────────────
+// Every observatory/* handler does the same boilerplate: declare a
+// fixed-capacity StaticJsonDocument under the v7-deprecation pragma
+// guard, run deserializeJson(), on error bump the per-topic reject
+// counter and log "[mqtt] <tag> parse FAILED err=… payload=…", then
+// drop. Bundling that into a small RAII helper turns ~12 lines of
+// boilerplate into two — and confines the deprecation pragma to one
+// place (TODO: migrate to JsonDocument when we move past PSC v6).
+//
+// Usage at every call site:
+//   ParsedJson<256> p(buf, length, "iss", s_iss_rejects);
+//   if (!p.ok()) return;
+//   auto& doc = p.doc();
+//   ... // doc[…] as before
+template <size_t N>
+class ParsedJson {
+public:
+  ParsedJson(char* buf, unsigned int length,
+             const char* tag, uint32_t& reject_counter) {
+    err_ = deserializeJson(doc_, buf, length);
+    if (err_) {
+      ++reject_counter;
+      Serial.print("[mqtt] ");
+      Serial.print(tag);
+      Serial.print(" parse FAILED err=");
+      Serial.print(err_.c_str());
+      Serial.print(" payload=");
+      Serial.println(buf);
+    }
+  }
+  bool ok() const { return !err_; }
+  StaticJsonDocument<N>& doc() { return doc_; }
+
+private:
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  StaticJsonDocument<N> doc_;
+#pragma GCC diagnostic pop
+  DeserializationError err_;
+};
+
 // Tag identifying which §5.2 threshold topic a payload arrived on.
 // Drives the right setter + range validation in handle_thresholds().
 enum class ThresholdKind : uint8_t { NIGHT, THERMAL };
@@ -145,23 +186,9 @@ void handle_thresholds(ThresholdKind kind, char* buf, unsigned int length) {
   ++s_threshold_msgs;
   const char* tag = (kind == ThresholdKind::NIGHT) ? "night" : "thermal";
 
-  // ArduinoJson v7: see on_mqtt_message() for the heap-vs-static
-  // rationale (NFR-2.2).
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  StaticJsonDocument<128> doc;  // §5.2 payload is ~40 B; 128 leaves comfortable headroom
-#pragma GCC diagnostic pop
-  const DeserializationError err = deserializeJson(doc, buf, length);
-  if (err) {
-    ++s_threshold_rejects;
-    Serial.print("[mqtt] ");
-    Serial.print(tag);
-    Serial.print(" parse FAILED err=");
-    Serial.print(err.c_str());
-    Serial.print(" payload=");
-    Serial.println(buf);
-    return;
-  }
+  ParsedJson<128> p(buf, length, tag, s_threshold_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
 
   // Both fields required — without them there's nothing to apply.
   // Use `.is<int>()` rather than the `| default` shorthand so we can
@@ -224,19 +251,9 @@ void handle_thresholds(ThresholdKind kind, char* buf, unsigned int length) {
 void handle_time(char* buf, unsigned int length, uint32_t now_ms) {
   ++s_time_msgs;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  StaticJsonDocument<128> doc;
-#pragma GCC diagnostic pop
-  const DeserializationError err = deserializeJson(doc, buf, length);
-  if (err) {
-    ++s_time_rejects;
-    Serial.print("[mqtt] time parse FAILED err=");
-    Serial.print(err.c_str());
-    Serial.print(" payload=");
-    Serial.println(buf);
-    return;
-  }
+  ParsedJson<128> p(buf, length, "time", s_time_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
 
   // epoch_utc requires a 32-bit field; ArduinoJson's `is<long>()`
   // covers that on every Arduino target. tz fits comfortably in int.
@@ -299,19 +316,9 @@ void handle_time(char* buf, unsigned int length, uint32_t now_ms) {
 void handle_moon(char* buf, unsigned int length, uint32_t now_ms) {
   ++s_moon_msgs;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  StaticJsonDocument<192> doc;
-#pragma GCC diagnostic pop
-  const DeserializationError err = deserializeJson(doc, buf, length);
-  if (err) {
-    ++s_moon_rejects;
-    Serial.print("[mqtt] moon parse FAILED err=");
-    Serial.print(err.c_str());
-    Serial.print(" payload=");
-    Serial.println(buf);
-    return;
-  }
+  ParsedJson<192> p(buf, length, "moon", s_moon_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
 
   if (!doc["phase"].is<float>() && !doc["phase"].is<int>()) {
     ++s_moon_rejects;
@@ -376,19 +383,9 @@ void handle_moon(char* buf, unsigned int length, uint32_t now_ms) {
 void handle_iss(char* buf, unsigned int length, uint32_t now_ms) {
   ++s_iss_msgs;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  StaticJsonDocument<256> doc;
-#pragma GCC diagnostic pop
-  const DeserializationError err = deserializeJson(doc, buf, length);
-  if (err) {
-    ++s_iss_rejects;
-    Serial.print("[mqtt] iss parse FAILED err=");
-    Serial.print(err.c_str());
-    Serial.print(" payload=");
-    Serial.println(buf);
-    return;
-  }
+  ParsedJson<256> p(buf, length, "iss", s_iss_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
 
   // Required fields. Without lat/lon/alt we can't compute look
   // angles; without sunlit we can't decide visibility; without
@@ -501,19 +498,9 @@ void handle_iss(char* buf, unsigned int length, uint32_t now_ms) {
 void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
   ++s_jupiter_msgs;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  StaticJsonDocument<256> doc;
-#pragma GCC diagnostic pop
-  const DeserializationError err = deserializeJson(doc, buf, length);
-  if (err) {
-    ++s_jupiter_rejects;
-    Serial.print("[mqtt] jupiter parse FAILED err=");
-    Serial.print(err.c_str());
-    Serial.print(" payload=");
-    Serial.println(buf);
-    return;
-  }
+  ParsedJson<256> p(buf, length, "jupiter", s_jupiter_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
 
   // Required fields. ArduinoJson `is<T>` accepts ints for float
   // slots silently, so we test for numeric presence broadly.
@@ -651,19 +638,9 @@ void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
 void handle_constellation(char* buf, unsigned int length, uint32_t now_ms) {
   ++s_constellation_msgs;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  StaticJsonDocument<128> doc;
-#pragma GCC diagnostic pop
-  const DeserializationError err = deserializeJson(doc, buf, length);
-  if (err) {
-    ++s_constellation_rejects;
-    Serial.print("[mqtt] constellation parse FAILED err=");
-    Serial.print(err.c_str());
-    Serial.print(" payload=");
-    Serial.println(buf);
-    return;
-  }
+  ParsedJson<128> p(buf, length, "constellation", s_constellation_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
 
   if (!doc["index"].is<int>()) {
     ++s_constellation_rejects;
@@ -719,19 +696,9 @@ void handle_constellation(char* buf, unsigned int length, uint32_t now_ms) {
 void handle_theme(char* buf, unsigned int length) {
   ++s_theme_msgs;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  StaticJsonDocument<96> doc;
-#pragma GCC diagnostic pop
-  const DeserializationError err = deserializeJson(doc, buf, length);
-  if (err) {
-    ++s_theme_rejects;
-    Serial.print("[mqtt] theme parse FAILED err=");
-    Serial.print(err.c_str());
-    Serial.print(" payload=");
-    Serial.println(buf);
-    return;
-  }
+  ParsedJson<96> p(buf, length, "theme", s_theme_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
 
   const char* wire_id = doc["id"] | static_cast<const char*>(nullptr);
   if (wire_id == nullptr || wire_id[0] == '\0') {
@@ -827,24 +794,14 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
   }
   ++s_scene_msgs;
 
-  // ArduinoJson v7 deprecated StaticJsonDocument in favour of
-  // JsonDocument — but JsonDocument's default allocator uses
-  // malloc/free, which violates NFR-2.2 (no heap on hot paths). The
-  // deprecated class is exactly the static-buffer behaviour we want,
-  // so silence the warning rather than swap to a heap doc.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  StaticJsonDocument<kSceneJsonCapacity> doc;
-#pragma GCC diagnostic pop
-  const DeserializationError err = deserializeJson(doc, buf, length);
-  if (err) {
-    ++s_scene_rejects;
-    Serial.print("[mqtt] scene parse FAILED err=");
-    Serial.print(err.c_str());
-    Serial.print(" payload=");
-    Serial.println(buf);
-    return;  // FR-1.4: malformed JSON does not interrupt active scene
-  }
+  // ParsedJson<kSceneJsonCapacity> bundles the v7 deprecation pragma
+  // (StaticJsonDocument is exactly the static-buffer behaviour we
+  // want — JsonDocument's default allocator uses malloc/free which
+  // violates NFR-2.2 on this hot path) plus the parse-or-reject
+  // boilerplate.
+  ParsedJson<kSceneJsonCapacity> p(buf, length, "scene", s_scene_rejects);
+  if (!p.ok()) return;  // FR-1.4: malformed JSON does not interrupt active scene
+  auto& doc = p.doc();
 
   const char* scene_id = doc["scene_id"] | static_cast<const char*>(nullptr);
   if (scene_id == nullptr || scene_id[0] == '\0') {

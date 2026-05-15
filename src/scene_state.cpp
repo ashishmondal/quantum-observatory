@@ -196,49 +196,31 @@ void tick(uint32_t now_ms) {
   mutex_exit(&s_mutex);
 }
 
-void set_night_active(bool active) {
+namespace {
+
+// Common body of every set_*_active() override-flag setter. The four
+// flags differ only in which `bool State::*` they target, so a
+// pointer-to-member parameter collapses ~30 lines of
+// copy-pasted lock/check/publish into one place. Compiles to the
+// same code as the original four functions because the member
+// pointer is always a compile-time constant at the call site.
+void set_override_active(bool State::* flag, bool active) {
   mutex_enter_blocking(&s_mutex);
-  if (s_state.night_active != active) {
+  if (s_state.*flag != active) {
     const SceneId before = resolve(s_state);
-    s_state.night_active = active;
+    s_state.*flag = active;
     if (resolve(s_state) != before) s_state.dirty = true;
     publish_locked();
   }
   mutex_exit(&s_mutex);
 }
 
-void set_thermal_active(bool active) {
-  mutex_enter_blocking(&s_mutex);
-  if (s_state.thermal_active != active) {
-    const SceneId before = resolve(s_state);
-    s_state.thermal_active = active;
-    if (resolve(s_state) != before) s_state.dirty = true;
-    publish_locked();
-  }
-  mutex_exit(&s_mutex);
-}
+}  // namespace
 
-void set_offline_active(bool active) {
-  mutex_enter_blocking(&s_mutex);
-  if (s_state.offline_active != active) {
-    const SceneId before = resolve(s_state);
-    s_state.offline_active = active;
-    if (resolve(s_state) != before) s_state.dirty = true;
-    publish_locked();
-  }
-  mutex_exit(&s_mutex);
-}
-
-void set_splash_active(bool active) {
-  mutex_enter_blocking(&s_mutex);
-  if (s_state.splash_active != active) {
-    const SceneId before = resolve(s_state);
-    s_state.splash_active = active;
-    if (resolve(s_state) != before) s_state.dirty = true;
-    publish_locked();
-  }
-  mutex_exit(&s_mutex);
-}
+void set_night_active  (bool a) { set_override_active(&State::night_active,   a); }
+void set_thermal_active(bool a) { set_override_active(&State::thermal_active, a); }
+void set_offline_active(bool a) { set_override_active(&State::offline_active, a); }
+void set_splash_active (bool a) { set_override_active(&State::splash_active,  a); }
 
 void clear_sticky() {
   // FR-2.2: clear_sticky only affects scenes that won't auto-expire.
@@ -254,7 +236,6 @@ void clear_sticky() {
     s_state.expires_at_ms  = 0u;            // default: no soft deadline
     s_state.hard_ttl_at_ms = now_ms + kHardTtlMs;
     if (resolve(s_state) != before) s_state.dirty = true;
-    publish_locked();
     publish_locked();
   }
   mutex_exit(&s_mutex);

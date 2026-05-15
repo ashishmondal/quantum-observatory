@@ -75,6 +75,7 @@
 #include "scene.h"
 #include "stars.h"
 #include "theme.h"
+#include "typewriter.h"
 
 class ConstellationNowScene : public Scene {
 public:
@@ -276,34 +277,10 @@ public:
     };
     constexpr uint8_t kBaselineY[3] = { 14, 22, 30 };
 
-    constexpr uint32_t kCharMs  = 90;
-    constexpr uint32_t kPauseMs = 600;
-    constexpr uint32_t kHoldMs  = 2500;
-
-    const uint32_t span1 = lens[0] * kCharMs + kPauseMs;
-    const uint32_t span2 = lens[1] * kCharMs + kPauseMs;
-    const uint32_t span3 = lens[2] * kCharMs + kPauseMs;
-    const uint32_t total = span1 + span2 + span3 + kHoldMs;
-    const uint32_t t     = now_ms % total;
-    const uint32_t starts[3] = { 0u, span1, span1 + span2 };
-
-    uint8_t typed[3] = { 0, 0, 0 };
-    int8_t  active   = -1;
-    for (int i = 0; i < 3; ++i) {
-      if (t < starts[i]) {
-        typed[i] = 0;
-      } else {
-        const uint32_t local = t - starts[i];
-        const uint32_t typing_dur = lens[i] * kCharMs;
-        if (local < typing_dur) {
-          typed[i] = static_cast<uint8_t>(local / kCharMs);
-          active = static_cast<int8_t>(i);
-        } else {
-          typed[i] = lens[i];
-        }
-      }
-    }
-    const bool cursor_on = ((now_ms / 280u) & 1u) == 0u;
+    const typewriter::Schedule tw = typewriter::compute(now_ms, lens);
+    const uint8_t* typed     = tw.typed;
+    const int8_t   active    = tw.active;
+    const bool     cursor_on = tw.cursor_on;
 
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
