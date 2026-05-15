@@ -51,6 +51,7 @@
 #include "gfx_text.h"
 #include "iss_geometry.h"
 #include "iss_state.h"
+#include "iss_visibility.h"
 #include "scene.h"
 #include "sun_position.h"
 #include "theme.h"
@@ -79,12 +80,10 @@ public:
     iss_state::Snapshot iss;
     const bool iss_fresh = iss_state::get(now_ms, &iss);
 
-    // Derive look-angles + visibility every frame. Cheap (~150 µs
-    // for the geometry + ~30 µs per trig in sun::compute), called
-    // once per frame at most. Falls back to "not visible" when we
-    // don't have the inputs to decide (no fresh snapshot, no valid
-    // RTC time).
-    bool visible       = false;
+    // Derive look-angles every frame for the bearing readout. Cheap
+    // (~150 µs). Visibility evaluation is delegated to
+    // iss_visibility::is_visible_now() so the predicate has a single
+    // source of truth shared with the auto-switch tick on Core 0.
     bool have_position = false;
     int  bearing_deg   = 0;
     int  iss_elev_deg  = 0;
@@ -101,22 +100,8 @@ public:
       bearing_deg  = b;
       iss_elev_deg = static_cast<int>(la.elevation_deg + 0.5f);
       have_position = true;
-
-      // Visibility AND. Need a valid local time to compute the sun
-      // elevation; without it we conservatively call it not visible
-      // (better to say "VIS IN ..." until the RTC catches up than to
-      // claim a visible pass that might not exist).
-      const tod::Reading r = tod::now(now_ms);
-      if (r.valid && iss.sunlit && la.elevation_deg >= 0.0f) {
-        const int32_t utc_epoch = r.local_epoch
-            - static_cast<int32_t>(LOCAL_TZ_OFFSET_MIN) * 60;
-        const sun::Position sp =
-            sun::compute(utc_epoch, LATITUDE_DEG, LONGITUDE_DEG);
-        if (sp.altitude_deg <= -6.0f) {
-          visible = true;
-        }
-      }
     }
+    const bool visible = iss_visibility::is_visible_now(now_ms);
 
     // ── Build the three typewriter lines ────────────────────────────
     // ALT comes from MQTT (rounded km). CREW is the only optionally-

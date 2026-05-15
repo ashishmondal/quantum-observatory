@@ -3,6 +3,13 @@
 #include <WiFi.h>
 
 #include "config.h"
+#include "fm6126a_init.h"
+#include "info_status_publish.h"
+#include "ir_actions.h"
+#include "mqtt_edge.h"
+#include "rtc_poll.h"
+#include "stress_harness.h"
+#include "watchdog.h"
 #include "backgrounds.h"
 #include "color_palette.h"
 #include "ds3231.h"
@@ -17,34 +24,16 @@
 #include "mqtt_link.h"
 #include "iss_state.h"
 #include "iss_geometry.h"
+#include "iss_visibility.h"
 #include "sun_position.h"
 #include "jupiter_state.h"
 #include "constellation_state.h"
 #include "moon_state.h"
 #include "ir_remote.h"
 #include "buzzer.h"
+#include "compositor.h"
+#include "scene_registry.h"
 #include "scenes/scene.h"
-#include "scenes/layer.h"
-#include "scenes/fade_black_layer.h"
-#include "scenes/info_overlay_layer.h"
-#include "scenes/safety_overlay_layer.h"
-#include "scenes/background_scene.h"
-#include "scenes/boot_scene.h"
-#include "scenes/clock_scene.h"
-#include "scenes/color_cycle_scene.h"
-#include "scenes/giant_clock_scene.h"
-#include "scenes/font_demo_scene.h"
-#include "scenes/gfx_test_scene.h"
-#include "scenes/night_scene.h"
-#include "scenes/offline_scene.h"
-#include "scenes/iss_pass_scene.h"
-#include "scenes/jupiter_visibility_scene.h"
-#include "scenes/moon_phase_scene.h"
-#include "scenes/constellation_now_scene.h"
-#include "scenes/ir_test_scene.h"
-#include "scenes/splash_scene.h"
-#include "scenes/text_demo_scene.h"
-#include "scenes/thermal_safe_scene.h"
 uint8_t rgbPins[]  = {PIN_R1, PIN_G1, PIN_B1, PIN_R2, PIN_G2, PIN_B2};
 uint8_t addrPins[] = {PIN_A,  PIN_B,  PIN_C,  PIN_D};
 uint8_t clockPin   = PIN_CLK;
@@ -60,527 +49,27 @@ Adafruit_Protomatter matrix(
     PANEL_DOUBLE_BUFFER
 );
 
-// Static scene instances — never heap-allocated (NFR-2.2). Add new scenes
-// here as plain file-scope objects, then point g_current_scene at the one
-// you want active. The MQTT-driven dispatcher (`scene_for()`, phase 5.4)
-// reaches these by SceneId; instances marked `[[maybe_unused]]` are not
-// reached from any SceneId case yet but are kept linker-alive for the
-// next phase that wires them in.
-[[maybe_unused]] static BootScene             s_boot_scene;        // phase 1.5 demo
-[[maybe_unused]] static ClockScene            s_clock_scene;       // phase 1.4 demo
-[[maybe_unused]] static ColorCycleScene       s_color_cycle_scene; // smoke-test fallback
+// Scene instances and the SceneId→Scene* dispatcher live in
+// scene_registry.{h,cpp}. main.cpp resolves the active scene through
+// scene_registry::scene_for() / ::default_scene() so adding a scene
+// is one enum value (scene_state.h) + one switch case + one
+// file-scope instance (scene_registry.cpp) — no main.cpp edit needed
+// (NFR-5.1).
 
-// One BackgroundScene per BgType — each is just a thin wrapper that
-// dispatches to g_backgrounds. Adding a fourth bg type means: implement
-// *Bg.h, add enum value + dispatch case in backgrounds.h, declare another
-// instance here. (NFR-5.1 spirit, scaled down from full scenes.)
-static BackgroundScene s_bg_starfield(BgType::STARFIELD);
-static BackgroundScene s_bg_parallax(BgType::PARALLAX);
-static BackgroundScene s_bg_nebula  (BgType::NEBULA);
-static BackgroundScene s_bg_bitmap  (BgType::BITMAP);
-static BackgroundScene s_bg_image   (BgType::IMAGE);
-[[maybe_unused]] static TextDemoScene s_text_demo_scene;
-static GiantClockScene s_giant_clock_scene; // phase 3.5.3 — default room-clock view
-static NightScene      s_night_scene;       // phase 5.5.1 — LDR-triggered override
-static OfflineScene    s_offline_scene;     // phase 6.4 — MQTT-disconnect override
-static SplashScene     s_splash_scene;      // phase 6.5+ — boot splash override
-static ThermalSafeScene s_thermal_safe_scene; // phase 5.5.2 — DS3231-triggered override
-static GfxTestScene    s_gfx_test_scene;    // graphics smoke-test (FPS, palette cycle)
-static IssPassScene    s_iss_pass_scene;    // phase 7.1 — "ISS NOW" callout
-static MoonPhaseScene  s_moon_phase_scene;  // phase 7.2 — sticky moon disc + phase
-static JupiterVisibilityScene s_jupiter_visibility_scene; // phase 7.3 — Jupiter look-angles
-static ConstellationNowScene  s_constellation_now_scene;  // phase 7.4 — dynamic constellation art
-static IrTestScene            s_ir_test_scene;            // phase IR.1 — IR receiver POC readout
-static FontDemoScene          s_font_demo_scene;          // diagnostic: cycle Adafruit_GFX builtin fonts
-
-// Single "current scene" pointer; loop() just delegates to it. Swapping
-// scenes is one assignment — no other code changes. (NFR-5.1)
-static Scene* g_current_scene = &s_giant_clock_scene;
-
-// ─── Compositor layer adapters (FR-16.1, phase D.1) ──────────────────
-//
-// loop1() now walks a fixed `Layer*` array each frame instead of calling
-// g_current_scene->render() directly. For D.1 the only inhabitants are
-// adapters around the existing scene + chrome path, so the visual output
-// is unchanged. Future steps fill the empty overlay slots:
-//   D.2 crossfade  → installs a CrossfadeLayer in OVERLAY_TRANSITION
-//   D.3 overrides  → installs Night/Thermal/Offline/Splash overlays in
-//                    OVERLAY_SAFETY (replacing today's preempting SceneIds)
-//   D.8 toasts     → pushes ephemeral Layers into OVERLAY_TRANSITION
-//
-// Slot ordering is the compositor draw order (back-to-front).
-enum LayerSlot : uint8_t {
-  LAYER_FG = 0,           // active scene draws bg+fg here (legacy path)
-  LAYER_OVERLAY_SAFETY,   // night / thermal / offline / splash (D.3)
-  LAYER_OVERLAY_INFO,     // operator-triggered diagnostic overlay (IR.4)
-  LAYER_OVERLAY_TRANSITION, // crossfades (D.2), toasts (D.8)
-  LAYER_CHROME,           // shared HH:MM readout, future micro-indicators
-  LAYER_COUNT
-};
-
-// Foreground adapter — delegates to whatever Scene g_current_scene points
-// at. Lets the compositor treat the scene as just another Layer without
-// every Scene having to inherit from Layer (NFR-5.1: adding a scene stays
-// "registry entry + render function", no new base class).
-class SceneFgLayer final : public Layer {
-public:
-  const char* name() const override {
-    return g_current_scene ? g_current_scene->name() : "fg/none";
-  }
-  void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
-    if (g_current_scene != nullptr) {
-      g_current_scene->render(matrix, now_ms);
-    }
-  }
-};
-
-// Chrome adapter — the always-on HH:MM readout (FR-9.2). Honours the
-// active scene's wants_clock_chrome() opt-out so the giant clock isn't
-// defaced; when a safety override is fully covering the panel, the
-// override's hints win over the (invisible) underlying scene's, so
-// NIGHT / OFFLINE / THERMAL / SPLASH can suppress the corner readout
-// even when the bg scene wanted it. Future link-health dot work
-// layers in here; keeping it as a Layer means those additions don't
-// touch loop1().
-//
-// Forward-declared first so ChromeLayer::render() can query its
-// covering_override() — the actual instance lives below.
-static SafetyOverlayLayer s_safety_overlay_layer;  // D.3 firmware overrides (FR-16.2)
-
-class ChromeLayer final : public Layer {
-public:
-  const char* name() const override { return "chrome"; }
-  // When a safety override (NIGHT/THERMAL/OFFLINE/SPLASH) is fully
-  // covering the panel, both the chrome HH:MM readout and the
-  // theme-level decorations (FRAME_BORDER, SCANLINES) must consult
-  // the override scene's hints instead of the underlying Director
-  // scene's — g_current_scene still points at the (invisible) bg
-  // scene during ON, so its wants_*() answers are wrong to use.
-  //
-  // Without this, NIGHT's `wants_clock_chrome() == false` was
-  // ignored whenever the underlying scene happened to be a
-  // chrome-on one (clock_scene, iss, jupiter, moon, …), causing
-  // the small white HH:MM in the top-right corner to bleed through
-  // the deep-red night field — visible as the "occasionally the
-  // small time chrome appears in night mode" symptom. Same applies
-  // to Blade Runner's cyan FRAME_BORDER painting over NIGHT.
-  // (chrome added in phase T.7; override-aware in phase 6.6;
-  //  clock-chrome path made override-aware after night-mode regression)
-  void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
-    Scene* hint_scene = s_safety_overlay_layer.covering_override();
-    if (hint_scene == nullptr) hint_scene = g_current_scene;
-
-    if (hint_scene != nullptr && hint_scene->wants_clock_chrome()) {
-      gfx::draw_clock_chrome(matrix, now_ms);
-    }
-    if (hint_scene == nullptr || hint_scene->wants_theme_decorations()) {
-      gfx::draw_theme_decorations(matrix);
-    }
-  }
-};
-
-static SceneFgLayer s_layer_fg;
-static ChromeLayer  s_layer_chrome;
-static FadeBlackLayer s_fade_black_layer;  // D.2 scene transition (FR-16.3)
-static InfoOverlayLayer  s_info_overlay_layer;  // IR.4 operator diagnostic overlay (FR-17.8)
-
-// Cross-core IR.4 trigger. Core 0's action_ir_info_toggle() writes the
-// press timestamp; Core 1's InfoOverlayLayer edge-detects new values
-// and toggles the overlay envelope. Single naturally-aligned uint32 is
-// atomic on RP2040 — no mutex (CODING_PRACTICES §3, same pattern as
-// g_render_fps / g_render_alive_ms / g_first_frame_render_ms). Sentinel 0
-// = "no event ever fired" (matches the natural value at boot, so the
-// layer stays OFF until the first OK press).
-//
-// External linkage so info_overlay_layer.h can declare it via extern.
-volatile uint32_t g_info_overlay_event_ms = 0;
-
-// IR.4 diagnostic snapshot — Core 0 publishes these once per second
-// from the 1 Hz log tick; Core 1's InfoOverlayLayer reads them when
-// rendering the overlay. Published by Core 0 because the WiFi.* and
-// rp2040.getFreeHeap() entry points are not safe to call from Core 1
-// (radio SPI contention with the network stack; both cores hitting
-// the malloc subsystem). All four are naturally-aligned 32-bit
-// volatiles — atomic on RP2040 (CODING_PRACTICES §3). The four
-// values may be momentarily inconsistent across a publish boundary;
-// for a 5-second-visible diagnostic that's fine.
-volatile uint32_t g_info_ip          = 0;  // IPv4 packed: byte[0]<<0 | byte[1]<<8 | ...
-volatile int32_t  g_info_rssi_dbm    = 0;  // 0 when wifi not connected
-volatile uint32_t g_info_link_flags  = 0;  // bit 0 = wifi connected, bit 1 = mqtt connected
-volatile uint32_t g_info_free_heap_b = 0;  // bytes
-
-// Packed network status for IR.4 line 2. Bytes (LE):
-//   byte 0: wifi_link::State (0..3 — IDLE/CONNECTING/CONNECTED/DISCONNECTED)
-//   byte 1: mqtt_link::State (0..4 — IDLE/WAIT_WIFI/CONNECTING/CONNECTED/DISCONNECTED)
-//   byte 2: int8_t mqtt rc (PubSubClient::state() at last failure;
-//           re-interpret bits as int8_t on the reader side — 0xFE = -2 = SOCKET, etc.)
-//   byte 3: reserved (0)
-// Combined retry-backoff seconds — whichever layer is currently
-// retrying (wifi outage takes precedence; once wifi is up the mqtt
-// backoff drives the readout). 16-bit headroom; capped at the
-// FR-5.2 60 s ceiling so no clamping needed in practice.
-volatile uint32_t g_info_net_status    = 0;
-volatile uint32_t g_info_net_backoff_s = 0;
-
-// Pending swap target stashed when a fade starts. The actual
-// g_current_scene swap is deferred to the fade midpoint so the panel
-// is fully black during init(), masking any first-frame jitter.
-static scene_state::SceneId s_fade_pending_id = scene_state::SceneId::CLOCK;
-
-// FR-16.4 / phase D.7: armed by the post-swap branch in loop1() so
-// the very next rendered frame logs its elapsed render-time. Lets us
-// quantify the speculative-prepare win — pre-prepared scenes (e.g.
-// ConstellationNow with its projection cache primed during the fade)
-// should clock in close to steady-state, while a scene that bypasses
-// prepare() still pays its first-frame setup cost. One-shot — cleared
-// after the next [scene] first_frame_ms log line.
-static volatile bool s_first_frame_pending = false;
-
-// Compositor stack. Indexed by LayerSlot. Null entries are skipped.
-// File-scope so D.2/D.3/D.8 can install/remove layers from setter
-// functions without re-plumbing loop1().
-static Layer* g_layers[LAYER_COUNT] = {
-  &s_layer_fg,                 // LAYER_FG
-  &s_safety_overlay_layer,     // LAYER_OVERLAY_SAFETY     (D.3)
-  &s_info_overlay_layer,       // LAYER_OVERLAY_INFO       (IR.4)
-  &s_fade_black_layer,         // LAYER_OVERLAY_TRANSITION (D.2 / D.8)
-  &s_layer_chrome              // LAYER_CHROME
-};
-
-// Phase 4.2 dispatcher — maps a stable SceneId to one of the file-scope
-// Scene instances above. Returns nullptr for unknown ids (defensive
-// default for FR-1.3: malformed traffic must not crash). The list grows
-// in lockstep with scene_state::SceneId; per NFR-5.1 adding a scene is
-// (a) one new SceneId enum value + (b) one case here.
-static Scene* scene_for(scene_state::SceneId id) {
-  using SI = scene_state::SceneId;
-  switch (id) {
-    case SI::BOOT:         return &s_boot_scene;
-    case SI::CLOCK:        return &s_giant_clock_scene;
-    case SI::COLOR_CYCLE:  return &s_color_cycle_scene;
-    case SI::TEXT_DEMO:    return &s_text_demo_scene;
-    case SI::BG_STARFIELD: return &s_bg_starfield;
-    case SI::BG_PARALLAX:  return &s_bg_parallax;
-    case SI::BG_NEBULA:    return &s_bg_nebula;
-    case SI::BG_BITMAP:    return &s_bg_bitmap;
-    case SI::BG_IMAGE:     return &s_bg_image;
-    case SI::NIGHT:        return &s_night_scene;
-    case SI::OFFLINE:      return &s_offline_scene;
-    case SI::SPLASH:       return &s_splash_scene;
-    case SI::THERMAL_SAFE: return &s_thermal_safe_scene;
-    case SI::GFX_TEST:     return &s_gfx_test_scene;
-    case SI::ISS_PASS:     return &s_iss_pass_scene;
-    case SI::MOON_PHASE:   return &s_moon_phase_scene;
-    case SI::JUPITER_VISIBILITY: return &s_jupiter_visibility_scene;
-    case SI::CONSTELLATION_NOW:  return &s_constellation_now_scene;
-    case SI::IR_TEST:            return &s_ir_test_scene;
-    case SI::FONT_DEMO:          return &s_font_demo_scene;
-  }
-  return nullptr;
-}
+// Active scene + compositor layer stack + render telemetry +
+// fade-swap state machine all live in compositor.{h,cpp}.
+// main.cpp's loop1() body is just `compositor::tick(matrix, now_ms)`.
 
 // ─── ISS visibility auto-switch (phase 7.1++) ────────────────────────
-//
-// When the on-device three-way AND for ISS visibility flips true
-// (sunlit ∧ observer in twilight ∧ above horizon — same logic the
-// iss_pass scene's render path uses every frame), pre-empt whatever
-// is on-screen with the ISS_PASS scene at priority 4 sticky and play
-// a short "ta-da" alert melody. The user can leave the scene any
-// time via IR or MQTT — those paths set user_intent=true on
-// scene_state::request() so they bypass the priority gate. Once the
-// user overrides, the auto-switch does NOT re-yank them back; it
-// only fires again on the NEXT visibility rising edge (i.e. the
-// next pass).
-//
-// Cadence: rate-limited to ~1 Hz inside the tick (passes are
-// minute-scale events; sub-second poll is pointless and just burns
-// trig). ~150 µs per evaluation when it does run.
-//
-// FR-10.1 (priority ≥ 4 scenes get audible alerts) + FR-10.5
-// (≥ 8 kHz floor) + FR-10.7-style melody scheduler (≤ 1500 ms,
-// non-blocking via buzzer::play()).
-namespace {
-
-// "Ta-da!" — three rising notes that read as a triumphant alert.
-// All ≥ 8 kHz per FR-10.5; sum (60+30+220 = 310 ms note + ~30 ms
-// inter-note gaps from start_current_note's deadline math) well
-// under the 1500 ms FR-10.7 cap. Distinct from any theme melody so
-// the operator can tell ISS-rise from theme-change by ear alone.
-// "Ta-da!" — G5 → B5 → E6 ascending major triad. Real musical
-// pitches in the C5..C6 sweet spot of the carrier piezo so the
-// rising shape is actually parsed as triumphant rather than as
-// "another shrill beep". Distinct from any theme melody so the
-// operator can tell ISS-rise from theme-change by ear. Total =
-// 80+40+240 = 360 ms (well under the 1500 ms FR-10.7 cap).
-constexpr buzzer::Note kIssVisibleMelody[] = {
-    { 784,  80},   // G5  — "ta"
-    { 988,  40},   // B5  — (lift)
-    {1319, 240},   // E6  — "da!" held
-};
-constexpr uint8_t kIssVisibleMelodyCount =
-    sizeof(kIssVisibleMelody) / sizeof(kIssVisibleMelody[0]);
-
-// True iff (a) we have a fresh iss_state snapshot, (b) ISS is
-// sunlit, (c) observer's local sun elevation ≤ -6° (civil twilight
-// or darker), AND (d) ISS is above the observer horizon. Mirrors
-// the scene's per-frame logic in iss_pass_scene.h::render() — kept
-// in one helper to avoid the rule drifting in two places.
-bool iss_visible_now(uint32_t now_ms) {
-  iss_state::Snapshot iss;
-  if (!iss_state::get(now_ms, &iss)) return false;
-  if (!iss.sunlit) return false;
-
-  const tod::Reading r = tod::now(now_ms);
-  if (!r.valid) return false;
-
-  const iss_geom::LookAngles la = iss_geom::look_angles(
-      LATITUDE_DEG, LONGITUDE_DEG,
-      iss.iss_lat_deg, iss.iss_lon_deg,
-      static_cast<float>(iss.altitude_km));
-  if (la.elevation_deg < 0.0f) return false;
-
-  const int32_t utc_epoch = r.local_epoch
-      - static_cast<int32_t>(LOCAL_TZ_OFFSET_MIN) * 60;
-  const sun::Position sp =
-      sun::compute(utc_epoch, LATITUDE_DEG, LONGITUDE_DEG);
-  return sp.altitude_deg <= -6.0f;
-}
-
-// Edge-detector + auto-switch + ta-da. Call from Core 0 loop().
-// Internal 1 Hz rate-limit keeps the trig cost under the radar.
-void iss_visibility_tick(uint32_t now_ms) {
-  static uint32_t s_last_check_ms = 0;
-  static bool     s_was_visible   = false;
-  static bool     s_initialized   = false;
-
-  // 1 Hz cadence; first call always evaluates so the boot snapshot
-  // doesn't sit on an artificial "not visible" assumption.
-  if (s_initialized && (now_ms - s_last_check_ms) < 1000u) return;
-  s_last_check_ms = now_ms;
-
-  const bool now_visible = iss_visible_now(now_ms);
-
-  // Suppress the rising edge on the very first evaluation: if the
-  // panel boots into an in-progress pass we don't want a stale
-  // ta-da on second 1. The user can navigate to the ISS scene
-  // manually, and the next pass's true rising edge will fire.
-  if (!s_initialized) {
-    s_was_visible = now_visible;
-    s_initialized = true;
-    return;
-  }
-
-  if (now_visible && !s_was_visible) {
-    // Rising edge — fire the auto-switch + ta-da. Sticky at
-    // priority 4 so a low-priority Director cycle can't yank us
-    // out, but user_intent=true on IR/MQTT requests defeats the
-    // sticky lock if the operator wants to look at something else.
-    Serial.println("[iss] visibility rising edge → auto-switch + ta-da");
-    scene_state::request(scene_state::SceneId::ISS_PASS,
-                         /*priority=*/4,
-                         /*duration_s=*/0,   // ignored when sticky
-                         /*sticky=*/true,
-                         /*user_intent=*/false);  // firmware-initiated
-    buzzer::play(kIssVisibleMelody, kIssVisibleMelodyCount);
-  } else if (!now_visible && s_was_visible) {
-    // Falling edge — pass ended. If we're still on the auto-switched
-    // ISS scene (i.e. the operator didn't navigate away during the
-    // pass) clear the sticky so the default CLOCK takes over after
-    // the standard fade. If they DID navigate away, leave their
-    // chosen scene alone.
-    Serial.println("[iss] visibility falling edge");
-    if (scene_state::current() == scene_state::SceneId::ISS_PASS) {
-      scene_state::clear_sticky();
-    }
-  }
-
-  s_was_visible = now_visible;
-}
-
-}  // namespace
+// Predicate + edge-detector + auto-switch live in iss_visibility.{h,cpp}
+// — kept out of main.cpp so the rule has a single source of truth shared
+// with IssPassScene::render.
 
 // ─── IR remote dispatch (FR-17.5, phase IR.3) ────────────────────────
-//
-// Each accepted IR press lands in one of the action_ir_* functions
-// below via the dispatch table installed in setup(). All actions
-// route through scene_state::request() at the operator-cycle
-// priority/duration documented in FR-17.6 — and pass user_intent=true
-// so they bypass the FR-2.1 priority gate even when a sticky
-// firmware-initiated scene (e.g. the priority-4 ISS auto-switch) is
-// active. The remote is the operator's "I am here, I am driving"
-// signal; sticky scenes must never lock it out.
-//
-// `kRemoteCycle` lives in config.h so any future input mode (on-board
-// buttons, voice, etc.) can share the same ordered list.
-static constexpr uint8_t  kRemoteCyclePriority = 1;     // FR-17.6
-static constexpr uint16_t kRemoteCycleDurationS = 120;  // FR-17.6
-
-// Find the cycle index of the currently-active scene. Returns
-// kRemoteCycleCount when the active scene isn't in the cycle list
-// (e.g. operator is sitting on GFX_TEST or an ISS_PASS preempt).
-static uint8_t remote_cycle_index_of_current() {
-  const scene_state::SceneId cur = scene_state::current();
-  for (uint8_t i = 0; i < kRemoteCycleCount; ++i) {
-    if (kRemoteCycle[i] == cur) return i;
-  }
-  return kRemoteCycleCount;
-}
-
-// Common backbone for ▲ (delta=+1) and ▼ (delta=-1). When the active
-// scene isn't in the cycle list, ▲ lands on entry 0 and ▼ on the last
-// entry — feels natural because the operator's mental model is "step
-// into the curated list".
-static void remote_cycle_step(int8_t delta) {
-  const uint8_t cur = remote_cycle_index_of_current();
-  uint8_t next;
-  if (cur == kRemoteCycleCount) {
-    next = (delta > 0) ? 0u : (kRemoteCycleCount - 1u);
-  } else {
-    // Modular step that handles delta=±1 without underflow on uint8_t.
-    next = static_cast<uint8_t>(
-        (cur + kRemoteCycleCount + (delta > 0 ? 1 : -1)) % kRemoteCycleCount);
-  }
-  scene_state::request(kRemoteCycle[next],
-                       kRemoteCyclePriority,
-                       kRemoteCycleDurationS,
-                       /*sticky=*/false,
-                       /*user_intent=*/true);  // IR press always wins
-}
-
-static void action_ir_scene_next(uint16_t /*addr*/, uint16_t /*cmd*/) {
-  remote_cycle_step(+1);
-}
-static void action_ir_scene_prev(uint16_t /*addr*/, uint16_t /*cmd*/) {
-  remote_cycle_step(-1);
-}
-
-// FR-17.5 Back: clear any sticky scene + return to default CLOCK; also
-// dismiss the boot splash if it's still latched (covers a power-on
-// scenario where MQTT is unavailable and the operator wants to skip
-// the splash from the couch).
-static void action_ir_back(uint16_t /*addr*/, uint16_t /*cmd*/) {
-  scene_state::set_splash_active(false);
-  scene_state::clear_sticky();
-  // clear_sticky() is a no-op when no sticky is active — explicitly
-  // request CLOCK so non-sticky scenes also get sent home.
-  scene_state::request(scene_state::SceneId::CLOCK,
-                       kRemoteCyclePriority,
-                       kRemoteCycleDurationS,
-                       /*sticky=*/false,
-                       /*user_intent=*/true);  // IR press always wins
-}
-
-// FR-17.5 Home: jump straight to default CLOCK without clearing any
-// sticky state. Behaves like Back for non-sticky scenes; for sticky
-// scenes (e.g. moon_phase) the sticky is preserved and a subsequent
-// scene cycle will return to it once Home's 120 s duration expires.
-static void action_ir_home(uint16_t /*addr*/, uint16_t /*cmd*/) {
-  scene_state::request(scene_state::SceneId::CLOCK,
-                       kRemoteCyclePriority,
-                       kRemoteCycleDurationS,
-                       /*sticky=*/false,
-                       /*user_intent=*/true);  // IR press always wins
-}
-
-// FR-17.8 / IR.4 — toggle the diagnostic info overlay. Hand the press
-// timestamp to Core 1's InfoOverlayLayer via the cross-core volatile;
-// the layer's edge-detector treats any change as a toggle (visible →
-// fade out, hidden → fade in). Pin the value to >= 1 so a press at
-// millis() == 0 (impossible in practice, but defensive) doesn't look
-// like the boot sentinel. No publish-on-press — the action is
-// self-evident on the panel and IR.6 will add the chrome-flash
-// observability for mqtt-routed buttons separately.
-static void action_ir_info_toggle(uint16_t /*addr*/, uint16_t /*cmd*/) {
-  uint32_t ts = millis();
-  if (ts == 0u) ts = 1u;
-  g_info_overlay_event_ms = ts;
-}
-
-// LEFT / RIGHT — theme cycle (FR-17.10 / IR.5). Goes through
-// theme::cycle() so the next-frame swap (FR-15.4) and the status-
-// heartbeat echo (FR-15.7) are preserved — same code path MQTT uses.
-// Carveout: while sitting on the FONT_DEMO diagnostic, route ◄/► to
-// FontDemoScene's font picker instead so the diagnostic stays usable
-// from the couch. FONT_DEMO is reachable only via explicit MQTT, so
-// the carveout doesn't surprise an operator browsing scenes.
-static void action_ir_left(uint16_t /*addr*/, uint16_t /*cmd*/) {
-  if (scene_state::current() == scene_state::SceneId::FONT_DEMO) {
-    s_font_demo_scene.cycle(-1);
-    return;
-  }
-  theme::cycle(-1);
-}
-static void action_ir_right(uint16_t /*addr*/, uint16_t /*cmd*/) {
-  if (scene_state::current() == scene_state::SceneId::FONT_DEMO) {
-    s_font_demo_scene.cycle(+1);
-    return;
-  }
-  theme::cycle(+1);
-}
-
-// FR-17.5 dispatch table. Pointer + count handed to ir_remote in
-// setup(); ir_remote stores the pointer (table outlives the program
-// because it's file-scope). `honour_repeats=false` everywhere because
-// every action is discrete (FR-17.4 — long-press must not stampede).
-// LEFT/RIGHT are wired here as scene-scoped (FontDemoScene consumes;
-// every other scene no-ops) so the font-picker is reachable from the
-// couch. OPTIONS (mqtt-routed, IR.6) is still intentionally absent.
-static constexpr ir_remote::DispatchEntry kIrDispatch[] = {
-    {kIrButtonUpCmd,      ir_remote::Lane::LOCAL, false, &action_ir_scene_next, "up"},
-    {kIrButtonDownCmd,    ir_remote::Lane::LOCAL, false, &action_ir_scene_prev, "down"},
-    {kIrButtonOkCmd,      ir_remote::Lane::LOCAL, false, &action_ir_info_toggle, "ok"},
-    {kIrButtonBackCmd,    ir_remote::Lane::LOCAL, false, &action_ir_back,       "back"},
-    {kIrButtonHomeCmd,    ir_remote::Lane::LOCAL, false, &action_ir_home,       "home"},
-    {kIrButtonLeftCmd,    ir_remote::Lane::LOCAL, false, &action_ir_left,       "left"},
-    {kIrButtonRightCmd,   ir_remote::Lane::LOCAL, false, &action_ir_right,      "right"},
-};
-static constexpr uint8_t kIrDispatchCount =
-    sizeof(kIrDispatch) / sizeof(kIrDispatch[0]);
-
-// FM6126A / ICN2038 init sequence (required by the Waveshare P3 64x32 panel
-// before any image will appear). Ported verbatim from the working Waveshare
-// Pico C++ SDK demo driver_RGBMatrix.cpp::picoRGBMatrixDeviceInit().
-// Writes control registers 12 and 13.
-static void fm6126a_init() {
-  const uint8_t rgb[6] = {PIN_R1, PIN_G1, PIN_B1, PIN_R2, PIN_G2, PIN_B2};
-  const uint8_t addr[5] = {PIN_A, PIN_B, PIN_C, PIN_D, PIN_E};
-
-  for (uint8_t p : rgb)  { pinMode(p, OUTPUT); digitalWrite(p, LOW); }
-  for (uint8_t p : addr) { pinMode(p, OUTPUT); digitalWrite(p, LOW); }
-  pinMode(PIN_CLK, OUTPUT); digitalWrite(PIN_CLK, LOW);
-  pinMode(PIN_STB, OUTPUT); digitalWrite(PIN_STB, LOW);
-  pinMode(PIN_OE,  OUTPUT); digitalWrite(PIN_OE,  HIGH); // blank
-
-  const int MaxLed = 64;
-  const int C12[16] = {0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-  const int C13[16] = {0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0};
-
-  // Register 12
-  for (int l = 0; l < MaxLed; l++) {
-    int y = l % 16;
-    int v = C12[y] ? HIGH : LOW;
-    for (uint8_t p : rgb) digitalWrite(p, v);
-    digitalWrite(PIN_STB, (l > MaxLed - 12) ? HIGH : LOW);
-    digitalWrite(PIN_CLK, HIGH);
-    delayMicroseconds(2);
-    digitalWrite(PIN_CLK, LOW);
-  }
-  digitalWrite(PIN_STB, LOW);
-  digitalWrite(PIN_CLK, LOW);
-
-  // Register 13
-  for (int l = 0; l < MaxLed; l++) {
-    int y = l % 16;
-    int v = C13[y] ? HIGH : LOW;
-    for (uint8_t p : rgb) digitalWrite(p, v);
-    digitalWrite(PIN_STB, (l > MaxLed - 13) ? HIGH : LOW);
-    digitalWrite(PIN_CLK, HIGH);
-    delayMicroseconds(2);
-    digitalWrite(PIN_CLK, LOW);
-  }
-  digitalWrite(PIN_STB, LOW);
-  digitalWrite(PIN_CLK, LOW);
-}
+// All action_ir_* functions and the kIrDispatch[] table live in
+// ir_actions.{h,cpp}. main.cpp only has to call
+// ir_actions::install_dispatch_table(scene_registry::font_demo()) once
+// during setup() to bind the receiver.
 
 ProtomatterStatus g_status = PROTOMATTER_ERR_PINS;
 
@@ -595,48 +84,9 @@ ProtomatterStatus g_status = PROTOMATTER_ERR_PINS;
 // SceneState + mutex_t. (added in phase 4.1)
 static volatile bool s_core0_ready = false;
 
-// Core 1 → Core 0 FPS report. Written by loop1() once per second,
-// read by loop() to print. Single naturally-aligned uint32_t write,
-// reader tolerates a slightly stale value (it's a diagnostic), so no
-// mutex needed. Keeping ALL Serial output on Core 0 avoids USB CDC
-// interrupts disrupting Protomatter's PIO/DMA timing on Core 1 — the
-// otherwise-unexplained "subtle once-per-second flicker".
-//
-// External linkage (NOT `static`) so mqtt_link.cpp can declare
-// `extern volatile uint32_t g_render_fps` and surface this in the
-// observatory/status heartbeat (§5.4).
-volatile uint32_t g_render_fps = 0;
-
-// Core 1 → Core 0 liveness heartbeat for the NFR-3.2 watchdog.
-// loop1() writes millis() every iteration (cheap — even when frame-
-// capped). loop() compares against now and only feeds the WDT when
-// the heartbeat is fresh, so a Core 1 stall ≥ kRenderStallMs ends in
-// a chip reset. Sentinel 0 = "Core 1 hasn't published yet"; Core 0
-// keeps feeding the WDT during the boot window so the chip doesn't
-// kill itself before setup1() runs. (added in phase 6.5)
-static volatile uint32_t g_render_alive_ms = 0;
-
-// Core 1 → Core 0 idle-slack telemetry (FR-16.9). Rolling average of
-// `kFrameIntervalMs - actual_render_time` over the last 32 rendered
-// frames, in milliseconds. Same atomic-uint32 pattern as g_render_fps:
-// Core 1 publishes once per frame, Core 0 reads from the MQTT status
-// builder. Quantifies how much headroom D.6 (sky-model) and D.7
-// (Scene::prepare) have to play with on the current scene mix. A
-// rising-with-load `render_slack_ms` falling toward zero is the
-// canary for FR-3.1 violations before they're visible as dropped
-// frames. Skipped frames (frame cap early-return) don't sample —
-// only frames where matrix.show() actually ran. (added in phase D.5)
-//
-// External linkage so mqtt_link.cpp can declare
-// `extern volatile uint32_t g_render_slack_ms` for the §5.4 heartbeat.
-volatile uint32_t g_render_slack_ms = 0;
-
-// Core 1 → Core 0 first-frame-after-swap render time (ms), one-shot.
-// Set by loop1() the frame after a Scene swap; printed and cleared by
-// loop() at its next 1 Hz log tick. Sentinel 0 = no fresh value.
-// Diagnostic only — phase D.7 (FR-16.4) uses this to confirm the
-// speculative prepare() actually amortizes the swap cost.
-static volatile uint32_t g_first_frame_render_ms = 0;
+// Render telemetry (g_render_fps, g_render_alive_ms, g_render_slack_ms,
+// g_first_frame_render_ms) is defined in compositor.cpp; main.cpp's
+// loop() reads them through compositor.h declarations.
 
 void setup() {
   Serial.begin(115200);
@@ -750,8 +200,7 @@ void setup() {
   // accepted press routes through scene_state::request() at priority
   // 1 / duration 120 s so a real ISS pass (priority 4) can still
   // preempt a couch-driven scene cycle (FR-17.6).
-  ir_remote::set_dispatch(kIrDispatch, kIrDispatchCount,
-                          IR_REMOTE_ADDR_EXPECTED);
+  ir_actions::install_dispatch_table(scene_registry::font_demo());
 
   // Optional one-shot bootstrap. Define RTC_SEED_LOCAL_EPOCH (e.g. via
   // platformio.ini build_flags or secrets.h) to seed the chip with a
@@ -781,8 +230,7 @@ void setup() {
   // reset. Begin AFTER s_core0_ready so the boot path itself can't
   // race the WDT, but BEFORE network init so any non-blocking radio
   // bring-up is also covered.
-  rp2040.wdt_begin(8000);
-  Serial.println("[wdt] enabled timeout=8000ms");
+  watchdog::begin();
 
   // Kick off Wi-Fi after the cross-core handshake so any radio init
   // serial chatter doesn't race the [boot] line. Non-blocking — the
@@ -840,7 +288,7 @@ void loop() {
   // IR/MQTT at any time (those paths set user_intent=true so they
   // beat the sticky); a falling edge clears the sticky only when
   // ISS_PASS is still the active scene.
-  iss_visibility_tick(now_ms);
+  iss_visibility::tick(now_ms);
 
   // FR-17.5 / IR.3 — the IrTestScene learning wizard (phase IR.2)
   // captures NEC frames directly off ir_remote::stats() and would be
@@ -876,36 +324,9 @@ void loop() {
     }
   }
 
-  // Phase 6.4: MQTT-disconnect override (FR-5.1). Edge-detect on
-  // mqtt_link::connected() so we only wake the renderer when the
-  // link state actually flips. set_offline_active() itself is
-  // already a same-state no-op, but the explicit edge keeps the log
-  // single-line per transition. The 1 s loop cadence puts us well
-  // under FR-5.1's 5 s switch-to-offline budget.
-  {
-    static bool s_was_connected = false;
-    static bool s_init_done     = false;
-    static bool s_splash_cleared = false;
-    const bool now_connected = mqtt_link::connected();
-    if (!s_init_done || now_connected != s_was_connected) {
-      scene_state::set_offline_active(!now_connected);
-      if (s_init_done) {
-        Serial.print("[mqtt] link ");
-        Serial.println(now_connected ? "online" : "offline");
-      }
-      s_was_connected = now_connected;
-      s_init_done     = true;
-    }
-    // Clear the boot splash on the first time MQTT comes up — the
-    // device is now fully online and the operator-facing default
-    // scene should take over. Latched: subsequent disconnects fall
-    // through the normal offline override, not back to splash.
-    if (now_connected && !s_splash_cleared) {
-      scene_state::set_splash_active(false);
-      s_splash_cleared = true;
-      Serial.println("[splash] cleared (first mqtt connect)");
-    }
-  }
+  // Phase 6.4 / FR-5.1 — MQTT-disconnect override + boot-splash
+  // dismissal. Both edge detectors live in mqtt_edge.cpp.
+  mqtt_edge::tick(now_ms);
 
   // Phase 6.2: drive scene-lifecycle expiry (FR-2.3 duration revert,
   // FR-2.4 hard 1 h TTL). Cheap when nothing is due; on expiry,
@@ -920,52 +341,9 @@ void loop() {
     Serial.print("[render] fps=");
     Serial.println(static_cast<unsigned long>(g_render_fps));
 
-    // IR.4 diagnostic snapshot publish (FR-17.8). Core 1's
-    // InfoOverlayLayer reads these atomically; recompute on the same
-    // 1 Hz cadence as the render-FPS log so the overlay's content is
-    // never more than a second stale. Cheap — four reads of state
-    // already in cache.
-    {
-      const IPAddress ip = WiFi.localIP();
-      g_info_ip = (static_cast<uint32_t>(ip[0])      ) |
-                  (static_cast<uint32_t>(ip[1]) <<  8) |
-                  (static_cast<uint32_t>(ip[2]) << 16) |
-                  (static_cast<uint32_t>(ip[3]) << 24);
-      g_info_rssi_dbm    = wifi_link::connected()
-                              ? static_cast<int32_t>(WiFi.RSSI())
-                              : 0;
-      g_info_link_flags  = (wifi_link::connected() ? 0x1u : 0u) |
-                           (mqtt_link::connected() ? 0x2u : 0u);
-      g_info_free_heap_b = static_cast<uint32_t>(rp2040.getFreeHeap());
-
-      // Packed net status for the IR.4 line-2 error readout (see
-      // g_info_net_status declaration above for the byte layout).
-      // Wi-Fi outage takes precedence — until the link is back up
-      // the broker can't be reached anyway, so showing the MQTT
-      // failure mode would be misleading. Once Wi-Fi is up we
-      // surface mqtt_link's last_rc() so the panel distinguishes
-      // "HA host unreachable" (rc=-2 SOCKET — the boot-loop case
-      // that motivated this readout) from "auth refused" (rc=4),
-      // "broker overloaded" (rc=3), etc.
-      {
-        const uint8_t wifi_st = static_cast<uint8_t>(wifi_link::state());
-        const uint8_t mqtt_st = static_cast<uint8_t>(mqtt_link::state());
-        const uint8_t mqtt_rc = static_cast<uint8_t>(mqtt_link::last_rc());
-        g_info_net_status = static_cast<uint32_t>(wifi_st)
-                          | (static_cast<uint32_t>(mqtt_st) <<  8)
-                          | (static_cast<uint32_t>(mqtt_rc) << 16);
-        const uint32_t wifi_backoff_ms = wifi_link::backoff_ms();
-        const uint32_t mqtt_backoff_ms = mqtt_link::backoff_ms();
-        // Show whichever layer is currently the bottleneck. If
-        // Wi-Fi is down its backoff is what the operator is waiting
-        // on; if Wi-Fi is up but MQTT is retrying, the MQTT
-        // backoff is the live timer.
-        const uint32_t backoff_ms_eff = wifi_link::connected()
-                                          ? mqtt_backoff_ms
-                                          : wifi_backoff_ms;
-        g_info_net_backoff_s = (backoff_ms_eff + 999u) / 1000u;
-      }
-    }
+    // FR-17.8 / IR.4 — republish the diagnostic snapshot Core 1's
+    // InfoOverlayLayer reads.
+    info_status::publish();
 
     // FR-16.4 / phase D.7 — flush any pending first-frame timing.
     // One-shot: cleared after the print so a steady scene with no
@@ -981,37 +359,9 @@ void loop() {
       }
     }
 
-    // RTC poll cadence:
-    //   - Default: every 1 hour. DS3231 drift is ~2 ppm (≈7 s/month),
-    //     so the millis() projection in tod::now() is more than
-    //     accurate enough between hourly resyncs.
-    //   - Glitch handling: poll_validated() rejects readings that
-    //     differ from the projected wall-clock by more than 3 hours
-    //     (covers DST jumps, MQTT-driven set_from_mqtt corrections,
-    //     and outright corruption). On reject we re-try with
-    //     exponential backoff: 1 s → 2 s → 4 s → ... → 1 h, resetting
-    //     to the 1 h cadence on the first accept.
-    //   - First poll: scheduled immediately so chrome leaves "--:--"
-    //     ASAP after boot.
-    static uint32_t s_next_poll_at_ms = 0;
-    static uint32_t s_backoff_ms      = 1000u;
-    static constexpr uint32_t kPollOk_ms   = 60u * 60u * 1000u;  // 1 h
-    static constexpr uint32_t kBackoffCap  = kPollOk_ms;
-    static constexpr uint32_t kMaxJumpSec  = 3u * 60u * 60u;     // 3 h
-    if (static_cast<int32_t>(now_ms - s_next_poll_at_ms) >= 0) {
-      const bool accepted = tod::poll_validated(now_ms, kMaxJumpSec);
-      if (accepted) {
-        s_next_poll_at_ms = now_ms + kPollOk_ms;
-        s_backoff_ms      = 1000u;
-      } else {
-        s_next_poll_at_ms = now_ms + s_backoff_ms;
-        s_backoff_ms      = (s_backoff_ms >= kBackoffCap / 2u)
-                              ? kBackoffCap
-                              : (s_backoff_ms * 2u);
-        Serial.print("[time] poll rejected, retry in ms=");
-        Serial.println(static_cast<unsigned long>(s_backoff_ms));
-      }
-    }
+    // RTC poll cadence (1 h on accept, exponential backoff on
+    // reject) — drives tod::poll_validated(). FR-9.5 / FR-13.5.
+    rtc_poll::tick(now_ms);
 
     const tod::Reading r = tod::now(now_ms);
     if (r.valid) {
@@ -1041,96 +391,13 @@ void loop() {
     // panel readout is the diagnostic.
   }
 
-  // Phase 4.3 stress test: hammer Core 0 with a CPU-bound loop that
-  // simulates the JSON-parse + checksum cost a real MQTT message would
-  // incur (NFR-1.1 / NFR-3.1 validation). Off by default; enable with
-  //   build_flags = -DCORE0_STRESS
-  // and watch [render] fps=… on Core 1 — it MUST stay flat vs. baseline.
-  // The buffer is sized to the documented Scene Contract budget
-  // (NFR-2.3: 512 B for §5.1 payload + headroom). Static allocation,
-  // no heap, no float (NFR-2.2 / NFR-1.3) so the workload itself can't
-  // be blamed for any rendering hiccup.
-#ifdef CORE0_STRESS
-  {
-    static uint8_t  s_stress_buf[512];
-    static uint32_t s_stress_iters = 0;
-    static uint32_t s_stress_last_log_ms = 0;
-    // Representative payload: largest documented Scene Contract example
-    // (REQUIREMENTS §5.1) padded to fill the buffer. Copying it in is
-    // cheaper than memset but pulls real bytes through the cache.
-    static const char kPayload[] =
-        "{\"scene_id\":\"jupiter_visibility\",\"priority\":3,"
-        "\"duration\":30,\"sticky\":false,"
-        "\"overrides\":{\"text\":\"Visible: East @ 9PM\",\"val\":\"78\"}}";
-    constexpr size_t kPayloadLen = sizeof(kPayload) - 1;
-    // memcpy + a rolling checksum. ~2-3 µs per pass on RP2040 — tight
-    // enough to saturate Core 0 between the 10 ms delay() calls.
-    for (int i = 0; i < 200; ++i) {
-      memcpy(s_stress_buf, kPayload,
-             kPayloadLen < sizeof(s_stress_buf) ? kPayloadLen
-                                                : sizeof(s_stress_buf));
-      uint32_t sum = 0;
-      for (size_t j = 0; j < sizeof(s_stress_buf); ++j) {
-        sum = sum * 31u + s_stress_buf[j];
-      }
-      // Side-effect on a static so the optimiser can't elide the loop.
-      s_stress_iters += sum;
-    }
-    if (now_ms - s_stress_last_log_ms >= 1000u) {
-      s_stress_last_log_ms = now_ms;
-      Serial.print("[stress] core0 iters=");
-      Serial.println(static_cast<unsigned long>(s_stress_iters));
-    }
-  }
-#endif
+  // Optional stress harnesses (CORE0_STRESS / CORE0_MQTT_FLOOD) — both
+  // compile away when their macro isn't defined.
+  stress_harness::tick(now_ms);
 
-  // Phase D.4 / FR-16.7 stress test: hammer scene_state::request() at
-  // 20 Hz alternating between two scenes, simulating a Director (or
-  // adversary) flooding observatory/scene. Validates that the seqlock
-  // read path on Core 1 (take_pending / read_overrides) doesn't stall
-  // on writer pressure \u2014 [render] fps=… should stay flat at the
-  // kFrameIntervalMs cap. Off by default; enable with
-  //   build_flags = -DCORE0_MQTT_FLOOD
-#ifdef CORE0_MQTT_FLOOD
-  {
-    static uint32_t s_flood_last_ms = 0;
-    static uint32_t s_flood_count = 0;
-    static uint32_t s_flood_log_ms = 0;
-    static bool     s_flood_toggle = false;
-    if (now_ms - s_flood_last_ms >= 50u) {  // 20 Hz
-      s_flood_last_ms = now_ms;
-      const auto id = s_flood_toggle ? scene_state::SceneId::CLOCK
-                                     : scene_state::SceneId::BG_NEBULA;
-      s_flood_toggle = !s_flood_toggle;
-      // priority 1 (default), short duration so tick() doesn't fight us.
-      scene_state::request(id, 1, 30, false);
-      ++s_flood_count;
-    }
-    if (now_ms - s_flood_log_ms >= 1000u) {
-      s_flood_log_ms = now_ms;
-      Serial.print("[flood] requests=");
-      Serial.println(static_cast<unsigned long>(s_flood_count));
-    }
-  }
-#endif
-
-  // NFR-3.2 watchdog feed. Two states:
-  //   (a) Boot window — Core 1 hasn't published a heartbeat yet
-  //       (g_render_alive_ms == 0). Always feed so the WDT can't
-  //       fire while setup1() is still running FM6126A init.
-  //   (b) Steady state — only feed if Core 1's heartbeat is within
-  //       kRenderStallMs. Past that, stop feeding and let the chip
-  //       reset (~8 s timeout per rp2040.wdt_begin in setup()).
-  // Core 0 itself is also covered: anything in this loop() that
-  // blocks longer than the WDT timeout simply never reaches this
-  // call → reset.
-  {
-    static constexpr uint32_t kRenderStallMs = 4000u;  // half the WDT timeout
-    const uint32_t alive = g_render_alive_ms;
-    if (alive == 0u || (now_ms - alive) < kRenderStallMs) {
-      rp2040.wdt_reset();
-    }
-  }
+  // NFR-3.2 watchdog feed — only re-arms when Core 1's heartbeat is
+  // fresh; a stall on either core trips a reset.
+  watchdog::tick(now_ms, g_render_alive_ms);
 
   delay(10);
 }
@@ -1149,202 +416,20 @@ void setup1() {
   }
 
   // Run the FM6126A unlock/init BEFORE Protomatter takes over the pins.
-  fm6126a_init();
+  fm6126a::init();
 
   g_status = matrix.begin();
 
   if (g_status == PROTOMATTER_OK) {
     // Seed every background's deterministic state once. Cheap; no heap.
     g_backgrounds.init_all(matrix);
-  }
 
-  if (g_status == PROTOMATTER_OK && g_current_scene != nullptr) {
-    g_current_scene->init(matrix);
-    Serial.print("[scene] active=");
-    Serial.println(g_current_scene->name());
-  }
-
-  // D.3: bind safety override scenes to the overlay layer and run
-  // their one-time init() (e.g. SplashScene resolves the observatory
-  // bitmap from the asset registry here). They render on top of the
-  // active fg scene whenever their flag is set; the dispatcher itself
-  // never points g_current_scene at them anymore.
-  if (g_status == PROTOMATTER_OK) {
-    s_splash_scene.init(matrix);
-    s_thermal_safe_scene.init(matrix);
-    s_night_scene.init(matrix);
-    s_offline_scene.init(matrix);
-    s_safety_overlay_layer.bind(&s_splash_scene,
-                                &s_thermal_safe_scene,
-                                &s_night_scene,
-                                &s_offline_scene);
+    compositor::init_default_scene(matrix);
+    compositor::install_safety_overlays(matrix);
   }
 }
 
 void loop1() {
-  // FPS counter: count frames between wall-clock seconds and print once/sec.
-  // Integer math only (NFR-1.3) — no float in the render loop.
-  static uint32_t frames = 0;
-  static uint32_t last_report_ms = 0;
-  static uint32_t last_show_ms   = 0;
-
-  // Frame pacing — fixes a "subtle flicker" caused by calling
-  // matrix.show() as fast as the loop runs. RP2040 Protomatter swaps
-  // the back/front buffer on the next bit-plane boundary; if show()
-  // arrives at random offsets within the BCM refresh cycle, the
-  // perceived per-pixel on-time jitters and the eye sees brightness
-  // wobble. Capping at PANEL_TARGET_FPS_MS gives the panel a stable
-  // cadence well within FR-3.1 (20–30 FPS target). Render-time slack
-  // (we were running at hundreds of FPS) absorbs the cap with no
-  // visible motion penalty.
-  static constexpr uint32_t kFrameIntervalMs = 42;  // ~24 FPS (FR-3.1)
-
-  const uint32_t now_ms = millis();
-
-  // NFR-3.2: publish liveness on EVERY iteration, before the frame
-  // cap can early-return. Core 0 reads this to decide whether to feed
-  // the hardware watchdog. Single naturally-aligned 32-bit write —
-  // atomic on RP2040, no mutex needed (same rationale as g_render_fps).
-  g_render_alive_ms = now_ms;
-
-  // Phase 4.2 / D.2: consume any pending scene change requested by
-  // Core 0. With D.2 the swap is now gated by the fade-through-black
-  // envelope: if the fade is in flight, we hold off on take_pending()
-  // (so a queued request stays queued) and only actually swap
-  // g_current_scene at the envelope's midpoint, when the panel is
-  // fully black. Unknown ids leave the active scene alone (FR-1.3
-  // spirit applied at the cross-core boundary).
-  if (g_status == PROTOMATTER_OK) {
-    if (s_fade_black_layer.active()) {
-      // Mid-fade swap. ready_to_swap() returns true exactly once at
-      // the envelope midpoint, so the init() runs under fully-black
-      // panel and the new scene's first frame is invisible.
-      if (s_fade_black_layer.ready_to_swap(now_ms)) {
-        Scene* next = scene_for(s_fade_pending_id);
-        if (next != nullptr && next != g_current_scene) {
-          g_current_scene = next;
-          g_current_scene->init(matrix);
-          scene_state::mark_current(s_fade_pending_id);
-          // FR-16.4 / phase D.7: arm a one-shot first-frame timer
-          // so the next loop iteration can quantify the swap cost.
-          // The pre-fade prepare() pass below should have warmed any
-          // cache the incoming scene maintains; this confirms.
-          s_first_frame_pending = true;
-          Serial.print("[scene] swap -> ");
-          Serial.println(g_current_scene->name());
-        } else if (next == nullptr) {
-          Serial.print("[scene] unknown id=");
-          Serial.println(static_cast<int>(s_fade_pending_id));
-        }
-      } else {
-        // FR-16.4 / phase D.7: speculative pre-render of the
-        // incoming scene during the fade-out half. The hook is
-        // idempotent — calling it every frame just re-checks the
-        // scene's internal cache, which is microseconds. The cost
-        // is bounded by Scene::prepare()'s contract (no draw, no
-        // alloc, < ~5 ms one-shot work). For scenes that don't
-        // override prepare() it's literally a virtual no-op call.
-        Scene* incoming = scene_for(s_fade_pending_id);
-        if (incoming != nullptr && incoming != g_current_scene) {
-          incoming->prepare(now_ms);
-        }
-      }
-    } else {
-      scene_state::SceneId pending_id;
-      if (scene_state::take_pending(&pending_id)) {
-        Scene* next = scene_for(pending_id);
-        if (next != nullptr && next != g_current_scene) {
-          // Defer the actual swap to the fade midpoint. The fade
-          // layer takes over LAYER_OVERLAY_TRANSITION until the
-          // envelope completes (~250 ms).
-          s_fade_pending_id = pending_id;
-          s_fade_black_layer.start(now_ms);
-        } else if (next == nullptr) {
-          Serial.print("[scene] unknown id=");
-          Serial.println(static_cast<int>(pending_id));
-        }
-        // Same-scene re-request (next == g_current_scene): silently
-        // accepted by take_pending(); no fade, no init() rerun.
-      }
-    }
-  }
-
-  if (g_status == PROTOMATTER_OK && g_current_scene != nullptr) {
-    // Frame cap: skip this iteration if we're ahead of schedule.
-    // Wrap-safe (NFR §2 time math).
-    if (static_cast<int32_t>(now_ms - last_show_ms) < static_cast<int32_t>(kFrameIntervalMs)) {
-      return;
-    }
-    last_show_ms = now_ms;
-
-    // Compositor walk (FR-16.1, phase D.1). Back-to-front, skipping
-    // empty slots. The fg slot draws background+foreground (legacy
-    // Scene contract); the chrome slot adds the always-on HH:MM
-    // overlay (FR-9.2) honouring wants_clock_chrome(). Overlay slots
-    // are unused in D.1 — D.2/D.3/D.8 will populate them.
-    for (uint8_t i = 0; i < LAYER_COUNT; ++i) {
-      if (g_layers[i] != nullptr) {
-        g_layers[i]->render(matrix, now_ms);
-      }
-    }
-
-    // Single show() per frame. (FR-9.3 — chrome must overlay before flip.)
-    matrix.show();
-
-    frames++;
-
-    // Idle-slack instrumentation (FR-16.9, phase D.5). Sample only on
-    // frames that actually rendered (frame-cap early-return doesn't
-    // count — its "slack" is whatever's left of the cap, which is
-    // already accounted for by the next iteration's wait). Use the
-    // pre-show now_ms timestamp captured above as render_start;
-    // millis() now is render_end. Clamp at 0 for over-budget frames so
-    // the rolling average never goes negative when scenes occasionally
-    // blow the cap. uint8_t is enough — kFrameIntervalMs is 42, well
-    // under 256. The 32-frame ring + integer running sum (max
-    // 32*kFrameIntervalMs = 1344, fits uint16_t) is cheaper than an
-    // EMA divide and gives a flat-window average that's easy to
-    // reason about: the published value lags load changes by ~32
-    // frames (~1.3 s at 24 FPS), which is the right scale for HA's
-    // 30 s heartbeat consumer.
-    {
-      const uint32_t render_ms = millis() - now_ms;
-      const uint8_t  sample    = (render_ms >= kFrameIntervalMs)
-                                   ? 0
-                                   : static_cast<uint8_t>(kFrameIntervalMs - render_ms);
-      static uint8_t  s_slack_ring[32] = {0};
-      static uint16_t s_slack_sum      = 0;
-      static uint8_t  s_slack_idx      = 0;
-      s_slack_sum -= s_slack_ring[s_slack_idx];
-      s_slack_ring[s_slack_idx] = sample;
-      s_slack_sum += sample;
-      s_slack_idx = (s_slack_idx + 1u) & 31u;
-      // Single naturally-aligned 32-bit store — atomic on RP2040, no
-      // mutex needed. Reader (mqtt_link::publish_status) tolerates a
-      // slightly stale value; it's a diagnostic, not a control input.
-      g_render_slack_ms = static_cast<uint32_t>(s_slack_sum >> 5);  // /32
-
-      // FR-16.4 / phase D.7: one-shot first-frame timing. Capture
-      // the same render_ms we just sampled and hand it to Core 0
-      // for logging — Serial from Core 1 would race Protomatter
-      // PIO/DMA timing (CODING_PRACTICES §10). Sentinel 0 means
-      // "nothing new"; pin to >=1 so a literal sub-ms render still
-      // logs.
-      if (s_first_frame_pending) {
-        s_first_frame_pending = false;
-        const uint32_t v = (render_ms == 0u) ? 1u : render_ms;
-        g_first_frame_render_ms = v;
-      }
-    }
-  }
-
-  // Publish FPS to Core 0 once per second WITHOUT printing here —
-  // Serial output on Core 1 contends with Protomatter's PIO/DMA timing
-  // and produces a once-per-second flicker. Core 0's loop() reads
-  // g_render_fps and logs it instead.
-  if (now_ms - last_report_ms >= 1000u) {
-    g_render_fps = frames;
-    frames = 0;
-    last_report_ms = now_ms;
-  }
+  if (g_status != PROTOMATTER_OK) return;
+  compositor::tick(matrix, millis());
 }
