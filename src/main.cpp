@@ -136,8 +136,12 @@ public:
 
 // Chrome adapter — the always-on HH:MM readout (FR-9.2). Honours the
 // active scene's wants_clock_chrome() opt-out so the giant clock isn't
-// defaced. Future link-health dot work layers in here; keeping it as
-// a Layer means those additions don't touch loop1().
+// defaced; when a safety override is fully covering the panel, the
+// override's hints win over the (invisible) underlying scene's, so
+// NIGHT / OFFLINE / THERMAL / SPLASH can suppress the corner readout
+// even when the bg scene wanted it. Future link-health dot work
+// layers in here; keeping it as a Layer means those additions don't
+// touch loop1().
 //
 // Forward-declared first so ChromeLayer::render() can query its
 // covering_override() — the actual instance lives below.
@@ -146,24 +150,30 @@ static SafetyOverlayLayer s_safety_overlay_layer;  // D.3 firmware overrides (FR
 class ChromeLayer final : public Layer {
 public:
   const char* name() const override { return "chrome"; }
+  // When a safety override (NIGHT/THERMAL/OFFLINE/SPLASH) is fully
+  // covering the panel, both the chrome HH:MM readout and the
+  // theme-level decorations (FRAME_BORDER, SCANLINES) must consult
+  // the override scene's hints instead of the underlying Director
+  // scene's — g_current_scene still points at the (invisible) bg
+  // scene during ON, so its wants_*() answers are wrong to use.
+  //
+  // Without this, NIGHT's `wants_clock_chrome() == false` was
+  // ignored whenever the underlying scene happened to be a
+  // chrome-on one (clock_scene, iss, jupiter, moon, …), causing
+  // the small white HH:MM in the top-right corner to bleed through
+  // the deep-red night field — visible as the "occasionally the
+  // small time chrome appears in night mode" symptom. Same applies
+  // to Blade Runner's cyan FRAME_BORDER painting over NIGHT.
+  // (chrome added in phase T.7; override-aware in phase 6.6;
+  //  clock-chrome path made override-aware after night-mode regression)
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
-    if (g_current_scene != nullptr && g_current_scene->wants_clock_chrome()) {
+    Scene* hint_scene = s_safety_overlay_layer.covering_override();
+    if (hint_scene == nullptr) hint_scene = g_current_scene;
+
+    if (hint_scene != nullptr && hint_scene->wants_clock_chrome()) {
       gfx::draw_clock_chrome(matrix, now_ms);
     }
-    // Theme-level decorations (FRAME_BORDER, SCANLINES) layer on top
-    // of every scene including chrome opt-outs — the giant clock
-    // gets a Blade Runner cyan frame just like everything else.
-    //
-    // When a safety override (NIGHT/THERMAL/OFFLINE/SPLASH) is fully
-    // covering the panel, the override scene's wants_theme_decorations()
-    // wins instead of the underlying Director scene's — otherwise
-    // Blade Runner's cyan FRAME_BORDER would paint over a NIGHT
-    // overlay even though NIGHT opted out, because g_current_scene
-    // still points at the (invisible) bg scene.
-    // (added in phase T.7; override-aware in phase 6.6)
-    Scene* deco_scene = s_safety_overlay_layer.covering_override();
-    if (deco_scene == nullptr) deco_scene = g_current_scene;
-    if (deco_scene == nullptr || deco_scene->wants_theme_decorations()) {
+    if (hint_scene == nullptr || hint_scene->wants_theme_decorations()) {
       gfx::draw_theme_decorations(matrix);
     }
   }
