@@ -370,6 +370,10 @@ void loop() {
   // reverts to the default CLOCK at priority 0.
   scene_state::tick(now_ms);
 
+  // Phase P.3: debounced wear-protected writeback for /prefs.json
+  // (FR-18.4). Cheap fast-path when the cache is clean.
+  prefs::tick(now_ms);
+
   if (now_ms - last_print_ms >= 1000u) {
     last_print_ms = now_ms;
 

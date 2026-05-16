@@ -49,6 +49,30 @@ struct Prefs {
 // the actual /prefs.json load into this same entry point.
 void begin();
 
+// Setter for the active theme (FR-18.3). Updates the in-RAM cache
+// immediately so the next-frame theme switch the call site already
+// drives still happens at the FR-15.4 boundary; ALSO marks the
+// cache dirty and arms the debounced writeback timer (FR-18.4).
+// Idempotent — a no-op store does not mark dirty.
+//
+// Wire this from every USER-CHOICE theme path (MQTT
+// observatory/theme handler, IR `◄`/`►` dispatch). Diagnostic /
+// firmware-internal theme switches (e.g. gfx_test cycling, T.2's
+// bring-up `theme::set(APOLLO_AMBER)`) MUST NOT go through here —
+// they'd pollute the persisted choice.
+void set_theme(theme::Id id);
+
+// Wear-protected writeback tick (FR-18.4). Call from the Core 0
+// loop() each iteration; cheap when nothing is dirty. Flushes the
+// in-RAM cache to /prefs.json iff ALL of:
+//   - cache is dirty,
+//   - ≥ 5 s since the last set_*() call (settle window),
+//   - ≥ 30 s since the last successful flush (rate cap),
+//   - LittleFS mounted successfully at boot.
+// Atomic write (write-to-temp + rename) so a crash mid-write
+// cannot corrupt /prefs.json.
+void tick(uint32_t now_ms);
+
 // Snapshot accessor. Returns a const reference to the in-RAM cache.
 // Safe to read from either core — the cache is only mutated by
 // Core 0 setters (none in P.1) so a render-side reader sees either

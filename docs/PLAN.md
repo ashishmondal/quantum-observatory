@@ -724,7 +724,7 @@ only (no cross-core safety needed).
     drop forward-version data. **Exit:** rebooting after a theme
     change brings the device back up in the same theme.
 
-- [ ] **P.3 Wear-protected writeback** (FR-18.3, FR-18.4, FR-18.6)
+- [x] **P.3 Wear-protected writeback** (FR-18.3, FR-18.4, FR-18.6)
   - `prefs::set_theme(id)` updates the cache, marks dirty, arms a
     debounce timer (5 s settle since most-recent setter call). A
     Core 0 background tick drains the dirty flag subject to: settle
