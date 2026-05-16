@@ -413,12 +413,53 @@ def _compose_iss(lat_deg, lon_deg):
         import time
 
         # WTIA: position + altitude + visibility tri-state. The HA
-        # REST sensor caches every 30 s; we read its attributes.
-        # state.getattr returns a dict, or None if the entity is
-        # unknown/unavailable.
+        # REST sensor polls every 30 s.
+        #
+        # Staleness guard — this is the whole reason this block is
+        # paranoid. When WTIA's API is unreachable HA marks
+        # sensor.iss_position as "unavailable", but the json_attributes
+        # from the last good poll often stay attached to the entity,
+        # so a naive `state.getattr(...)` happily returns ISS coords
+        # that may be minutes-to-hours old. Republishing those at
+        # 30 s gets the firmware cached for its full kFreshMs=1h
+        # window; the ISS moves ~28 000 km in an hour, more than
+        # enough to drift a real overhead pass into a phantom
+        # near-horizon point that still satisfies the on-device
+        # `elevation_deg ≥ 0 AND sun ≤ -6°` predicate — and the
+        # auto-switch + ta-da fires on bogus data ("VIS 350x0" at
+        # the horizon with no actual station there).
+        #
+        # We gate on two things:
+        #   1. The entity STATE (not its attrs) must be a real
+        #      number. HA writes "unavailable" / "unknown" to the
+        #      state on poll failure; the attrs dict is unreliable.
+        #   2. The entity's last_updated timestamp must be within
+        #      90 s (≥ 2× scan_interval) — covers a single missed
+        #      poll, fails closed on anything longer.
+        state_val = state.get("sensor.iss_position")
+        if state_val in (None, "", "unknown", "unavailable"):
+            return {"_error": f"sensor.iss_position state={state_val!r}"}
+        try:
+            float(state_val)  # cheap "is this a real number?" check
+        except (TypeError, ValueError):
+            return {"_error": f"sensor.iss_position state not numeric: {state_val!r}"}
+
+        # last_updated is exposed by pyscript as a dotted attribute
+        # on the state object (`state.<entity>.last_updated`) and is
+        # a tz-aware datetime. Fall back gracefully if pyscript can't
+        # produce one — better to skip a publish than to publish stale.
+        try:
+            last_upd = state.get("sensor.iss_position.last_updated")
+            from datetime import datetime, timezone
+            age_s = (datetime.now(timezone.utc) - last_upd).total_seconds()
+        except Exception as exc:  # noqa: BLE001
+            return {"_error": f"could not read sensor.iss_position.last_updated: {exc}"}
+        if age_s > 90.0:
+            return {"_error": f"sensor.iss_position stale (age={age_s:.0f}s)"}
+
         attrs = state.getattr("sensor.iss_position")
         if not attrs:
-            return {"_error": "sensor.iss_position not yet available"}
+            return {"_error": "sensor.iss_position has no attributes"}
         try:
             lat = float(attrs["latitude"])
             lon = float(attrs["longitude"])
