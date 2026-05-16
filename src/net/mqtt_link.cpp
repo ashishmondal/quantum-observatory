@@ -1049,6 +1049,16 @@ bool publish_status(uint32_t now_ms) {
   // the rate cap so it lands at settle+0).
   doc["prefs_dirty"] = prefs::is_dirty();
 
+  // FR-19 / FR-18.2 v3 — sound prefs heartbeat. Pure echo so HA can
+  // surface them as toggles / a select without re-publishing on
+  // every change (the `set` topic remains the write path).
+  {
+    const prefs::Prefs& p = prefs::current();
+    doc["theme_sound"]     = p.theme_sound;
+    doc["button_sound"]    = p.button_sound;
+    doc["tick_sound_mode"] = static_cast<int>(p.tick_sound_mode);
+  }
+
   char payload[kStatusJsonCapacity];
   const size_t n = serializeJson(doc, payload, sizeof(payload));
   if (n == 0 || n >= sizeof(payload)) {
@@ -1250,6 +1260,22 @@ void queue_debug(const char* payload) {
   // bring-up) get distinct values for log readability; OR with 1 so
   // the sentinel is non-zero even when millis() happens to be 0.
   s_debug_pending = millis() | 1u;
+}
+
+void publish_button_event(const char* name) {
+  // FR-11.2 echo. Drop silently when the broker session is down so
+  // the local action (info overlay) still happens regardless of MQTT
+  // state. Synchronous publish is fine here -- we're on Core 0,
+  // PubSubClient::publish() is non-blocking on a healthy session
+  // (CODING_PRACTICES sec 3), and the payload is tiny.
+  if (name == nullptr || !s_client.connected()) return;
+  char payload[40];
+  const int n = snprintf(payload, sizeof(payload),
+                         "{\"button\":\"%s\"}", name);
+  if (n <= 0 || static_cast<size_t>(n) >= sizeof(payload)) return;
+  s_client.publish("observatory/button", payload);
+  Serial.print("[mqtt] pub observatory/button ");
+  Serial.println(payload);
 }
 
 }  // namespace mqtt_link

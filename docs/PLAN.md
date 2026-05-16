@@ -764,6 +764,103 @@ only (no cross-core safety needed).
 
 ---
 
+## Phase S — Settings Overlay (FR-19)
+
+Operator-facing on-panel settings menu reachable from the IR remote
+`*` (Options) button. Two categories — `DISPLAY` (BG TINT) and
+`SOUND` (theme/button/tick) — with live preview, knob-pitch click
+audio, save toast, and 30 s idle auto-close. Re-binds the IR `OK`
+button (formerly the FR-17.8 info-overlay toggle) to "settings
+commit", and moves the info overlay onto the on-board GP15 MENU
+button per FR-11.3.
+
+- [x] **S.1 Prefs schema v3** — bump `kSchemaVersion = 3` in
+    `prefs.h`; extend `Prefs` with `bool theme_sound`, `bool
+    button_sound`, `TickSoundMode tick_sound_mode`; add the
+    matching `set_*()` setters that flow through the FR-18.4
+    debounced writeback. Forward-compat: a v1 / v2 `/prefs.json`
+    on disk SHALL still load cleanly with default values for the
+    missing keys via the existing passthrough parser.
+    **Exit:** rebooting after a write preserves all three new
+    fields; the FR-18.7 `prefs_dirty` heartbeat field flips
+    correctly on each setter.
+
+- [x] **S.2 Cue gates** — wire the three new prefs into their
+    consumers: `ir_remote::poll()` chirp (button_sound),
+    `theme::set()` melody (theme_sound), `giant_clock_scene`
+    digit-roll click cascade (tick_sound_mode switch). Each gate
+    is a single boolean / enum read from `prefs::current()` on
+    Core 0; no cross-core trickery needed.
+    **Exit:** muting button_sound silences chirp + every settings
+    cue; muting theme_sound silences only the FR-10.7 melody;
+    `tick_sound_mode = HOUR` only clicks at the top of the hour.
+
+- [x] **S.3 Settings model** (`include/state/settings_ui.h` +
+    `src/state/settings_ui.cpp`) — `Mode { CLOSED, ROOT, CATEGORY }`,
+    `Cat { DISPLAY, SOUND }`, per-category item indices,
+    snapshot-under-mutex API for the layer, lock-free `is_open()`
+    byte for the IR carve-out fast path. Owns the open/close
+    fade timestamps, save-toast lifetime, idle auto-close timer,
+    and audio cue dispatch (open/close jingles, knob-pitch
+    clicks, rail thunks). Every value commit goes through
+    `prefs::set_*()` so MQTT and menu writes share the same
+    chokepoint.
+    **Exit:** unit-style smoke test from the serial console
+    confirms toggle/nav/commit transitions; menu cues are gated
+    by `button_sound`; idle 30 s auto-close fires.
+
+- [x] **S.4 IR carve-out** (`src/input/ir_actions.cpp`) — when
+    `settings_ui::is_open()` is true, route ▲ ▼ ◄ ► OK Back into
+    `settings_ui::nav_*()` / `commit_ok()` / `back()` instead of
+    the global scene-cycle / theme-cycle / overlay-toggle actions.
+    Bind `*` (Options) → `settings_ui::toggle_open()`. Remove
+    the `OK → info_toggle` binding (now bound on the on-board
+    MENU button). Home force-closes the menu before its existing
+    CLOCK jump.
+    **Exit:** `*` opens / closes the menu; nav buttons drive the
+    menu while it is up and the underlying scene-cycle / theme
+    cycle while it is closed; OK is a no-op when the menu is
+    closed (the FR-10.6 chirp upstream is the only feedback).
+
+- [x] **S.5 On-board MENU button driver** (`include/hw/onboard_buttons.h`
+    + `src/hw/onboard_buttons.cpp`) — poll GP15 active-low with a
+    30 ms debounce per FR-11.1, fire FR-17.8 info overlay locally,
+    echo `{"button":"menu"}` to `observatory/button` per FR-11.2.
+    Local action fires regardless of MQTT state (deliberate FR-11.3
+    divergence — see header comment + FR-11.3 amendment).
+    **Exit:** pressing the on-board MENU button shows the info
+    overlay even with broker down; HA receives the button event
+    when broker is up.
+
+- [x] **S.6 SettingsOverlayLayer** (`src/scenes/settings_overlay_layer.h`)
+    — Layer subclass that snapshots the model once per frame,
+    Bayer-dims the backdrop, draws title row, ROOT tile picker
+    or CATEGORY rows, segmented tint bar with live preview,
+    inverse-flash on commit, save toast bottom-right, idle-
+    countdown last 5 s. Inserted into `compositor.cpp`'s
+    `g_layers[]` at a new `LAYER_OVERLAY_SETTINGS` slot ABOVE
+    SAFETY and ABOVE INFO so the operator can adjust during
+    NIGHT / OFFLINE / THERMAL_SAFE; below TRANSITION so scene-
+    swap fades still composite cleanly.
+    **Exit:** menu visible during every scene + every safety
+    override; tint preview updates in real time on the underlying
+    image background.
+
+- [x] **S.7 MQTT heartbeat** — extend `mqtt_link::publish_status()`
+    to emit `theme_sound`, `button_sound`, `tick_sound_mode` so
+    HA can mirror the device state without re-publishing on every
+    change. Add `mqtt_link::publish_button_event(name)` for the
+    FR-11.2 echo from the on-board MENU button.
+    **Exit:** HA dashboard shows the three new fields updating
+    within one heartbeat of a menu commit; `observatory/button`
+    fires on each MENU press.
+
+- [x] **S.8 Build verification** — `pio run -e pico-dev` clean.
+    **Exit:** firmware builds; flash + RAM headroom unchanged
+    (the layer is ~3 KB of code + ~80 B of state).
+
+---
+
 ## Phase 9 — Hardening (final)
 
 - [ ] **9.1 Memory audit** — log free heap; confirm ≥ 32 KB headroom under all scenes; also flash budget — each `assets/*.bmp` costs ~2.4 KB; track total registry size

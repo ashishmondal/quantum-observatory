@@ -82,4 +82,13 @@ int8_t last_rc();
 // (added in phase IR.2)
 void queue_debug(const char* payload);
 
+// FR-11.2 — echo a logical on-board button press to
+// `observatory/button` as `{"button":"<name>"}`. Fire-and-forget on
+// Core 0; silently no-ops when not CONNECTED so the local action
+// (info overlay) can still fire regardless of broker state. `name`
+// MUST be a short ASCII identifier from the FR-11 mapping ("menu",
+// "up", "down"); not validated here — callers are the small set of
+// onboard_buttons.cpp call sites.
+void publish_button_event(const char* name);
+
 }  // namespace mqtt_link

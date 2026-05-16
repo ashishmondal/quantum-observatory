@@ -119,7 +119,7 @@ The device also doubles as **the only clock in the room**. The current time MUST
 ### FR-11 Local Input (on-board buttons)
 - **FR-11.1** The firmware SHALL read the three on-board buttons (GP15 = MENU, GP19 = DOWN, GP21 = UP) with debounce ≥ 30 ms.
 - **FR-11.2** When MQTT is connected, button presses SHALL be published to HA (e.g. `observatory/button`, payload = `"menu"|"down"|"up"`) so HA can drive scene response. Local behaviour SHALL be a no-op in this mode (Director still owns intent).
-- **FR-11.3** When MQTT is disconnected, the buttons SHALL provide a minimal local fallback: MENU cycles between `clock` and `offline` scenes; UP/DOWN reserved for future local actions (no firmware-managed brightness in v1).
+- **FR-11.3** When MQTT is disconnected, the buttons SHALL provide a minimal local fallback: MENU (GP15) drives the FR-17.8 info overlay locally regardless of MQTT state (FR-19 rebind — the info overlay is now reached only via MENU since the IR `OK` button is dedicated to the FR-19 settings menu); UP/DOWN reserved for future local actions (no firmware-managed brightness in v1). MENU SHALL also publish `{"button":"menu"}` to `observatory/button` per FR-11.2 when MQTT is up; the local action fires regardless of MQTT state (deliberate divergence from the FR-11.3 "only when disconnected" pattern — the info overlay is the in-room debug surface and must always work).
 
 ### FR-12 Color & Background System
 - **FR-12.1** The renderer SHALL use a split-layout palette table to deliver smooth gradients at the panel's 5-bit-per-channel depth. Every palette is exactly 256 RGB565 entries divided as **0..191 = background region (cyclic)** and **192..255 = foreground region (linear brightness ramp)**. (The split is documented at the API surface as `palette::BG_LEN = 192`, `palette::FG_BASE = 192`, `palette::FG_LEN = 64`.)
@@ -308,10 +308,10 @@ scene) so HA's history and automations stay authoritative.
   |---|---|---|
   | `▲` / `▼` | local-fast | scene cycle (next / prev in `kRemoteCycle[]`) |
   | `◄` / `►` | local-fast | theme cycle (prev / next theme, FR-15.1) |
-  | `OK` | local-fast | toggle info overlay (5 s, FR-17.8) |
-  | `Back` | local-fast | clear sticky + return to default `CLOCK`; also dismiss splash if active |
-  | `Home` | local-fast | force default `CLOCK` immediately (no sticky clear) |
-  | `*` (Options) | mqtt-routed | publish `{"button":"options"}` — HA-defined behaviour |
+  | `OK` | local-fast | settings: enter category / commit value (no-op when settings closed, FR-19) |
+  | `Back` | local-fast | settings: leave CATEGORY → ROOT → close (FR-19); when closed, clear sticky + return to default `CLOCK`; also dismiss splash if active |
+  | `Home` | local-fast | force-close settings (FR-19) then jump to default `CLOCK` (no sticky clear) |
+  | `*` (Options) | local-fast | settings: toggle FR-19 overlay open/close |
   | `↺` (Replay) | mqtt-routed | publish `{"button":"replay"}` — HA-defined behaviour |
   | streaming-service shortcuts | mqtt-routed | publish `{"button":"<svc>"}` if remote emits unique IR |
 
@@ -335,10 +335,11 @@ scene) so HA's history and automations stay authoritative.
 
 - **FR-17.8 Info overlay.** The firmware SHALL provide an
   `InfoOverlayLayer` compositor layer (FR-16.1 slot above SCENE,
-  below OVERLAY_TRANSITION) that fades in on `OK` press and out
+  below OVERLAY_TRANSITION) that fades in on MENU button press
+  (on-board GP15, FR-19 rebind off the IR `OK` button) and out
   after 5 s. Content SHALL include: IP address, RSSI, MQTT link
   state, uptime, FPS, current scene id, current theme id, free heap.
-  A second `OK` press while visible SHALL dismiss it immediately.
+  A second MENU press while visible SHALL dismiss it immediately.
 
 - **FR-17.9 Visual feedback.** Every accepted IR press SHALL produce a
   visible change within one frame (≤ 1/24 s):
@@ -393,15 +394,20 @@ endurance envelope (~100 k writes/sector) for the device's lifetime.
   No per-key files, no nested directories. Boot reads the file once;
   steady-state reads use the in-RAM cache.
 
-- **FR-18.2 Tracked preferences (v1+v2 scope).** The v1 schema
+- **FR-18.2 Tracked preferences (v1+v2+v3 scope).** The v1 schema
   carried exactly the **active theme id** (`theme: "<theme_id>"`).
-  The v2 schema adds **image-tint percentage** (`image_tint_pct:
-  <0..100>`, FR-15.6); a v1 file on disk SHALL load cleanly with
-  the default tint applied via the existing forward-compat
-  passthrough parser (FR-18.5). Future preferences (default scene,
-  brightness ceiling, mute, night threshold overrides) MAY be added
-  by bumping the schema version and extending the migration table;
-  they are out of scope for this requirement.
+  The v2 schema added **image-tint percentage** (`image_tint_pct:
+  <0..100>`, FR-15.6). The v3 schema adds three FR-19 sound
+  prefs: **theme_sound** (`bool`, gates the FR-10.7 theme melody),
+  **button_sound** (`bool`, gates the FR-10.6 IR / on-board button
+  chirp AND every FR-19 menu cue), and **tick_sound_mode**
+  (`uint8`, one of `NONE` / `MIN` / `TEN_MIN` / `HOUR`, gates the
+  clock digit-roll click cascade). A v1 or v2 file on disk SHALL
+  load cleanly with default values applied for the missing fields
+  via the existing forward-compat passthrough parser (FR-18.5).
+  Future preferences (default scene, brightness ceiling, night
+  threshold overrides) MAY be added by bumping the schema version
+  and extending the migration table; they are out of scope.
 
 - **FR-18.3 Write API.** A `prefs::set_<key>(value)` family SHALL be
   the single mutation entry point. Each setter SHALL: (a) update the
@@ -453,6 +459,88 @@ endurance envelope (~100 k writes/sector) for the device's lifetime.
   the device with stock defaults, providing a remote escape hatch if
   a future schema migration goes wrong. The topic SHALL be subject
   to the same FR-1.4 malformed-payload safety as every other input.
+
+### FR-19 Settings Overlay
+
+A retro on-panel settings menu so the operator can adjust display
+and sound preferences from the IR remote without round-tripping
+Home Assistant. Lives as a compositor layer above the firmware
+safety overrides so it remains usable during NIGHT / THERMAL_SAFE /
+OFFLINE — those overrides are exactly when the operator most wants
+to mute sounds or dim the background.
+
+- **FR-19.1 Trigger.** The IR remote `*` (Options) button SHALL
+  toggle the settings overlay open and closed (FR-17.5 local-fast
+  rebind — `*` no longer publishes to MQTT). Re-pressing `*` while
+  the overlay is open SHALL close it with the matching close
+  jingle. The overlay SHALL be reachable from any underlying scene
+  including sticky priority-4 scenes (e.g. ISS_PASS, which
+  continues to animate behind the menu).
+
+- **FR-19.2 Categories.** The overlay SHALL present a two-tile
+  ROOT picker (`DISPLAY`, `SOUND`); `OK` enters a category and
+  `Back` returns to ROOT. A second `Back` from ROOT SHALL close
+  the overlay (same effect as a second `*` press).
+
+- **FR-19.3 DISPLAY category.** SHALL contain a single row,
+  `BG TINT`, presenting an 11-step segmented bar (0 % = no
+  tint, 100 % = fully theme-tinted). `◄`/`►` SHALL adjust by 10 %
+  steps and clamp at 0 / 100 (no wrap). Each step SHALL invoke the
+  FR-15.6 atomic palette rebuild so the new value lands the moment
+  the operator closes the menu; an in-menu preview swatch on the
+  settings surface (per FR-19.5) MAY render the active image with
+  the candidate tint applied so the operator can judge the effect
+  without dismissing the menu. Each accepted step SHALL play a
+  knob-pitch click whose frequency rises with the tint percentage;
+  rail clamps SHALL play a low-pitch \"thunk\" so the operator
+  hears the boundary.
+
+- **FR-19.4 SOUND category.** SHALL contain three rows:
+  - **THEME** (on/off) — gates the FR-10.7 signature melody on
+    theme change.
+  - **BUTTON** (on/off) — gates the FR-10.6 IR + on-board button
+    chirp AND every FR-19 menu cue (so the operator can mute the
+    menu itself for night fiddling).
+  - **TICK** (NONE / MIN / 10MIN / HOUR) — gates the
+    `giant_clock_scene` digit-roll click cascade. `MIN` clicks every
+    minute (current behaviour); `10MIN` only on minutes ending in 0;
+    `HOUR` only at the top of the hour; `NONE` mutes it entirely.
+  `OK` on a boolean row SHALL toggle it; `OK` on the TICK row SHALL
+  cycle to the next mode. `◄`/`►` SHALL also operate on every row.
+
+- **FR-19.5 Compositor placement.** The `SettingsOverlayLayer` SHALL
+  occupy a new compositor slot **above `LAYER_OVERLAY_SAFETY`** and
+  **above `LAYER_OVERLAY_INFO`** but below `LAYER_OVERLAY_TRANSITION`,
+  so the operator can adjust prefs even when NIGHT / OFFLINE /
+  THERMAL_SAFE has dimmed the underlying scene; scene-swap fades
+  still composite cleanly on top. While visible the overlay SHALL
+  paint a **fully opaque black backdrop** over the entire 64×32
+  panel before drawing menu chrome — the menu reads as its own
+  scene rather than a translucent veil over the underlying scene.
+  (The DISPLAY → BG TINT row is the one exception that needs
+  to *show* the underlying scene; it SHALL paint its live preview
+  inside a small windowed swatch on the menu surface rather than
+  by punching a hole in the backdrop.) The chrome layer's HH:MM
+  corner readout SHALL be suppressed while the menu is visible
+  (the menu needs the full 64×32 panel for its own layout).
+
+- **FR-19.6 Idle auto-close.** If no nav input arrives for 30 s
+  while the overlay is visible, the overlay SHALL close itself with
+  the standard close jingle. The last 5 s SHALL show a small
+  bottom-right countdown so the operator can see the dismissal
+  coming.
+
+- **FR-19.7 Persistence.** Every value change SHALL go through the
+  matching `prefs::set_*()` setter (FR-18.3) so the change persists
+  across reboots via the FR-18.4 debounced writeback. A `SAVED`
+  toast SHALL fire on the prefs dirty→clean falling edge to confirm
+  the durable write; expect it ≤ 35 s after the last change.
+
+- **FR-19.8 Audio palette.** The overlay SHALL have its own audio
+  voice distinct from the FR-10 palette: rising arpeggio on open,
+  descending mirror on close, two-step click on enter/back, single
+  low tick on row navigation, knob-pitch clicks on value change.
+  All overlay cues SHALL be gated by `button_sound` (FR-19.4).
 
 ---
 

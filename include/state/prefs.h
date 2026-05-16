@@ -33,20 +33,43 @@ namespace prefs {
 // a way the boot-restore parser (P.2) needs to migrate. Callers on
 // the in-RAM side don't read this; it's only relevant to load/save.
 //
-// v1 -> v2 (T.11): added image_tint_pct (FR-15.6 / FR-18.2). v1 files
-// on disk load cleanly via the existing P.2 forward-compat passthrough
-// — a missing key falls through to the default in kDefaults.
-constexpr uint8_t kSchemaVersion = 2;
+// v1 -> v2 (T.11): added image_tint_pct (FR-15.6 / FR-18.2).
+// v2 -> v3 (S.1): added theme_sound, button_sound, tick_sound_mode
+//   (FR-18.2 v3 / FR-19 settings overlay). Older files on disk load
+//   cleanly via the existing P.2 forward-compat passthrough — every
+//   missing key falls through to the default in kDefaults.
+constexpr uint8_t kSchemaVersion = 3;
+
+// FR-18.2 v3 / FR-19.4 — gating mode for the giant-clock digit-roll
+// audible "step" cues. NONE silences the cascade; MIN clicks on
+// every minute change (the default, matches the prior unconditional
+// behaviour); TEN_MIN only on multiples of ten; HOUR only on the
+// top of the hour. Stored as a uint8 byte in Prefs so a torn cross-
+// core read still lands inside the enum range.
+enum class TickSoundMode : uint8_t {
+  NONE    = 0,
+  MIN     = 1,
+  TEN_MIN = 2,
+  HOUR    = 3,
+};
 
 // Flat record. Add fields here AND in the JSON serialiser/parser
 // (P.2/P.3) when the v1 scope grows. POD so we can byte-copy under
 // the mutex without worrying about non-trivial constructors.
 struct Prefs {
-  uint8_t   schema_v;        // = kSchemaVersion in RAM; tracks the
-                             // on-disk value once load() lands in P.2.
-  theme::Id theme;           // FR-18.2 v1 — active retro sci-fi theme.
-  uint8_t   image_tint_pct;  // FR-18.2 v2 / FR-15.6 — image-tint
-                             // strength 0..100 (default 50).
+  uint8_t       schema_v;         // = kSchemaVersion in RAM; tracks the
+                                  // on-disk value once load() lands in P.2.
+  theme::Id     theme;            // FR-18.2 v1 — active retro sci-fi theme.
+  uint8_t       image_tint_pct;   // FR-18.2 v2 / FR-15.6 — image-tint
+                                  // strength 0..100 (default 50).
+  bool          theme_sound;      // FR-18.2 v3 / FR-10.7 gate — when false,
+                                  // theme::set() suppresses the signature
+                                  // melody. Default true.
+  bool          button_sound;     // FR-18.2 v3 / FR-10.6 gate — when false,
+                                  // every IR / on-board press chirp is
+                                  // suppressed. Default true.
+  TickSoundMode tick_sound_mode;  // FR-18.2 v3 / FR-9.4 — giant-clock
+                                  // digit-roll click cadence. Default MIN.
 };
 
 // Mount the filesystem and initialise the in-RAM cache to defaults.
@@ -84,6 +107,15 @@ void cycle_theme(int8_t delta);
 // `tint` field). Diagnostic / firmware-internal calls SHALL NOT
 // route through here.
 void set_image_tint_pct(uint8_t pct);
+
+// FR-18.2 v3 — sound-gate setters used by the FR-19 settings
+// overlay. Pure cache writers (no other subsystem state to drive
+// — the consumers read prefs::current() at the gate site). Same
+// idempotent-on-no-op + mutex + dirty + FR-18.4 writeback discipline
+// as set_theme() / set_image_tint_pct().
+void set_theme_sound(bool on);
+void set_button_sound(bool on);
+void set_tick_sound_mode(TickSoundMode mode);
 
 // Wear-protected writeback tick (FR-18.4). Call from the Core 0
 // loop() each iteration; cheap when nothing is dirty. Flushes the

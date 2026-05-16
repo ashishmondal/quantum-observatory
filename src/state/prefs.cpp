@@ -17,12 +17,17 @@ namespace {
 
 // Defaults applied when no /prefs.json exists (FR-18.5). Theme falls
 // back to APOLLO_AMBER per FR-15.2 / plan P.1; image_tint_pct
-// defaults to 50 per FR-15.6 / THEME.md §6.9. Matches the explicit
-// theme:: bring-up state main.cpp would set if prefs were absent.
+// defaults to 50 per FR-15.6 / THEME.md §6.9. Sound gates default
+// to "on" so a fresh device behaves exactly like the pre-FR-19 build
+// (theme melodies + button chirps + per-minute clock ticks); the
+// operator opts into silence via the settings overlay.
 constexpr Prefs kDefaults = {
-    .schema_v       = kSchemaVersion,
-    .theme          = theme::Id::APOLLO_AMBER,
-    .image_tint_pct = 50,
+    .schema_v        = kSchemaVersion,
+    .theme           = theme::Id::APOLLO_AMBER,
+    .image_tint_pct  = 50,
+    .theme_sound     = true,
+    .button_sound    = true,
+    .tick_sound_mode = TickSoundMode::MIN,
 };
 
 // In-RAM cache. Read-mostly: only mutated by Core 0 setters (none
@@ -76,14 +81,17 @@ size_t s_passthrough_len               = 0;
 
 constexpr const char* kPath = "/prefs.json";
 
-// Single source of truth for "is this a v1 known key?" — used by both
+// Single source of truth for "is this a known key?" — used by both
 // the parse step (apply known values) and the passthrough capture
 // (everything not in this set is forward-version data we must
 // preserve).
 bool is_known_key(const char* k) {
   return strcmp(k, "v") == 0 ||
          strcmp(k, "theme") == 0 ||
-         strcmp(k, "image_tint_pct") == 0;
+         strcmp(k, "image_tint_pct") == 0 ||
+         strcmp(k, "theme_sound") == 0 ||
+         strcmp(k, "button_sound") == 0 ||
+         strcmp(k, "tick_sound_mode") == 0;
 }
 
 // Parse /prefs.json into the cache + passthrough buffer. Called once
@@ -194,6 +202,34 @@ void load() {
     }
   }
 
+  // FR-18.2 v3 — sound gates + tick mode. Missing keys keep the
+  // "on"/MIN defaults so a v1/v2 file boots into the prior audible
+  // behaviour. Out-of-range tick mode is treated as garbage; same
+  // discipline as image_tint_pct above.
+  if (doc.containsKey("theme_sound")) {
+    s_cache.theme_sound = doc["theme_sound"] | true;
+    Serial.print("[prefs] restored theme_sound=");
+    Serial.println(s_cache.theme_sound ? 1 : 0);
+  }
+  if (doc.containsKey("button_sound")) {
+    s_cache.button_sound = doc["button_sound"] | true;
+    Serial.print("[prefs] restored button_sound=");
+    Serial.println(s_cache.button_sound ? 1 : 0);
+  }
+  if (doc.containsKey("tick_sound_mode")) {
+    const int v_mode = doc["tick_sound_mode"] | -1;
+    if (v_mode >= 0 &&
+        v_mode <= static_cast<int>(TickSoundMode::HOUR)) {
+      s_cache.tick_sound_mode = static_cast<TickSoundMode>(v_mode);
+      Serial.print("[prefs] restored tick_sound_mode=");
+      Serial.println(v_mode);
+    } else {
+      Serial.print("[prefs] tick_sound_mode out of range=");
+      Serial.print(v_mode);
+      Serial.println(" — keeping default MIN");
+    }
+  }
+
   // Mirror what we just learned about the on-disk state so the P.3
   // writeback gate can recognise a no-op set (FR-18.4 step 2). We
   // copy s_cache (rather than re-reading individual keys) because
@@ -266,15 +302,23 @@ bool write_atomic(const Prefs& snapshot) {
   constexpr size_t kFileCap = 256;
   char buf[kFileCap];
   const char* theme_id = theme::string_from_id(snapshot.theme);
-  // Format: {"v":2,"theme":"<id>","image_tint_pct":<n><passthrough>}
+  // Format: {"v":3,"theme":"<id>","image_tint_pct":<n>,
+  //          "theme_sound":<bool>,"button_sound":<bool>,
+  //          "tick_sound_mode":<n><passthrough>}
   // s_passthrough either is empty or starts with `,` so it splices
   // cleanly after the last known field with no conditional formatting.
   const int n = snprintf(buf, sizeof(buf),
                          "{\"v\":%u,\"theme\":\"%s\","
-                         "\"image_tint_pct\":%u%s}",
+                         "\"image_tint_pct\":%u,"
+                         "\"theme_sound\":%s,"
+                         "\"button_sound\":%s,"
+                         "\"tick_sound_mode\":%u%s}",
                          static_cast<unsigned>(kSchemaVersion),
                          theme_id,
                          static_cast<unsigned>(snapshot.image_tint_pct),
+                         snapshot.theme_sound  ? "true" : "false",
+                         snapshot.button_sound ? "true" : "false",
+                         static_cast<unsigned>(snapshot.tick_sound_mode),
                          s_passthrough);
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(buf)) {
     Serial.print("[prefs] write FAILED — payload would be ");
@@ -388,6 +432,48 @@ void set_image_tint_pct(uint8_t pct) {
     s_cache.image_tint_pct = pct;
     s_dirty                = true;
     s_last_setter_ms       = millis();
+  }
+  mutex_exit(&s_mutex);
+}
+
+// FR-18.2 v3 sound-gate setters — pure cache writers. The reader
+// side lives at the cue-emission gate (ir_remote::poll() for
+// button_sound, theme::set() for theme_sound, main.cpp's clock-
+// click consumer for tick_sound_mode), so there's no "visible
+// subsystem state" to drive here — only the dirty + writeback
+// arming. Idempotent: a no-op set leaves dirty alone so a cycle
+// back to the persisted value doesn't trigger a flash write.
+void set_theme_sound(bool on) {
+  mutex_enter_blocking(&s_mutex);
+  if (s_cache.theme_sound != on) {
+    s_cache.theme_sound = on;
+    s_dirty             = true;
+    s_last_setter_ms    = millis();
+  }
+  mutex_exit(&s_mutex);
+}
+
+void set_button_sound(bool on) {
+  mutex_enter_blocking(&s_mutex);
+  if (s_cache.button_sound != on) {
+    s_cache.button_sound = on;
+    s_dirty              = true;
+    s_last_setter_ms     = millis();
+  }
+  mutex_exit(&s_mutex);
+}
+
+void set_tick_sound_mode(TickSoundMode mode) {
+  // Defensive clamp — a wild cast from outside should be silently
+  // rounded into range rather than persisted.
+  if (static_cast<uint8_t>(mode) > static_cast<uint8_t>(TickSoundMode::HOUR)) {
+    mode = TickSoundMode::HOUR;
+  }
+  mutex_enter_blocking(&s_mutex);
+  if (s_cache.tick_sound_mode != mode) {
+    s_cache.tick_sound_mode = mode;
+    s_dirty                 = true;
+    s_last_setter_ms        = millis();
   }
   mutex_exit(&s_mutex);
 }

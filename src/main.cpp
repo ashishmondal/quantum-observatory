@@ -32,6 +32,8 @@
 #include "moon_state.h"
 #include "ir_remote.h"
 #include "buzzer.h"
+#include "onboard_buttons.h"
+#include "settings_ui.h"
 #include "clock_anim_test.h"
 #include "compositor.h"
 #include "scene_registry.h"
@@ -189,8 +191,16 @@ void setup() {
   // BEFORE set_dispatch() so a stray frame between begin() and the
   // first loop() can't call into an uninitialised buzzer module.
   buzzer::begin();
+  // FR-11.1 -- on-board MENU button (GP15). Polled on Core 0 from
+  // loop(); fires the FR-17.8 info overlay locally (FR-19 rebound
+  // off the IR remote OK button) and echoes to MQTT per FR-11.2.
+  onboard_buttons::begin();
+  // FR-19 — settings overlay model. init() only allocates the
+  // mutex; no I/O. The visual SettingsOverlayLayer reads via
+  // settings_ui::snapshot() each frame from Core 1.
+  settings_ui::init();
   // FR-10.8 boot quiet supersedes the prior FR-10.4 audible
-  // "device awake" Westminster boot melody \u2014 the buzzer is silent
+  // "device awake" Westminster boot melody -- the buzzer is silent
   // for the entire boot phase (until the FR-13.1 splash overlay
   // clears on first MQTT connect). The driver defaults to
   // s_quiet=true; main loop()'s override-snapshot block lifts it
@@ -273,6 +283,10 @@ void loop() {
   // pending; counters surface in the 1 Hz [ir] log line below.
   ir_remote::poll();
 
+  // FR-11.1 — on-board MENU button debounce + edge dispatch. Cheap
+  // (one digitalRead) when no transition is pending.
+  onboard_buttons::tick(now_ms);
+
   // Drive the buzzer's non-blocking melody scheduler (FR-10.7).
   // Cheap when nothing is playing (one millis() compare). Lives
   // alongside ir_remote::poll() because the chirp path is the
@@ -280,7 +294,7 @@ void loop() {
   // tick.
   buzzer::tick(now_ms);
 
-  // FR-10.8 / FR-10.9 \u2014 driver-boundary mute gate. Buzzer is
+  // FR-10.8 / FR-10.9 -- driver-boundary mute gate. Buzzer is
   // audible only when neither the boot splash nor night mode is
   // active. Snapshot both override flags via the seqlock (lock-
   // free, same path the SafetyOverlayLayer uses every frame), OR
@@ -329,7 +343,26 @@ void loop() {
         600,     // M2 — bright stepper (ones-of-minute)
       };
       const uint8_t slot = static_cast<uint8_t>(cur & 0x7u);
-      if (slot < 5) buzzer::tick_click(kSlotPitchHz[slot]);
+      // FR-19 / FR-18.2 v3 — operator-selectable cadence. The cascade
+      // runs ~3 s wall-clock so tod::now().minute is stable for the
+      // whole sequence; gating each click is functionally equivalent
+      // to latching at cascade start without a second cross-core flag.
+      bool emit = false;
+      switch (prefs::current().tick_sound_mode) {
+        case prefs::TickSoundMode::NONE: emit = false; break;
+        case prefs::TickSoundMode::MIN:  emit = true;  break;
+        case prefs::TickSoundMode::TEN_MIN: {
+          const tod::Reading r = tod::now(now_ms);
+          emit = r.valid && (r.minute % 10u) == 0u;
+          break;
+        }
+        case prefs::TickSoundMode::HOUR: {
+          const tod::Reading r = tod::now(now_ms);
+          emit = r.valid && r.minute == 0u;
+          break;
+        }
+      }
+      if (emit && slot < 5) buzzer::tick_click(kSlotPitchHz[slot]);
     }
   }
 
@@ -388,6 +421,11 @@ void loop() {
   // Phase P.3: debounced wear-protected writeback for /prefs.json
   // (FR-18.4). Cheap fast-path when the cache is clean.
   prefs::tick(now_ms);
+
+  // FR-19 — settings overlay model (idle auto-close + save-toast
+  // edge detection). Cheap when the menu is closed and prefs are
+  // not dirty.
+  settings_ui::tick(now_ms);
 
   if (now_ms - last_print_ms >= 1000u) {
     last_print_ms = now_ms;

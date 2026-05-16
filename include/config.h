@@ -93,6 +93,24 @@
 // rationale and the chirp envelope.
 #define PIN_BUZZER  27
 
+// ---- On-board buttons (FR-11.1) ------------------------------------------
+// Three carrier-side push-buttons wired active-low. v1 firmware only
+// uses MENU; UP/DOWN are reserved for future local actions per
+// FR-11.3. We define all three so future scopes can `pinMode()` them
+// without re-discovering the pin map.
+//   GP15 = MENU  → drives the FR-17.8 / IR.4 info overlay (FR-19
+//                  rebinding: the IR remote OK button is now used to
+//                  commit the FR-19 settings menu, so info overlay
+//                  needed its own dedicated physical button).
+//   GP19 = DOWN  → reserved.
+//   GP21 = UP    → reserved.
+// External pull-ups are populated on the carrier; the firmware also
+// enables the RP2040 internal pull-up defensively (parallel pulls
+// don't hurt; protects against an unpopulated board).
+#define PIN_BTN_MENU 15
+#define PIN_BTN_DOWN 19
+#define PIN_BTN_UP   21
+
 // ---- IR receiver (GP28 / IRM) --------------------------------------------
 // On-board 38 kHz IR demodulator wired to GP28 (silkscreen "IRM") on the
 // Waveshare carrier. Output is active-low, already squared by the

@@ -11,6 +11,7 @@
 #include "buzzer.h"
 #include "config.h"
 #include "ir_remote.h"
+#include "prefs.h"
 
 // Disable the library's debug Serial chatter (one line per frame on
 // the global Serial port — would race Core 1's Protomatter timing if
@@ -112,7 +113,15 @@ bool poll() {
         // means non-melody actions (scene cycle, overlay toggle)
         // still get the tick, while melody actions cleanly replace
         // the brief chirp with their longer cue.
-        buzzer::chirp();
+        //
+        // FR-19 settings overlay adds a per-user opt-out: when the
+        // operator has muted button feedback, drop the chirp here.
+        // The boot/night quiet gates inside buzzer:: still take
+        // precedence (FR-10.8 / FR-10.9) — prefs gate is in
+        // addition, not in place of.
+        if (prefs::current().button_sound) {
+          buzzer::chirp();
+        }
         if (e.action != nullptr) {
           e.action(d.address, d.command);
         }

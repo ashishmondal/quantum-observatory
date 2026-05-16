@@ -22,6 +22,7 @@
 #include "bitmaps/_index.h"
 #include "buzzer.h"             // FR-10.7 — play() on rising-edge theme change
 #include "color_palette.h"
+#include "prefs.h"              // FR-19 / FR-18.2 v3 — theme_sound gate
 #include "themes/apollo_amber_theme.h"
 #include "themes/blade_runner_theme.h"
 #include "themes/lcars_tos_theme.h"
@@ -274,9 +275,18 @@ void set(Id id) {
   // IR remote, future button — shares one chokepoint and a
   // theme-cycle stampede can't stack overlapping melodies
   // (buzzer::play cancels any in-flight sequence).
-  const Melody m = kThemes[new_id]->melody();
-  if (m.notes != nullptr && m.count > 0) {
-    buzzer::play(m.notes, m.count);
+  //
+  // FR-19 / FR-18.2 v3 — the operator can mute theme melodies
+  // without muting button-feedback chirps via the settings
+  // overlay. Boot/night quiet (FR-10.8 / FR-10.9) is enforced one
+  // layer down inside buzzer::play() and still wins regardless of
+  // this gate; here we just skip the call entirely so we don't
+  // even arm the scheduler for a cue that would be dropped.
+  if (prefs::current().theme_sound) {
+    const Melody m = kThemes[new_id]->melody();
+    if (m.notes != nullptr && m.count > 0) {
+      buzzer::play(m.notes, m.count);
+    }
   }
 }
 

@@ -11,6 +11,7 @@
 #include "scenes/layer.h"
 #include "scenes/safety_overlay_layer.h"
 #include "scenes/scene.h"
+#include "scenes/settings_overlay_layer.h"
 
 // ─── Cross-core render telemetry definitions ────────────────────────
 volatile uint32_t g_render_fps             = 0;
@@ -29,6 +30,9 @@ Scene* g_current_scene = scene_registry::default_scene();
 enum LayerSlot : uint8_t {
   LAYER_FG = 0,            // active scene draws bg+fg here (legacy path)
   LAYER_OVERLAY_SAFETY,    // night / thermal / offline / splash (D.3)
+  LAYER_OVERLAY_SETTINGS,  // FR-19 settings menu (above SAFETY — operator
+                           // can adjust during NIGHT / THERMAL_SAFE; above
+                           // INFO since the menu is an active foreground UI)
   LAYER_OVERLAY_INFO,      // operator-triggered diagnostic overlay (IR.4)
   LAYER_OVERLAY_TRANSITION,// crossfades (D.2), toasts (D.8)
   LAYER_CHROME,            // shared HH:MM readout, future micro-indicators
@@ -91,6 +95,7 @@ SceneFgLayer     s_layer_fg;
 ChromeLayer      s_layer_chrome;
 FadeBlackLayer   s_fade_black_layer;    // D.2 scene transition (FR-16.3)
 InfoOverlayLayer s_info_overlay_layer;  // IR.4 operator diagnostic overlay (FR-17.8)
+SettingsOverlayLayer s_settings_overlay_layer;  // FR-19 settings menu
 
 // Pending swap target stashed when a fade starts. The actual
 // g_current_scene swap is deferred to the fade midpoint so the panel
@@ -108,6 +113,7 @@ volatile bool s_first_frame_pending = false;
 Layer* g_layers[LAYER_COUNT] = {
   &s_layer_fg,                 // LAYER_FG
   &s_safety_overlay_layer,     // LAYER_OVERLAY_SAFETY     (D.3)
+  &s_settings_overlay_layer,   // LAYER_OVERLAY_SETTINGS   (FR-19)
   &s_info_overlay_layer,       // LAYER_OVERLAY_INFO       (IR.4)
   &s_fade_black_layer,         // LAYER_OVERLAY_TRANSITION (D.2 / D.8)
   &s_layer_chrome              // LAYER_CHROME
