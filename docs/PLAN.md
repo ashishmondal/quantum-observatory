@@ -703,7 +703,7 @@ only (no cross-core safety needed).
 > QSPI flash never sees more than a couple of writes per minute even
 > under remote thrash.
 
-- [ ] **P.1 LittleFS mount + `prefs::` skeleton** (FR-18.1, FR-18.2)
+- [x] **P.1 LittleFS mount + `prefs::` skeleton** (FR-18.1, FR-18.2)
   - Add a small `src/state/prefs.{h,cpp}` module owning the in-RAM
     cache (`struct Prefs { uint8_t schema_v; theme::Id theme; }`) and
     a single mutex for the dirty flag. Mount LittleFS in `setup()`
@@ -713,7 +713,7 @@ only (no cross-core safety needed).
     mounts the FS without affecting boot time; `prefs::current()`
     returns sane defaults when the file is absent.
 
-- [ ] **P.2 Boot restore** (FR-18.5)
+- [x] **P.2 Boot restore** (FR-18.5)
   - `prefs::load()` runs once during `setup()`, before the first
     scene render, parses `/prefs.json` with `StaticJsonDocument<128>`
     (NFR-2.3), and applies each known key to its subsystem

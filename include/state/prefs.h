@@ -67,4 +67,16 @@ bool is_mounted();
 // this; surfacing it now keeps the API surface stable across phases.
 bool is_dirty();
 
+// Forward-version passthrough (FR-18.5). On boot, load() captures
+// any unknown top-level keys from /prefs.json into a static buffer
+// so P.3's writeback can re-emit them verbatim — a downgrade from a
+// future schema must not silently drop forward-version data.
+//
+// Returns a NUL-terminated JSON fragment of the form
+//   ,"unknown_key":<value>,"another":<value>
+// (i.e. each unknown entry pre-pended with `,` and ready to splice
+// after the last known field) or an empty string when no unknown
+// keys were seen. Pointer is valid for the program lifetime.
+const char* unknown_passthrough();
+
 }  // namespace prefs

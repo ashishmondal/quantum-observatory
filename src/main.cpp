@@ -103,19 +103,20 @@ void setup() {
   // from Core 1's render path.
   palette::init_all();
 
-  // Persistent preferences (FR-18, phase P.1). Mounts LittleFS and
-  // initialises the in-RAM cache to defaults; no /prefs.json load
-  // yet (P.2). MUST run before theme::set() so the future P.2
-  // boot-restore can replace the explicit APOLLO_AMBER bring-up
-  // below with whatever the operator last persisted.
+  // Persistent preferences (FR-18, phase P.1 + P.2). Mounts LittleFS,
+  // restores the in-RAM cache from /prefs.json if present, captures
+  // any forward-version keys for non-destructive rewrite (P.3).
+  // MUST run before theme::set() so the line below picks up the
+  // restored choice rather than overriding it.
   prefs::begin();
 
-  // Theming system (FR-15). Boots to APOLLO_AMBER per FR-15.2; HA may
-  // push a non-default theme via observatory/theme later (T.4). The
-  // explicit set() here documents intent and exercises the writer side
-  // of the API; the log line proves the reader links. Single-byte
-  // atomic store on RP2040 — no mutex (same pattern as g_render_fps).
-  theme::set(theme::Id::APOLLO_AMBER);
+  // Theming system (FR-15). Boots to the last persisted theme
+  // (FR-15.2 / FR-18.5) — APOLLO_AMBER on a fresh device, otherwise
+  // whatever the operator last selected via MQTT or IR. The
+  // explicit set() here also exercises the writer side of the API
+  // and proves the reader links. Single-byte atomic store on RP2040
+  // — no mutex (same pattern as g_render_fps).
+  theme::set(prefs::current().theme);
   Serial.print("[theme] active id=");
   Serial.println(static_cast<int>(theme::current()));
 
