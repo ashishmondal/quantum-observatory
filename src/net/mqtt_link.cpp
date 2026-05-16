@@ -26,6 +26,9 @@
 #include "thermal_monitor.h"
 #include "time_of_day.h"
 #include "wifi_link.h"
+#ifdef CLOCK_ANIM_TEST
+#include "clock_anim_test.h"
+#endif
 
 // Core 1's render FPS, published once per second from loop1() in
 // main.cpp. Declared at file scope (NOT inside the anonymous namespace
@@ -58,6 +61,13 @@ constexpr const char* kTopicJupiter = "observatory/jupiter"; // phase 7.3 jupite
 constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
 constexpr const char* kTopicTheme   = "observatory/theme";   // FR-15.2 (phase T.4)
 constexpr const char* kTopicDebug   = "observatory/debug";   // phase IR.2 one-shot diagnostic dump (Pico → HA)
+#ifdef CLOCK_ANIM_TEST
+// Dev-only: synthetic digit-cascade trigger for the giant clock
+// scene. Payload: {"kind":"minute"|"ten_min"|"hour"}. Only
+// subscribed under -DCLOCK_ANIM_TEST so the production path stays
+// lean. See include/diag/clock_anim_test.h.
+constexpr const char* kTopicClockAnimTest = "observatory/test/clock_anim";
+#endif
 
 // §5.4 example payload is ~85 bytes serialised. NFR-2.3 → max + 25%.
 // Using 256 here gives generous headroom for future fields without
@@ -721,6 +731,38 @@ void handle_theme(char* buf, unsigned int length) {
   Serial.println(wire_id);
 }
 
+#ifdef CLOCK_ANIM_TEST
+// Dev-only: synthetic digit-cascade trigger for the giant clock
+// scene. Writes g_clock_anim_test_kind; the scene edge-detects on
+// the next frame and resets the byte. Out-of-range / unknown kinds
+// are dropped silently — same discipline as the production
+// handlers, no crash on garbage payload.
+void handle_clock_anim_test(char* buf, unsigned int length) {
+  ParsedJson<96> p(buf, length, "clock_anim_test", s_theme_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
+
+  const char* kind = doc["kind"] | static_cast<const char*>(nullptr);
+  if (kind == nullptr || kind[0] == '\0') {
+    Serial.print("[mqtt] clock_anim_test missing kind payload=");
+    Serial.println(buf);
+    return;
+  }
+  uint8_t v = 0;
+  if      (strcmp(kind, "minute")  == 0) v = static_cast<uint8_t>(clock_anim_test::Kind::MINUTE);
+  else if (strcmp(kind, "ten_min") == 0) v = static_cast<uint8_t>(clock_anim_test::Kind::TEN_MIN);
+  else if (strcmp(kind, "hour")    == 0) v = static_cast<uint8_t>(clock_anim_test::Kind::HOUR);
+  else {
+    Serial.print("[mqtt] clock_anim_test unknown kind=");
+    Serial.println(kind);
+    return;
+  }
+  g_clock_anim_test_kind = v;
+  Serial.print("[mqtt] clock_anim_test fired kind=");
+  Serial.println(kind);
+}
+#endif
+
 // PubSubClient inbound callback. Runs on Core 0 from inside
 // PubSubClient::loop() (called from poll()) — same thread as the rest
 // of mqtt_link, so no locking needed against our own static state.
@@ -779,6 +821,12 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
     handle_theme(buf, length);
     return;
   }
+#ifdef CLOCK_ANIM_TEST
+  if (strcmp(topic, kTopicClockAnimTest) == 0) {
+    handle_clock_anim_test(buf, length);
+    return;
+  }
+#endif
   if (strcmp(topic, kTopicClear) == 0) {
     // §5.3: payload is empty by spec. Don't validate it — a non-empty
     // payload is harmless noise and rejecting it would just give the
@@ -1039,7 +1087,11 @@ void poll(uint32_t now_ms) {
         // does not support qos:2; qos:1 is the strongest option here
         // and the right one — duplicates are harmless because every
         // payload handler is idempotent (replace-state semantics).
-        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicConstellation, kTopicTheme };
+        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicConstellation, kTopicTheme
+#ifdef CLOCK_ANIM_TEST
+            , kTopicClockAnimTest
+#endif
+        };
         for (const char* t : topics) {
           if (s_client.subscribe(t, 1)) {
             Serial.print("[mqtt] sub ");

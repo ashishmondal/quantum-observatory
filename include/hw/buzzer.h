@@ -56,6 +56,25 @@ void begin();
 // beats a stale theme cue).
 void chirp();
 
+// Tiny mechanical "tick" for the giant clock's digit-roll
+// animation. ~6 ms at the caller-supplied pitch. Each digit slot
+// (H2 / M1 / M2) uses a different `freq_hz` so a cascade reads as
+// distinct stepper voices rather than a single uniform stutter.
+//
+// Volume policy: the carrier piezo peaks near 4 kHz; the further
+// `freq_hz` sits from that resonance, the quieter the click. Typical
+// callers use 300–600 Hz (deep in the mechanical-response falloff
+// tail, ~3 octaves below resonance) so the stepper is a soft tick
+// rather than a sharp ack. There's no software duty-cycle lever
+// (arduino-pico's tone() is fixed 50 %), so pitch placement is the
+// only volume control. Below ~200 Hz the piezo barely moves air.
+//
+// Non-blocking. Does NOT cancel an in-flight melody (theme cue
+// during a cascade wins). Coalesces re-arms within the click
+// duration so adjacent slots' clicks don't truncate each other
+// (see buzzer.cpp).
+void tick_click(uint16_t freq_hz);
+
 // Start playing a flash-resident note sequence (FR-10.7 / FR-10.4
 // boot melody). `notes` MUST outlive the playback (use a file-scope
 // `static constexpr Note[]`). `n` is silently clamped to

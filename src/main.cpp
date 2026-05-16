@@ -31,6 +31,7 @@
 #include "moon_state.h"
 #include "ir_remote.h"
 #include "buzzer.h"
+#include "clock_anim_test.h"
 #include "compositor.h"
 #include "scene_registry.h"
 #include "scenes/scene.h"
@@ -280,6 +281,33 @@ void loop() {
   // dominant caller; theme-switch melodies (B.3) ride the same
   // tick.
   buzzer::tick(now_ms);
+
+  // Giant clock digit-roll "stepper" sound (Core 1 → Core 0). The
+  // scene writes a packed (counter, slot) word on each visible
+  // digit step; we edge-detect the change and fire one short click
+  // at the per-slot pitch. Atomic uint32 read — no mutex
+  // (CODING_PRACTICES §3). Pitches sit below the carrier piezo's
+  // ~4 kHz resonance so the stepper reads quieter than the 9 kHz
+  // IR-ack chirp, and each slot has its own voice so a cascade
+  // sounds like three distinct stepper wheels rather than one
+  // uniform stutter. Slots that never animate (H1=0, colon=2)
+  // never produce a write so their pitch entries are unused.
+  {
+    static uint32_t s_last_click_seq = 0;
+    const uint32_t cur = g_clock_anim_click_seq;
+    if (cur != s_last_click_seq) {
+      s_last_click_seq = cur;
+      static constexpr uint16_t kSlotPitchHz[5] = {
+        0,       // H1 — no animation
+        300,     // H2 — deep stepper (hour ones)
+        0,       // colon — no animation
+        450,     // M1 — mid stepper (ten-minutes)
+        600,     // M2 — bright stepper (ones-of-minute)
+      };
+      const uint8_t slot = static_cast<uint8_t>(cur & 0x7u);
+      if (slot < 5) buzzer::tick_click(kSlotPitchHz[slot]);
+    }
+  }
 
   // Phase 7.1++ — ISS visibility auto-switch + ta-da. Internally
   // rate-limited to 1 Hz; rising edge of (sunlit ∧ twilight ∧

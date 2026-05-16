@@ -30,6 +30,13 @@ constexpr uint16_t kChirpMs       = 12;
 // audible across the room, short enough to not be annoying.
 constexpr uint16_t kSelfTestMs    = 30;
 
+// Digit-roll "tick" — short envelope (6 ms) so a 30 ms-spaced
+// burst during a cascade reads as a mechanical stepper. Pitch is
+// caller-supplied so each digit slot (H2 / M1 / M2) gets its own
+// voice; the buzzer driver just enforces the envelope and the
+// re-arm coalescing window.
+constexpr uint16_t kClickMs       = 6;
+
 // ---- Non-blocking melody scheduler (FR-10.7 plumbing) ---------------------
 //
 // Single-shot state machine: when play() is called, we copy a tiny
@@ -112,6 +119,25 @@ void chirp() {
   // configures the PWM slice and schedules the stop on a hardware
   // timer, so this returns in microseconds.
   tone(PIN_BUZZER, kChirpFreqHz, kChirpMs);
+}
+
+void tick_click(uint16_t freq_hz) {
+  if (!s_begun) return;
+  if (freq_hz == 0) return;   // 0 is the rest sentinel in Note[]
+  // Coalesce rapid clicks: if the previous click is still ringing
+  // (within kClickMs of the last call), skip re-arming the PWM.
+  // Without this, two clicks closer than ~6 ms cancel each other
+  // out (the tone() restart truncates the first click before the
+  // ear can register it).
+  static uint32_t s_last_click_ms = 0;
+  const uint32_t now = millis();
+  if (now - s_last_click_ms < kClickMs) return;
+  s_last_click_ms = now;
+  // No stop_internal() — if a melody is playing (e.g. theme switch
+  // mid-cascade), let it continue. The clicks are decorative and
+  // shouldn't trample a deliberate audio cue.
+  if (s_seq != nullptr) return;
+  tone(PIN_BUZZER, freq_hz, kClickMs);
 }
 
 void play(const Note* notes, uint8_t n) {
