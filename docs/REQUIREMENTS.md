@@ -1,7 +1,7 @@
 # Quantum Observatory — Requirements
 
-**Version:** 1.9
-**Status:** Draft — implementation in progress (W1–W5 landed; FR-12 color/background system landed; FR-13 splash landed; FR-14 on-device astronomical computation landed for ISS/sun/moon; FR-15 theming system in progress (T.1–T.2 landed); FR-16 compositor in progress (D.1–D.2 landed))
+**Version:** 1.10
+**Status:** Draft — implementation in progress (W1–W5 landed; FR-12 color/background system landed; FR-13 splash landed; FR-14 on-device astronomical computation landed for ISS/sun/moon; FR-15 theming system in progress (T.1–T.2 landed); FR-16 compositor in progress (D.1–D.2 landed); FR-18 persistent prefs pending Phase P)
 **Target hardware:** Raspberry Pi Pico W + Waveshare RGB-Matrix-P3 (64×32, FM6126A driver, HUB75)
 **Stack:** C++ on PlatformIO (earlephilhower Arduino-Pico core), Adafruit Protomatter, MQTT client, Home Assistant integration
 
@@ -147,7 +147,7 @@ The Director (HA) is authoritative for *event* triggering (e.g. "ISS pass starts
 Full design lives in [THEME.md](THEME.md); these are the contractual bullets.
 
 - **FR-15.1** The firmware SHALL ship at least five named themes drawn from canonical retro sci-fi reference points: `apollo_amber` (default), `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`. Each theme SHALL bundle its own ink palette, font selection, bracket convention, and layout hints — themes are not color-only swaps.
-- **FR-15.2** The active theme SHALL be selectable via MQTT topic `observatory/theme`, payload `{"id": "<theme_id>"}` (string id). Unknown ids SHALL be ignored and logged (FR-1.3 spirit). The firmware SHALL boot to `apollo_amber` and accept the Director's choice on connect; the active theme is not persisted across reboots (no flash wear).
+- **FR-15.2** The active theme SHALL be selectable via MQTT topic `observatory/theme`, payload `{"id": "<theme_id>"}` (string id). Unknown ids SHALL be ignored and logged (FR-1.3 spirit). The firmware SHALL boot to the **last persisted theme** loaded by the FR-18 preferences subsystem (`apollo_amber` if no preference has ever been written), and SHALL accept the Director's choice on connect. Every theme change (MQTT or IR) SHALL be written through `prefs::set_theme(...)` so the choice survives the next reboot, subject to the FR-18 wear-protection discipline.
 - **FR-15.3** Scenes SHALL NOT hardcode ink colors, font selections, or bracket strings. All theme-affected rendering SHALL go through a `theme::*` API that resolves the active theme on every call. CI / code review SHALL flag literal RGB565 constants and `setFont(&...)` calls inside `src/scenes/`.
 - **FR-15.4** A theme switch SHALL take effect at the next-frame boundary with no torn frames and no scene re-init. The active scene SHALL continue rendering, simply consulting the new theme's values starting from the next `render()` call.
 - **FR-15.5** The firmware-owned safety overrides (`THERMAL_SAFE`, `NIGHT`, `OFFLINE`, `SPLASH`) SHALL preserve the active theme — they affect brightness and message, not theme identity. The dim variants of these scenes SHALL consult `theme::ink(...)` and render at the low end of the FG ramp.
@@ -347,9 +347,11 @@ scene) so HA's history and automations stay authoritative.
 - **FR-17.10 Theme persistence.** Theme cycle (`◄`/`►`) SHALL invoke
   the same `theme::set()` path that MQTT uses (FR-15.2, FR-15.4) so
   the next-frame swap and the status-heartbeat echo (FR-15.7) are
-  preserved. The remote-driven theme is NOT persisted across reboots
-  (NFR-3 — no flash wear); on boot the device SHALL return to
-  `apollo_amber` until either MQTT or the remote pushes a choice.
+  preserved. The remote-driven theme SHALL be persisted across reboots
+  via the FR-18 preferences subsystem (same code path as the MQTT
+  selector); on boot the device SHALL restore the last-saved theme,
+  falling back to `apollo_amber` only when no preference has ever
+  been written.
 
 - **FR-17.11 IR vs. on-board buttons.** FR-17 SHALL coexist with
   FR-11 (on-board buttons) without overlap: on-board buttons remain
@@ -371,6 +373,79 @@ scene) so HA's history and automations stay authoritative.
   SHALL escalate to a hardware mitigation (LC filter on receiver
   Vcc, ferrite bead on signal line, or physical shielding) before
   FR-17 is declared complete.
+
+### FR-18 Persistent User Preferences
+
+Viewer-ergonomics choices the user makes from the IR remote or MQTT
+should survive a power cycle without round-tripping HA. FR-18 defines
+the small persistence layer that backs those choices, with a wear
+budget tight enough to keep the RP2040's QSPI flash inside its
+endurance envelope (~100 k writes/sector) for the device's lifetime.
+
+- **FR-18.1 Storage backend.** The firmware SHALL use **LittleFS** on
+  the on-board QSPI flash as the preferences store, in a dedicated
+  file (`/prefs.json`). The file SHALL be a small flat JSON object
+  with a schema version (`v: 1`) so future migrations are explicit.
+  No per-key files, no nested directories. Boot reads the file once;
+  steady-state reads use the in-RAM cache.
+
+- **FR-18.2 Tracked preferences (v1 scope).** The v1 schema SHALL
+  carry exactly the **active theme id** (`theme: "<theme_id>"`).
+  Future preferences (default scene, brightness ceiling, mute, night
+  threshold overrides) MAY be added by bumping the schema version
+  and extending the migration table; they are out of scope for this
+  requirement.
+
+- **FR-18.3 Write API.** A `prefs::set_<key>(value)` family SHALL be
+  the single mutation entry point. Each setter SHALL: (a) update the
+  in-RAM cache immediately so the active scene picks up the change
+  on the next frame (FR-15.4 boundary contract preserved), (b) mark
+  the cache *dirty*, and (c) arm a **debounced writeback timer**.
+  The setter SHALL NOT block on flash I/O.
+
+- **FR-18.4 Wear-protected writeback.** Dirty preferences SHALL be
+  flushed to flash by a Core 0 background tick under the following
+  rules, all of which SHALL be satisfied before a write occurs:
+  1. Settle window: ≥ 5 seconds since the most recent
+     `prefs::set_*()` call (so a fast theme cycle from the remote
+     coalesces into one write).
+  2. Change check: the in-RAM value differs from the last value
+     successfully written to flash (no-op writes are suppressed).
+  3. Rate cap: at most one flush per 30 seconds, regardless of
+     change activity. A pending change inside the cap is held until
+     the window opens.
+
+  The flush SHALL be atomic (write-to-temp + rename) so a crash
+  mid-write cannot corrupt `/prefs.json`.
+
+- **FR-18.5 Boot restore.** During `setup()` (before the first scene
+  renders) the firmware SHALL read `/prefs.json`, apply each known
+  key to the corresponding subsystem (`theme::set(id)` for v1), and
+  log the restored values. A missing or malformed file SHALL be
+  treated as "no preferences yet" — defaults from `config.h` apply
+  and the file SHALL NOT be re-created until a setter is called.
+  Unknown keys (e.g. left over from a newer schema) SHALL be
+  preserved on disk across writes (read-modify-write, not full
+  overwrite) so a downgrade does not silently drop forward-version
+  data.
+
+- **FR-18.6 Lifetime budget.** Combined with FR-18.4's caps, the
+  worst-case write rate SHALL be ≤ 2 writes/minute under continuous
+  remote thrash; the typical rate SHALL be ≤ 10 writes/day. Even at
+  the worst case the QSPI flash endurance margin (~100 k
+  writes/sector with LittleFS wear-levelling across the partition)
+  exceeds 10 years of continuous service.
+
+- **FR-18.7 Observability.** The `observatory/status` heartbeat
+  (§5.4) SHALL include a `prefs_dirty` boolean indicating whether
+  the in-RAM cache differs from the on-flash copy, so HA (and the
+  FR-17.8 info overlay) can confirm a setting has been durably saved.
+
+- **FR-18.8 Reset path.** Publishing an empty payload to
+  `observatory/prefs/reset` SHALL delete `/prefs.json` and restart
+  the device with stock defaults, providing a remote escape hatch if
+  a future schema migration goes wrong. The topic SHALL be subject
+  to the same FR-1.4 malformed-payload safety as every other input.
 
 ---
 
@@ -464,12 +539,13 @@ Topic: `observatory/clear_sticky` — payload: empty.
 ### 5.4 Status (Pico → HA)
 Topic: `observatory/status` — JSON heartbeat every 30 s:
 ```json
-{ "scene_id": "...", "fps": 28, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber" }
+{ "scene_id": "...", "fps": 28, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber", "prefs_dirty": false }
 ```
 
 `render_slack_ms` is the rolling average per-frame idle window on Core 1
 (FR-16.9); HA can use it as a budget gauge for adding new layers / heavier
-scenes. `theme` is the active theme id (FR-15.7).
+scenes. `theme` is the active theme id (FR-15.7). `prefs_dirty` is the
+FR-18.7 in-RAM-vs-flash divergence flag.
 
 ### 5.5 Remote Event (Pico → HA, FR-17.7)
 Topic: `observatory/remote/event` — published once per accepted IR press:
@@ -534,6 +610,7 @@ plus Phase T theming and Phase D compositor).
 | **W5 — First real observatory scenes** | iss_pass, moon_phase, jupiter_visibility, constellation_now | Phase 7 |
 | **W6 — Theming system** | Five themes, MQTT-selectable, runtime BG duotone | Phase T |
 | **W7 — Compositor & idle-slack utilization** | Layer stack, fade transitions, overlays, toasts | Phase D |
+| **W7.5 — Persistent preferences** | LittleFS prefs store, wear-protected writeback, theme persists | Phase P |
 | **W8 — Polish & hardening** | OTA, registry-as-data, soak test, tag v1.0 | Phase 8–9 |
 
 ---

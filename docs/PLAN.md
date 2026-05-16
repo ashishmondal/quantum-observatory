@@ -694,6 +694,73 @@ only (no cross-core safety needed).
 
 ---
 
+## Phase P — Persistent User Preferences (FR-18)
+
+> The user-facing settings reachable from the IR remote (theme today,
+> default scene / brightness / mute later) should survive a power
+> cycle without round-tripping HA. Phase P stands up a tiny LittleFS-
+> backed prefs layer with a wear-protected writeback so the RP2040's
+> QSPI flash never sees more than a couple of writes per minute even
+> under remote thrash.
+
+- [ ] **P.1 LittleFS mount + `prefs::` skeleton** (FR-18.1, FR-18.2)
+  - Add a small `src/state/prefs.{h,cpp}` module owning the in-RAM
+    cache (`struct Prefs { uint8_t schema_v; theme::Id theme; }`) and
+    a single mutex for the dirty flag. Mount LittleFS in `setup()`
+    before `theme::set()` is first called. v1 schema carries exactly
+    the active theme id; the file is `/prefs.json`, flat object,
+    `{"v":1,"theme":"apollo_amber"}`. **Exit:** module compiles and
+    mounts the FS without affecting boot time; `prefs::current()`
+    returns sane defaults when the file is absent.
+
+- [ ] **P.2 Boot restore** (FR-18.5)
+  - `prefs::load()` runs once during `setup()`, before the first
+    scene render, parses `/prefs.json` with `StaticJsonDocument<128>`
+    (NFR-2.3), and applies each known key to its subsystem
+    (`theme::set(parsed.theme)` for v1). Missing/malformed file →
+    log + treat as "no prefs yet"; do NOT recreate the file until a
+    setter is called. Unknown keys are read into a passthrough buffer
+    and re-emitted on every write so a downgrade doesn't silently
+    drop forward-version data. **Exit:** rebooting after a theme
+    change brings the device back up in the same theme.
+
+- [ ] **P.3 Wear-protected writeback** (FR-18.3, FR-18.4, FR-18.6)
+  - `prefs::set_theme(id)` updates the cache, marks dirty, arms a
+    debounce timer (5 s settle since most-recent setter call). A
+    Core 0 background tick drains the dirty flag subject to: settle
+    elapsed AND value changed vs. last-flushed AND ≥ 30 s since the
+    most-recent flush. Atomic write = `/prefs.json.tmp` then
+    `LittleFS::rename()` so a crash mid-write can't corrupt the
+    canonical file. **Exit:** spamming `◄`/`►` for 10 seconds
+    produces exactly one flash write; `tools/prefs_log.py` (one-shot
+    serial scrape) confirms the write rate stays ≤ 2/min worst case
+    and ≤ 10/day typical.
+
+- [ ] **P.4 Wire MQTT + IR through `prefs::set_theme`** (FR-15.2,
+  FR-17.10)
+  - Replace every existing `theme::set(...)` call site that
+    represents a *user choice* (MQTT `observatory/theme` handler in
+    `mqtt_link.cpp`, IR `◄`/`►` dispatch in `ir_actions.cpp`) with
+    `prefs::set_theme(...)`, which calls `theme::set()` internally
+    and additionally arms the writeback timer. Diagnostic /
+    firmware-internal `theme::set()` calls (e.g. `gfx_test` cycling)
+    SHALL bypass `prefs::` so they don't pollute the persisted
+    choice. **Exit:** flipping the theme from either source
+    persists; `gfx_test` cycling does not.
+
+- [ ] **P.5 Heartbeat + reset path** (FR-18.7, FR-18.8)
+  - Extend the `observatory/status` heartbeat builder to include
+    `prefs_dirty: <bool>` (read from `prefs::is_dirty()`). Subscribe
+    `observatory/prefs/reset` in `mqtt_link.cpp`; an empty payload
+    deletes `/prefs.json` and triggers a clean reboot via
+    `rp2040.reboot()`. Surface the dirty flag on the FR-17.8 info
+    overlay (small `*` glyph next to the theme id when dirty).
+    **Exit:** publishing the reset topic returns the device to
+    `apollo_amber` on next boot; the overlay shows the dirty
+    indicator for ≤ 35 s after a theme change, then clears.
+
+---
+
 ## Phase 9 — Hardening (final)
 
 - [ ] **9.1 Memory audit** — log free heap; confirm ≥ 32 KB headroom under all scenes; also flash budget — each `assets/*.bmp` costs ~2.4 KB; track total registry size
