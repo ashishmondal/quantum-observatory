@@ -420,6 +420,24 @@ mosquitto_sub -t observatory/debug -v
 then trigger `{"scene_id":"ir_test"}` and walk through every prompt on
 the panel.
 
+### `observatory/test/clock_anim` — synthetic clock-cascade trigger (dev-only)
+
+Subscribed **only** when the firmware is built with `-DCLOCK_ANIM_TEST`
+(off by default). Lets the developer fire a giant-clock digit-roll
+cascade (FR-9.7) on demand without waiting for the wall clock.
+
+```json
+{ "kind": "minute" }
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `kind` | string | yes | One of `"minute"` (M2 only), `"ten_min"` (M1 cascade), `"hour"` (H2 cascade). Unknown values are logged and dropped (FR-1.3). |
+
+Production builds silently ignore the topic (the subscription is
+compiled out). Not meant to be wired into HA automations — exists
+purely for bench-side animation tuning.
+
 ---
 
 ## Reconnect Behaviour
