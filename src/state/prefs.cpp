@@ -16,11 +16,13 @@ namespace prefs {
 namespace {
 
 // Defaults applied when no /prefs.json exists (FR-18.5). Theme falls
-// back to APOLLO_AMBER per FR-15.2 / plan P.1; matches the explicit
-// theme::set() that lived in setup() before this module landed.
+// back to APOLLO_AMBER per FR-15.2 / plan P.1; image_tint_pct
+// defaults to 50 per FR-15.6 / THEME.md §6.9. Matches the explicit
+// theme:: bring-up state main.cpp would set if prefs were absent.
 constexpr Prefs kDefaults = {
-    .schema_v = kSchemaVersion,
-    .theme    = theme::Id::APOLLO_AMBER,
+    .schema_v       = kSchemaVersion,
+    .theme          = theme::Id::APOLLO_AMBER,
+    .image_tint_pct = 50,
 };
 
 // In-RAM cache. Read-mostly: only mutated by Core 0 setters (none
@@ -79,7 +81,9 @@ constexpr const char* kPath = "/prefs.json";
 // (everything not in this set is forward-version data we must
 // preserve).
 bool is_known_key(const char* k) {
-  return strcmp(k, "v") == 0 || strcmp(k, "theme") == 0;
+  return strcmp(k, "v") == 0 ||
+         strcmp(k, "theme") == 0 ||
+         strcmp(k, "image_tint_pct") == 0;
 }
 
 // Parse /prefs.json into the cache + passthrough buffer. Called once
@@ -155,7 +159,7 @@ void load() {
     Serial.println(") — applying known keys, preserving the rest");
   }
 
-  // ── Known v1 keys ─────────────────────────────────────────────
+  // ── Known keys ────────────────────────────────────────────────
   // theme: wire id string (FR-18.2). Unknown id → fall back to
   // default + log; we never want a typo'd file to wedge the boot.
   const char* theme_id = doc["theme"] | static_cast<const char*>(nullptr);
@@ -169,6 +173,24 @@ void load() {
       Serial.print("[prefs] unknown theme id=");
       Serial.print(theme_id);
       Serial.println(" — keeping default");
+    }
+  }
+
+  // image_tint_pct (FR-18.2 v2 / FR-15.6). Missing / out-of-range
+  // → keep default; never wedge the boot on a typo. Note: we set
+  // the cache value here but do NOT call theme::set_image_tint_pct
+  // — main.cpp's bring-up will read prefs::current() and push the
+  // restored value into theme:: alongside the restored theme id.
+  if (doc.containsKey("image_tint_pct")) {
+    const int v_pct = doc["image_tint_pct"] | -1;
+    if (v_pct >= 0 && v_pct <= 100) {
+      s_cache.image_tint_pct = static_cast<uint8_t>(v_pct);
+      Serial.print("[prefs] restored image_tint_pct=");
+      Serial.println(v_pct);
+    } else {
+      Serial.print("[prefs] image_tint_pct out of range=");
+      Serial.print(v_pct);
+      Serial.println(" — keeping default 50");
     }
   }
 
@@ -244,13 +266,15 @@ bool write_atomic(const Prefs& snapshot) {
   constexpr size_t kFileCap = 256;
   char buf[kFileCap];
   const char* theme_id = theme::string_from_id(snapshot.theme);
-  // Format: {"v":1,"theme":"<id>"<passthrough>}
+  // Format: {"v":2,"theme":"<id>","image_tint_pct":<n><passthrough>}
   // s_passthrough either is empty or starts with `,` so it splices
-  // cleanly after the theme field with no conditional formatting.
+  // cleanly after the last known field with no conditional formatting.
   const int n = snprintf(buf, sizeof(buf),
-                         "{\"v\":%u,\"theme\":\"%s\"%s}",
+                         "{\"v\":%u,\"theme\":\"%s\","
+                         "\"image_tint_pct\":%u%s}",
                          static_cast<unsigned>(kSchemaVersion),
                          theme_id,
+                         static_cast<unsigned>(snapshot.image_tint_pct),
                          s_passthrough);
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(buf)) {
     Serial.print("[prefs] write FAILED — payload would be ");
@@ -350,6 +374,22 @@ void cycle_theme(int8_t delta) {
   const int     step = delta % static_cast<int>(n);
   const uint8_t nxt = static_cast<uint8_t>((cur + n + step) % n);
   set_theme(static_cast<theme::Id>(nxt));
+}
+
+void set_image_tint_pct(uint8_t pct) {
+  if (pct > 100) pct = 100;
+  // Drive the visible rebuild first so the next-frame palette flip
+  // (FR-15.4) lands at the same point the bare theme:: API would
+  // have produced. theme:: itself is idempotent on no-op.
+  theme::set_image_tint_pct(pct);
+
+  mutex_enter_blocking(&s_mutex);
+  if (s_cache.image_tint_pct != pct) {
+    s_cache.image_tint_pct = pct;
+    s_dirty                = true;
+    s_last_setter_ms       = millis();
+  }
+  mutex_exit(&s_mutex);
 }
 
 void tick(uint32_t now_ms) {

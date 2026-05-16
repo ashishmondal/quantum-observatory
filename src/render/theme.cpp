@@ -91,6 +91,13 @@ Theme* const kThemes[static_cast<int>(Id::COUNT)] = {
 // FR-15.2 (boots to default; HA pushes desired theme on connect).
 volatile uint8_t s_active_id = static_cast<uint8_t>(Id::APOLLO_AMBER);
 
+// FR-15.6 / THEME.md §6.9 — image-tint strength (0..100). Default 50
+// matches the user-facing "soft hint" semantic; T.10's blend() reads
+// this every rebuild and the two short-circuits at 0 / 100 give the
+// "passthrough" and "full duotone" edges. Naturally-aligned byte —
+// same atomic-read contract as s_active_id.
+volatile uint8_t s_image_tint_pct = 50;
+
 // millis() at the most recent theme change. 0 until the first switch
 // so the giant clock's "theme changed" banner doesn't fire on boot.
 volatile uint32_t s_last_change_ms = 0;
@@ -126,6 +133,43 @@ constexpr uint8_t hi_r(uint32_t c) { return static_cast<uint8_t>((c >> 16) & 0xF
 constexpr uint8_t hi_g(uint32_t c) { return static_cast<uint8_t>((c >>  8) & 0xFF); }
 constexpr uint8_t hi_b(uint32_t c) { return static_cast<uint8_t>( c        & 0xFF); }
 
+// FR-15.6 / THEME.md §6.9 — per-channel linear blend between two
+// RGB565 endpoints at strength `pct` (0..100). Unpacks to 8-bit
+// channels by shifting the 5/6-bit fields back up to a byte (the
+// same hi-bit replication the panel sees), lerps in 8-bit space,
+// then re-packs with round-to-nearest matching pack565(). Caller
+// guarantees pct ≤ 100; the two short-circuit edges (== 0, == 100)
+// are handled in rebuild_runtime_palettes() so this helper never
+// runs on the trivial cases.
+inline uint16_t blend565(uint16_t orig, uint16_t target, uint8_t pct) {
+  // 5-6-5 → 8-bit. Replicating the high bits in the low slots is
+  // what the matrix driver effectively shows; using bare
+  // shifts (orig >> 11 << 3) would compress the dynamic range to
+  // 0..248 and make a tint=100 result drift slightly off the
+  // pure-target color. The +X expansion below keeps the endpoints
+  // exact (0 stays 0, max stays 255).
+  auto unpack = [](uint16_t v, uint8_t& r, uint8_t& g, uint8_t& b) {
+    const uint8_t r5 = static_cast<uint8_t>((v >> 11) & 0x1F);
+    const uint8_t g6 = static_cast<uint8_t>((v >>  5) & 0x3F);
+    const uint8_t b5 = static_cast<uint8_t>( v        & 0x1F);
+    r = static_cast<uint8_t>((r5 << 3) | (r5 >> 2));
+    g = static_cast<uint8_t>((g6 << 2) | (g6 >> 4));
+    b = static_cast<uint8_t>((b5 << 3) | (b5 >> 2));
+  };
+  uint8_t r0, g0, b0, r1, g1, b1;
+  unpack(orig,   r0, g0, b0);
+  unpack(target, r1, g1, b1);
+  // Signed math so target < orig works without underflow on uint8.
+  const int dr = static_cast<int>(r1) - static_cast<int>(r0);
+  const int dg = static_cast<int>(g1) - static_cast<int>(g0);
+  const int db = static_cast<int>(b1) - static_cast<int>(b0);
+  const int p  = static_cast<int>(pct);
+  const uint8_t rr = static_cast<uint8_t>(static_cast<int>(r0) + (dr * p + (dr >= 0 ? 50 : -50)) / 100);
+  const uint8_t gg = static_cast<uint8_t>(static_cast<int>(g0) + (dg * p + (dg >= 0 ? 50 : -50)) / 100);
+  const uint8_t bb = static_cast<uint8_t>(static_cast<int>(b0) + (db * p + (db >= 0 ? 50 : -50)) / 100);
+  return pack565(rr, gg, bb);
+}
+
 // Build the 256-entry ramp LUT from a BgRamp's stops. The four stops
 // land at lum {0, 85, 170, 255}; segments interpolate linearly in
 // 8-bit RGB then quantise to RGB565.
@@ -156,7 +200,8 @@ void build_ramp_lut(const BgRamp& r, uint16_t out[256]) {
 // Rebuild every themable image's runtime palette under the new theme,
 // then atomically flip each image's active buffer so Core 1 picks the
 // new palette up next frame. Caller is the writer (Core 0); the only
-// callers are theme::set() / theme::cycle() so single-writer holds.
+// callers are theme::set() / theme::cycle() / theme::set_image_tint_pct()
+// so single-writer holds.
 void rebuild_runtime_palettes(uint8_t new_id) {
   if (new_id >= static_cast<uint8_t>(Id::COUNT)) return;
   const BgRamp* r = kThemes[new_id]->bg_ramp();
@@ -165,13 +210,31 @@ void rebuild_runtime_palettes(uint8_t new_id) {
   uint16_t lut[256];
   build_ramp_lut(*r, lut);
 
+  // FR-15.6 / THEME.md §6.9 — sample the tint strength once per
+  // rebuild so a concurrent set_image_tint_pct() (Core 0 only, but
+  // still — discipline) can't make the inner loop see a torn value.
+  const uint8_t pct = s_image_tint_pct;
+
   for (int i = 0; i < kImageRegistryCount; ++i) {
     const ImageEntry& e = kImageRegistry[i];
     if (!e.themeable || e.lum == nullptr) continue;
     const uint8_t inactive = static_cast<uint8_t>(s_active_buffer[i] ^ 1u);
     uint16_t* dst = s_runtime_palette[i][inactive];
-    for (int k = 0; k < 192; ++k) {
-      dst[k] = lut[e.lum[k]];
+    if (pct == 0) {
+      // Full passthrough — copy the baked palette straight in. Lets
+      // the user keep a theme's fonts / inks while leaving photos
+      // alone. Cheap: 192 word copies.
+      for (int k = 0; k < 192; ++k) dst[k] = e.palette[k];
+    } else if (pct == 100) {
+      // Full duotone (the pre-T.10 behaviour, byte-for-byte).
+      for (int k = 0; k < 192; ++k) dst[k] = lut[e.lum[k]];
+    } else {
+      // Per-channel lerp between baked and full-duotone target.
+      // ~192 blends × 5 themable images ≈ <1 ms on RP2040, well
+      // inside the FR-15.6 5 ms theme-switch budget.
+      for (int k = 0; k < 192; ++k) {
+        dst[k] = blend565(e.palette[k], lut[e.lum[k]], pct);
+      }
     }
     // Publish the freshly-built buffer. Naturally-aligned byte store
     // is atomic on RP2040 — Core 1's next active_image_palette() read
@@ -303,6 +366,19 @@ const uint16_t* active_image_palette(const ImageEntry& e) {
   const uint8_t buf = s_active_buffer[e.image_index] & 1u;
   return s_runtime_palette[e.image_index][buf];
 }
+
+void set_image_tint_pct(uint8_t pct) {
+  if (pct > 100) pct = 100;
+  if (pct == s_image_tint_pct) return;   // idempotent — no rebuild
+  s_image_tint_pct = pct;
+  // Rebuild every themable image's runtime palette under the active
+  // theme using the new strength. Apollo (passthrough, bg_ramp ==
+  // nullptr) short-circuits inside rebuild_runtime_palettes() so
+  // calling this on the default theme is effectively free.
+  rebuild_runtime_palettes(s_active_id);
+}
+
+uint8_t image_tint_pct() { return s_image_tint_pct; }
 
 Melody signature_melody(Id id) {
   const uint8_t i = static_cast<uint8_t>(id);

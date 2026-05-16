@@ -374,3 +374,34 @@ mqtt:
         - blade_runner
         - lcars_tos
       icon: mdi:palette
+
+  # observatory/theme — image-tint strength (FR-15.6 / phase T.11)
+  # ---------------------------------------------------------------
+  #
+  # MQTT `number` entity exposing the 0..100 % image-tint slider.
+  # 0 → every themable BMP renders in its original baked palette
+  # under any theme. 100 → full duotone retoning (the pre-T.10
+  # behaviour). Default 50 leaves the photo recognisable with a
+  # soft theme-coloured cast. Apollo (the passthrough theme) is
+  # unaffected at every value — see THEME.md §6.9.
+  #
+  # Shares command_topic + state_topic with the theme select so a
+  # single status heartbeat (FR-15.7) drives both UIs. The firmware
+  # accepts `id` and `tint` independently in the same payload, so
+  # the slider's `{"tint": N}` envelope never disturbs the active
+  # theme id.
+  number:
+    - name: "Observatory image tint"
+      unique_id: observatory_image_tint
+      command_topic: observatory/theme
+      command_template: '{"tint":{{ value | int }}}'
+      state_topic: observatory/status
+      value_template: "{{ value_json.image_tint_pct | default(50) }}"
+      qos: 1
+      retain: false
+      min: 0
+      max: 100
+      step: 5
+      unit_of_measurement: "%"
+      mode: slider
+      icon: mdi:contrast-circle

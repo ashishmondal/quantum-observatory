@@ -697,16 +697,21 @@ void handle_constellation(char* buf, unsigned int length, uint32_t now_ms) {
   Serial.println();
 }
 
-// observatory/theme handler — FR-15.2 active-theme selector. Payload:
-//   {"id": "<theme_id>"}
-// The wire id is a lowercase enumerator name (e.g. "apollo_amber"); the
-// canonical mapping lives in theme::id_from_string. Unknown ids are
-// logged and dropped per FR-1.3 — the active theme keeps rendering.
-// prefs::set_theme() is itself idempotent (no-op when id is unchanged),
-// so HA echoing the current theme on reconnect is harmless and does
-// NOT mark the prefs cache dirty. Per FR-15.4 the swap is next-frame,
-// no scene re-init. Per FR-18.3 / FR-15.2 the change is persisted via
-// the wear-protected writeback so it survives a power cycle.
+// observatory/theme handler — FR-15.2 active-theme selector + FR-15.6
+// image-tint strength. Payload:
+//   {"id": "<theme_id>"}            // theme only
+//   {"tint": 0..100}                // strength only
+//   {"id": "<theme_id>", "tint": N} // both, applied atomically
+// At least one of `id` / `tint` MUST be present. The wire id is a
+// lowercase enumerator name (e.g. "apollo_amber"); the canonical
+// mapping lives in theme::id_from_string. Unknown ids and out-of-range
+// tints are logged and the WHOLE payload is dropped per FR-1.3 — we
+// never half-apply state. prefs::set_theme() / set_image_tint_pct()
+// are themselves idempotent (no-op when value is unchanged), so HA
+// echoing the current values on reconnect is harmless and does NOT
+// mark the prefs cache dirty. Per FR-15.4 the swap is next-frame,
+// no scene re-init. Per FR-18.3 / FR-15.2 each change is persisted
+// via the wear-protected writeback so it survives a power cycle.
 void handle_theme(char* buf, unsigned int length) {
   ++s_theme_msgs;
 
@@ -714,25 +719,54 @@ void handle_theme(char* buf, unsigned int length) {
   if (!p.ok()) return;
   auto& doc = p.doc();
 
-  const char* wire_id = doc["id"] | static_cast<const char*>(nullptr);
-  if (wire_id == nullptr || wire_id[0] == '\0') {
+  const bool has_id   = doc.containsKey("id");
+  const bool has_tint = doc.containsKey("tint");
+  if (!has_id && !has_tint) {
     ++s_theme_rejects;
-    Serial.print("[mqtt] theme missing id payload=");
+    Serial.print("[mqtt] theme missing id/tint payload=");
     Serial.println(buf);
     return;
   }
 
-  theme::Id id;
-  if (!theme::id_from_string(wire_id, &id)) {
-    ++s_theme_rejects;
-    Serial.print("[mqtt] theme unknown id=");
-    Serial.println(wire_id);
-    return;
+  // Validate everything BEFORE applying anything (FR-1.3 — never
+  // half-apply: a payload with a good id and a bad tint must be
+  // rejected as a whole, not partially applied).
+  theme::Id id = theme::current();
+  if (has_id) {
+    const char* wire_id = doc["id"] | static_cast<const char*>(nullptr);
+    if (wire_id == nullptr || wire_id[0] == '\0' ||
+        !theme::id_from_string(wire_id, &id)) {
+      ++s_theme_rejects;
+      Serial.print("[mqtt] theme bad/unknown id payload=");
+      Serial.println(buf);
+      return;
+    }
+  }
+  uint8_t tint = theme::image_tint_pct();
+  if (has_tint) {
+    // Use a sentinel default outside the valid range so a non-int /
+    // missing field surfaces here even though we already gated on
+    // containsKey() above (defensive against ArduinoJson coercion
+    // surprises on string / float inputs).
+    const int v = doc["tint"] | -1;
+    if (v < 0 || v > 100) {
+      ++s_theme_rejects;
+      Serial.print("[mqtt] theme tint out of range payload=");
+      Serial.println(buf);
+      return;
+    }
+    tint = static_cast<uint8_t>(v);
   }
 
-  prefs::set_theme(id);
-  Serial.print("[mqtt] theme applied id=");
-  Serial.println(wire_id);
+  // Apply tint first so the rebuild triggered by set_theme() (when
+  // the id also changed) already uses the new strength. Both setters
+  // are idempotent on no-op so applying both is cheap.
+  if (has_tint) prefs::set_image_tint_pct(tint);
+  if (has_id)   prefs::set_theme(id);
+  Serial.print("[mqtt] theme applied");
+  if (has_id)   { Serial.print(" id=");   Serial.print(theme::string_from_id(id)); }
+  if (has_tint) { Serial.print(" tint="); Serial.print(static_cast<int>(tint)); }
+  Serial.println();
 }
 
 #ifdef CLOCK_ANIM_TEST
@@ -1003,6 +1037,10 @@ bool publish_status(uint32_t now_ms) {
   // Active retro sci-fi theme id (FR-15.7 / phase T.4). Lets HA confirm
   // the device's state without round-tripping observatory/theme.
   doc["theme"] = theme::string_from_id(theme::current());
+  // FR-15.6 / FR-15.7 — active image-tint strength (0..100). Echoed
+  // alongside the theme so HA can drive a single number entity
+  // without round-tripping observatory/theme.
+  doc["image_tint_pct"] = static_cast<int>(theme::image_tint_pct());
   // FR-18.7 — surfaces whether the in-RAM prefs cache has changes
   // not yet flushed to /prefs.json. HA (and the FR-17.8 info
   // overlay) use this to confirm a setting has been durably saved;

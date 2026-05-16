@@ -117,6 +117,11 @@ void setup() {
   // and proves the reader links. Single-byte atomic store on RP2040
   // — no mutex (same pattern as g_render_fps).
   theme::set(prefs::current().theme);
+  // FR-15.6 / T.10 — apply the restored image-tint strength after
+  // the theme so the first runtime-palette rebuild already uses the
+  // operator's setting (avoids a one-frame flash at the default 50
+  // before the saved value lands).
+  theme::set_image_tint_pct(prefs::current().image_tint_pct);
   Serial.print("[theme] active id=");
   Serial.println(static_cast<int>(theme::current()));
 

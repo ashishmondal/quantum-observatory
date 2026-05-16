@@ -327,34 +327,39 @@ mosquitto_pub -t observatory/constellation -m '{"index":0,"highlight_star":1}'
 mosquitto_pub -t observatory/constellation -m '{"index":2,"highlight_star":-1}'
 ```
 
-### `observatory/theme` — active retro sci-fi theme (FR-15.2)
+### `observatory/theme` — active retro sci-fi theme + image tint (FR-15.2 / FR-15.6)
 
 ```json
-{ "id": "apollo_amber" }
+{ "id": "apollo_amber", "tint": 50 }
 ```
 
 | Field | Type | Required | Range | Notes |
 |---|---|---|---|---|
-| `id` | string | yes | one of `apollo_amber`, `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos` | lowercase wire id matching `theme::Id` enumerators (FR-15.1). Unknown ids → drop (FR-1.3). |
+| `id` | string | one of `id` / `tint` required | one of `apollo_amber`, `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos` | lowercase wire id matching `theme::Id` enumerators (FR-15.1). Unknown ids → drop whole payload (FR-1.3). |
+| `tint` | int (%) | one of `id` / `tint` required | 0..100 (default 50) | image-tint strength for non-default themes (FR-15.6). `0` = each themable BMP renders in its original baked palette regardless of theme; `100` = full duotone retoning. Out-of-range or non-integer → drop whole payload (FR-1.3, never half-apply). Apollo is passthrough at every value. |
 
 The swap takes effect at the next frame boundary with no scene re-init
-(FR-15.4). `theme::set()` is idempotent — re-publishing the active id
-is a no-op (no flash write). The active theme **is persisted across
-reboots** via the FR-18 preferences subsystem (phase P): firmware
-boots to the last value written to `/prefs.json` (`apollo_amber` if
-the file is missing/corrupt). HA may still push the desired theme on
-reconnect; the wear-protected writeback in FR-18.4 coalesces rapid
-changes into one flush per ~30 s. To force a full reset to defaults,
-publish to `observatory/prefs/reset` (see below).
+(FR-15.4). Both setters are idempotent — re-publishing the active id
+or the active tint is a no-op (no flash write). The active theme +
+tint **are persisted across reboots** via the FR-18 preferences
+subsystem (phase P): firmware boots to the last values written to
+`/prefs.json` (`apollo_amber` + tint `50` if the file is
+missing/corrupt). HA may still push the desired values on reconnect;
+the wear-protected writeback in FR-18.4 coalesces rapid changes into
+one flush per ~30 s. To force a full reset to defaults, publish to
+`observatory/prefs/reset` (see below).
 
-The active theme is echoed back in `observatory/status.theme`
-(FR-15.7) so the Director can confirm without round-tripping this
-topic. The `observatory/status.prefs_dirty` field flags an unflushed
-change (cache differs from `/prefs.json`).
+The active theme + tint are echoed back in `observatory/status.theme`
+and `observatory/status.image_tint_pct` (FR-15.7) so the Director can
+confirm without round-tripping this topic. The
+`observatory/status.prefs_dirty` field flags an unflushed change
+(cache differs from `/prefs.json`).
 
 ```bash
 mosquitto_pub -t observatory/theme -m '{"id":"apollo_amber"}'
 mosquitto_pub -t observatory/theme -m '{"id":"nostromo_green"}'
+mosquitto_pub -t observatory/theme -m '{"tint":0}'
+mosquitto_pub -t observatory/theme -m '{"id":"nostromo_green","tint":30}'
 ```
 
 ### `observatory/prefs/reset` — factory-reset persisted prefs (FR-18.8)
@@ -388,7 +393,7 @@ mosquitto_pub -t observatory/prefs/reset -n
 Published every 30 s.
 
 ```json
-{ "scene_id": "clock", "fps": 24, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber", "prefs_dirty": false }
+{ "scene_id": "clock", "fps": 24, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber", "image_tint_pct": 50, "prefs_dirty": false }
 ```
 
 | Field | Type | Notes |
@@ -400,6 +405,7 @@ Published every 30 s.
 | `free_heap` | int (bytes) | `rp2040.getFreeHeap()` — track regressions per NFR-2.1 |
 | `render_slack_ms` | int (ms) | Rolling 32-frame average of `kFrameIntervalMs - render_time` on Core 1 (FR-16.9). High = idle headroom; falling toward 0 = scene is using the full frame budget. |
 | `theme` | string | active retro sci-fi theme wire-id (FR-15.7); matches `observatory/theme` payloads. |
+| `image_tint_pct` | int (%) | FR-15.6 / FR-15.7 — active image-tint strength, 0..100 (default 50). `0` = original baked palettes under any theme; `100` = full duotone retoning. Apollo is passthrough at every value. |
 | `prefs_dirty` | bool | FR-18.7 — `true` iff the in-RAM prefs cache differs from `/prefs.json` (a setting hasn't been durably saved yet). Expect a `true` window of ≤ 35 s after a theme change (5 s settle + worst-case 30 s rate cap), then `false` once the FR-18.4 writeback tick lands. |
 
 ### `observatory/debug` — one-shot diagnostic dumps (phase IR.2)

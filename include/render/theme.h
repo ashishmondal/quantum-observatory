@@ -197,6 +197,19 @@ palette::Id     bg_palette_for(BgType bg);
 // swap, no torn frames). Reader-side; safe from Core 1 every frame.
 const uint16_t* active_image_palette(const ImageEntry& e);
 
+// FR-15.6 / THEME.md §6.9 — image-tint strength (0..100, default 50).
+// 0   → every themable image renders in its original baked palette
+//       under any theme (full passthrough).
+// 100 → full duotone retoning (the pre-T.10 behaviour).
+// Anything in between is a per-channel linear blend in
+// rebuild_runtime_palettes(). Setter clamps, stores, and rebuilds
+// every themable image's runtime palette — same double-buffered
+// atomic flip a theme switch uses, so FR-15.4 (no torn frames) holds.
+// Apollo (passthrough, no bg_ramp) is a no-op at every value.
+// Writer is Core 0 only; reader is byte-atomic on RP2040.
+void    set_image_tint_pct(uint8_t pct);
+uint8_t image_tint_pct();
+
 // FR-10.7 signature-melody accessor. Returns the per-theme audible
 // signature played non-blockingly on the rising edge of `set()`. Out-
 // of-range ids and themes that declare no melody return `{nullptr, 0}`.

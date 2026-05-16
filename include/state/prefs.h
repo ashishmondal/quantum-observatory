@@ -32,15 +32,21 @@ namespace prefs {
 // On-disk schema version. Bumped only when the JSON shape changes in
 // a way the boot-restore parser (P.2) needs to migrate. Callers on
 // the in-RAM side don't read this; it's only relevant to load/save.
-constexpr uint8_t kSchemaVersion = 1;
+//
+// v1 -> v2 (T.11): added image_tint_pct (FR-15.6 / FR-18.2). v1 files
+// on disk load cleanly via the existing P.2 forward-compat passthrough
+// — a missing key falls through to the default in kDefaults.
+constexpr uint8_t kSchemaVersion = 2;
 
 // Flat record. Add fields here AND in the JSON serialiser/parser
 // (P.2/P.3) when the v1 scope grows. POD so we can byte-copy under
 // the mutex without worrying about non-trivial constructors.
 struct Prefs {
-  uint8_t   schema_v;  // = kSchemaVersion in RAM; tracks the on-disk
-                       // value once load() lands in P.2.
-  theme::Id theme;     // FR-18.2 — only persisted preference in v1.
+  uint8_t   schema_v;        // = kSchemaVersion in RAM; tracks the
+                             // on-disk value once load() lands in P.2.
+  theme::Id theme;           // FR-18.2 v1 — active retro sci-fi theme.
+  uint8_t   image_tint_pct;  // FR-18.2 v2 / FR-15.6 — image-tint
+                             // strength 0..100 (default 50).
 };
 
 // Mount the filesystem and initialise the in-RAM cache to defaults.
@@ -68,6 +74,16 @@ void set_theme(theme::Id id);
 // modulo Id::COUNT. Routes through set_theme() so the IR remote
 // path persists exactly the same way the MQTT path does.
 void cycle_theme(int8_t delta);
+
+// FR-15.6 / FR-18.2 (v2) — image-tint strength setter (0..100,
+// clamped). Mirrors set_theme(): updates theme:: visible state
+// first (theme::set_image_tint_pct triggers the next-frame palette
+// rebuild per FR-15.4), then under s_mutex updates the in-RAM cache,
+// marks dirty, arms the FR-18.4 writeback. Idempotent on no-op.
+// Wire from every USER-CHOICE tint path (MQTT observatory/theme
+// `tint` field). Diagnostic / firmware-internal calls SHALL NOT
+// route through here.
+void set_image_tint_pct(uint8_t pct);
 
 // Wear-protected writeback tick (FR-18.4). Call from the Core 0
 // loop() each iteration; cheap when nothing is dirty. Flushes the

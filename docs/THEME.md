@@ -342,15 +342,24 @@ lum 255 → BG_WHITE
 
 Each themable image carries its **original baked palette** in flash
 (unchanged) plus a build-time-precomputed `uint8_t lum[192]` luminance
-table. At theme-switch time, for each themable image:
+table. At theme-switch time (or tint-strength change — see §6.9), for
+each themable image and each palette entry `i`:
 
 ```cpp
-for (int i = 0; i < 192; i++) {
-  runtime_palette[i] = ramp_lut[image.lum[i]];
-}
+const uint16_t target = ramp_lut[image.lum[i]];   // full-duotone target
+const uint16_t orig   = image.palette[i];          // baked entry
+runtime_palette[i]    = blend565(orig, target, image_tint_pct);
 ```
 
-No per-pixel work, no math — a 192-entry table copy per image.
+`blend565` unpacks both endpoints to 8-bit R/G/B, applies the per-channel
+linear blend `out = orig + ((target − orig) * pct + 50) / 100`, and
+repacks to RGB565 with round-to-nearest. At `pct == 0` the runtime entry
+equals `orig` (original palette passes through under any theme); at
+`pct == 100` it equals `target` (full duotone, the original T.8
+behaviour); at the default `pct == 50` shadows and highlights *lean*
+toward the theme's pair without flattening the photo into a single hue
+family. Both edges short-circuit so they cost no more than the original
+table copy.
 
 Luminance uses ITU-R BT.601 (`0.299 R + 0.587 G + 0.114 B`) computed at
 build time. The build-time pipeline also **histogram-stretches** each
@@ -418,6 +427,47 @@ therefore retone for free with no asset changes.
 
 No existing asset needs re-authoring. No existing scene needs API
 changes.
+
+### 6.9 Tint strength (FR-15.6)
+
+The duotone retoning of §6.1 is the *upper bound* of how strongly a
+theme can recolour an image. The actual blend is governed by an
+integer percentage `image_tint_pct` ∈ 0..100 (default **50**) applied
+in §6.2's `blend565`:
+
+| Value | Visual result |
+|---|---|
+| `0` | Every themable image renders in its original baked palette regardless of the active theme. Useful when the user wants the theme's *fonts and inks* but the photographic content untouched. |
+| `50` (default) | Shadows lean toward `BG_SHADOW`, highlights toward `BG_HIGHLIGHT`, midtones drift halfway. Reads as "the photo, viewed through a theme-tinted filter". |
+| `100` | Full duotone synthesis — bit-for-bit the pre-T.10 behaviour, where each entry is replaced by its luminance lookup in the theme ramp. |
+
+**Surface.** The value is owned by the `theme::` module
+(`theme::set_image_tint_pct(uint8_t)` / `theme::image_tint_pct()`)
+and reuses the §6.5 double-buffered atomic flip — a strength change
+triggers the same per-image rebuild a theme switch does, so the
+FR-15.4 next-frame contract holds. APOLLO_AMBER (passthrough, no
+`bg_ramp`) is unaffected at every value: the early-return in
+`rebuild_runtime_palettes()` short-circuits before the blend even runs.
+
+**Wire protocol.** `observatory/theme` accepts an optional `tint`
+field alongside `id`; either or both may be present. Out-of-range or
+non-integer values cause the entire payload to be rejected per FR-1.3
+(no half-applied state). The active value is echoed in
+`observatory/status.image_tint_pct` (FR-15.7).
+
+**Persistence.** The value is stored in `prefs::Prefs.image_tint_pct`
+and routed through `prefs::set_image_tint_pct()`, which mirrors
+`prefs::set_theme()`'s mutex + debounced-writeback discipline
+(FR-18.3 / FR-18.4). Schema bumps to v2; the FR-18.5 forward-compat
+parser loads a v1 file with the default tint applied. The HA control
+is a single `number.observatory_image_tint` entity (range 0..100,
+step 5) publishing `{"tint": <val>}` to `observatory/theme`.
+
+**Foreground inks are NOT tinted.** Theme inks (`CHROME`, `HEADER`,
+`BODY`, accents) are role-based identity colors — leaning them
+toward another hue would muddy the theme rather than "hint at" it.
+Only background images (the only place the alternative aesthetic is
+"preserve photographic content") consult `image_tint_pct`.
 
 ---
 
