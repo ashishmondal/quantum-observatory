@@ -203,7 +203,10 @@ private:
   // the remaining 900 ms. Floor is non-zero so the colon stays
   // legible as a separator throughout the second.
   void render_colon(Adafruit_Protomatter& matrix, uint32_t now_ms, bool valid) {
-    matrix.fillRect(kSlotX[2], kSlotTop, kSlotW, kSlotH, 0x0000);
+    // No fillRect / no halo behind the colon: the slot stays
+    // transparent so the per-theme animated background (FR-15) shows
+    // through between the two colon dots. The ghost ':' + faded live
+    // ':' below paint only the glyph pixels themselves.
     matrix.setFont(theme::font(theme::FontRole::CLOCK));
     matrix.setTextSize(1);
 
@@ -308,8 +311,13 @@ public:
     // ghost reads as etched. Then the live time overlays in plain
     // white, no halo (the ghost+halo already provides the contrast
     // edge). Net cost: one halo pass instead of two.
+    //
+    // Colon slot intentionally blanked to a space here so the halo
+    // pass leaves no black pixels behind the ':' — render_colon()
+    // paints the ghost+live colon glyph alone, letting the animated
+    // background show through the gaps between the two dots.
     gfx::draw_text_halo(matrix, /*x=*/2, /*y=*/19,
-                        "18:88",
+                        "18 88",
                         theme::ink(theme::Ink::GHOST),
                         /*halo=*/0x0000);  // universal background
 
