@@ -736,7 +736,7 @@ only (no cross-core safety needed).
     serial scrape) confirms the write rate stays ≤ 2/min worst case
     and ≤ 10/day typical.
 
-- [ ] **P.4 Wire MQTT + IR through `prefs::set_theme`** (FR-15.2,
+- [x] **P.4 Wire MQTT + IR through `prefs::set_theme`** (FR-15.2,
   FR-17.10)
   - Replace every existing `theme::set(...)` call site that
     represents a *user choice* (MQTT `observatory/theme` handler in
@@ -748,7 +748,7 @@ only (no cross-core safety needed).
     choice. **Exit:** flipping the theme from either source
     persists; `gfx_test` cycling does not.
 
-- [ ] **P.5 Heartbeat + reset path** (FR-18.7, FR-18.8)
+- [x] **P.5 Heartbeat + reset path** (FR-18.7, FR-18.8)
   - Extend the `observatory/status` heartbeat builder to include
     `prefs_dirty: <bool>` (read from `prefs::is_dirty()`). Subscribe
     `observatory/prefs/reset` in `mqtt_link.cpp`; an empty payload

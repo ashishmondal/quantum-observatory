@@ -339,17 +339,44 @@ mosquitto_pub -t observatory/constellation -m '{"index":2,"highlight_star":-1}'
 
 The swap takes effect at the next frame boundary with no scene re-init
 (FR-15.4). `theme::set()` is idempotent — re-publishing the active id
-is a no-op. The active theme is **not** persisted across reboots
-(FR-15.2 — no flash wear); the firmware boots to `apollo_amber` and
-HA is expected to push the desired theme on every reconnect.
+is a no-op (no flash write). The active theme **is persisted across
+reboots** via the FR-18 preferences subsystem (phase P): firmware
+boots to the last value written to `/prefs.json` (`apollo_amber` if
+the file is missing/corrupt). HA may still push the desired theme on
+reconnect; the wear-protected writeback in FR-18.4 coalesces rapid
+changes into one flush per ~30 s. To force a full reset to defaults,
+publish to `observatory/prefs/reset` (see below).
 
 The active theme is echoed back in `observatory/status.theme`
 (FR-15.7) so the Director can confirm without round-tripping this
-topic.
+topic. The `observatory/status.prefs_dirty` field flags an unflushed
+change (cache differs from `/prefs.json`).
 
 ```bash
 mosquitto_pub -t observatory/theme -m '{"id":"apollo_amber"}'
 mosquitto_pub -t observatory/theme -m '{"id":"nostromo_green"}'
+```
+
+### `observatory/prefs/reset` — factory-reset persisted prefs (FR-18.8)
+
+Destructive escape hatch — deletes `/prefs.json` from LittleFS and
+immediately reboots the device, so FR-18.5 boot-restore re-applies
+stock defaults (`apollo_amber` theme in v1). Intended for the case
+where a future schema migration goes wrong, or for clearing a stuck
+preference without IR access.
+
+Payload is empty by spec; any payload (including non-empty) is
+accepted as the trigger — the topic itself is the gate. Subject to
+FR-1.4 (a malformed payload won't crash the device, just like every
+other input). The reset is logged to serial before the reboot:
+
+```
+[mqtt] prefs/reset received — wiping and rebooting
+[prefs] reset: /prefs.json removed
+```
+
+```bash
+mosquitto_pub -t observatory/prefs/reset -n
 ```
 
 ---
@@ -361,7 +388,7 @@ mosquitto_pub -t observatory/theme -m '{"id":"nostromo_green"}'
 Published every 30 s.
 
 ```json
-{ "scene_id": "clock", "fps": 24, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber" }
+{ "scene_id": "clock", "fps": 24, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber", "prefs_dirty": false }
 ```
 
 | Field | Type | Notes |
@@ -373,6 +400,7 @@ Published every 30 s.
 | `free_heap` | int (bytes) | `rp2040.getFreeHeap()` — track regressions per NFR-2.1 |
 | `render_slack_ms` | int (ms) | Rolling 32-frame average of `kFrameIntervalMs - render_time` on Core 1 (FR-16.9). High = idle headroom; falling toward 0 = scene is using the full frame budget. |
 | `theme` | string | active retro sci-fi theme wire-id (FR-15.7); matches `observatory/theme` payloads. |
+| `prefs_dirty` | bool | FR-18.7 — `true` iff the in-RAM prefs cache differs from `/prefs.json` (a setting hasn't been durably saved yet). Expect a `true` window of ≤ 35 s after a theme change (5 s settle + worst-case 30 s rate cap), then `false` once the FR-18.4 writeback tick lands. |
 
 ### `observatory/debug` — one-shot diagnostic dumps (phase IR.2)
 

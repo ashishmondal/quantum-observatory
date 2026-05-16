@@ -59,6 +59,7 @@
 #include "scene_state.h"
 #include "scenes/bayer_dither.h"
 #include "scenes/layer.h"
+#include "prefs.h"
 #include "theme.h"
 
 // Defined in main.cpp. Core 0 (IR dispatch action) writes the press
@@ -338,10 +339,15 @@ private:
     // status heartbeat — same need); keep the mapping local until
     // then so this layer doesn't block on T.4. Free heap is
     // rounded to KB so the value fits the row even at full SRAM.
+    // FR-18.7 — a trailing `*` after the theme id flags an unflushed
+    // prefs change (cache differs from /prefs.json). Expect to see
+    // it for ≤ 35 s after a theme change, then it clears once the
+    // FR-18.4 writeback tick lands the flush.
     {
       const char* thm = theme_short_name(theme::current());
+      const char* dirty = prefs::is_dirty() ? "*" : "";
       const uint32_t heap_kb = g_info_free_heap_b / 1024u;
-      snprintf(buf, sizeof(buf), "THM %s H%luk", thm,
+      snprintf(buf, sizeof(buf), "THM %s%s H%luk", thm, dirty,
                static_cast<unsigned long>(heap_kb));
       gfx::draw_text_halo(matrix, 0, y5, buf, fg, halo);
     }

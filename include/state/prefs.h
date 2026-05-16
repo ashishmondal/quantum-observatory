@@ -49,11 +49,12 @@ struct Prefs {
 // the actual /prefs.json load into this same entry point.
 void begin();
 
-// Setter for the active theme (FR-18.3). Updates the in-RAM cache
-// immediately so the next-frame theme switch the call site already
-// drives still happens at the FR-15.4 boundary; ALSO marks the
-// cache dirty and arms the debounced writeback timer (FR-18.4).
-// Idempotent — a no-op store does not mark dirty.
+// Setter for the active theme (FR-18.3). Calls theme::set(id)
+// internally so the next-frame swap (FR-15.4) happens at the same
+// point the bare theme:: API would have produced; ALSO updates the
+// in-RAM prefs cache, marks it dirty, and arms the debounced
+// writeback timer (FR-18.4). Idempotent — a no-op store does not
+// mark dirty.
 //
 // Wire this from every USER-CHOICE theme path (MQTT
 // observatory/theme handler, IR `◄`/`►` dispatch). Diagnostic /
@@ -61,6 +62,12 @@ void begin();
 // bring-up `theme::set(APOLLO_AMBER)`) MUST NOT go through here —
 // they'd pollute the persisted choice.
 void set_theme(theme::Id id);
+
+// Cycle the active theme by `delta` steps (FR-18.3 / FR-17.10
+// counterpart of theme::cycle()). +1 = next, -1 = previous; wraps
+// modulo Id::COUNT. Routes through set_theme() so the IR remote
+// path persists exactly the same way the MQTT path does.
+void cycle_theme(int8_t delta);
 
 // Wear-protected writeback tick (FR-18.4). Call from the Core 0
 // loop() each iteration; cheap when nothing is dirty. Flushes the
@@ -90,6 +97,16 @@ bool is_mounted();
 // no setters yet. The status-heartbeat plumbing (P.5) will read
 // this; surfacing it now keeps the API surface stable across phases.
 bool is_dirty();
+
+// Factory-reset escape hatch (FR-18.8). Deletes /prefs.json from
+// LittleFS and clears the in-RAM dirty flag so the writeback tick
+// won't immediately re-create it. The caller is expected to follow
+// up with `rp2040.reboot()` — boot-restore (FR-18.5) then sees a
+// missing file and applies stock defaults. Safe no-op when the
+// filesystem isn't mounted (the reboot still happens; defaults
+// were already in effect). Core 0 only — same as every other
+// LittleFS entry point in this module.
+void reset();
 
 // Forward-version passthrough (FR-18.5). On boot, load() captures
 // any unknown top-level keys from /prefs.json into a static buffer

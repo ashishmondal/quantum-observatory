@@ -326,6 +326,12 @@ void begin() {
 }
 
 void set_theme(theme::Id id) {
+  // Drive the visible swap first so callers see the same FR-15.4
+  // next-frame contract they would have got from the bare theme::
+  // API. theme::set() is itself idempotent (no-op when id is
+  // unchanged) so this is safe to call unconditionally.
+  theme::set(id);
+
   mutex_enter_blocking(&s_mutex);
   if (s_cache.theme != id) {
     s_cache.theme    = id;
@@ -333,6 +339,17 @@ void set_theme(theme::Id id) {
     s_last_setter_ms = millis();
   }
   mutex_exit(&s_mutex);
+}
+
+void cycle_theme(int8_t delta) {
+  // Mirror theme::cycle()'s wrap math so the persisted-and-non-
+  // persisted code paths walk the enum in lockstep.
+  const uint8_t n   = static_cast<uint8_t>(theme::Id::COUNT);
+  if (n == 0) return;
+  const uint8_t cur = static_cast<uint8_t>(theme::current());
+  const int     step = delta % static_cast<int>(n);
+  const uint8_t nxt = static_cast<uint8_t>((cur + n + step) % n);
+  set_theme(static_cast<theme::Id>(nxt));
 }
 
 void tick(uint32_t now_ms) {
@@ -419,5 +436,41 @@ bool is_dirty() {
 }
 
 const char* unknown_passthrough() { return s_passthrough; }
+
+void reset() {
+  // FR-18.8 — wipe the persisted prefs file and disarm the writeback
+  // pipeline so the imminent reboot sees "no prefs yet" and applies
+  // defaults via FR-18.5. We deliberately do NOT touch s_cache: the
+  // caller (mqtt_link's reset handler) follows this up immediately
+  // with rp2040.reboot(), so no UI ever observes the in-RAM state
+  // between the wipe and the restart. Clearing the dirty flag (and
+  // s_on_flash) prevents a stray tick() between this call and the
+  // reboot from re-emitting the file we just deleted.
+  mutex_enter_blocking(&s_mutex);
+  s_dirty = false;
+  if (s_mounted) {
+    if (LittleFS.exists(kPath)) {
+      if (LittleFS.remove(kPath)) {
+        Serial.println("[prefs] reset: /prefs.json removed");
+      } else {
+        Serial.println("[prefs] reset: remove FAILED");
+      }
+    } else {
+      Serial.println("[prefs] reset: no /prefs.json to remove");
+    }
+    // Tmp from a crash mid-write would otherwise survive a reset
+    // and get rename()'d into place on the next setter \u2014 mop it up.
+    if (LittleFS.exists(kTmpPath)) {
+      LittleFS.remove(kTmpPath);
+    }
+  } else {
+    Serial.println("[prefs] reset: filesystem not mounted; defaults already in effect");
+  }
+  // Re-mirror s_on_flash to defaults so the post-reboot path doesn't
+  // matter \u2014 if the caller skips reboot(), the next setter still
+  // behaves correctly (writes when value differs from defaults).
+  s_on_flash = kDefaults;
+  mutex_exit(&s_mutex);
+}
 
 }  // namespace prefs

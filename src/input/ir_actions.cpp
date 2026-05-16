@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "ir_remote.h"
+#include "prefs.h"
 #include "scene_state.h"
 #include "scenes/font_demo_scene.h"
 #include "theme.h"
@@ -85,7 +86,10 @@ void left(uint16_t /*addr*/, uint16_t /*cmd*/) {
     s_font_demo_scene->cycle(-1);
     return;
   }
-  theme::cycle(-1);
+  // FR-17.10 / FR-18.3 — route through prefs so the choice persists
+  // (P.4). prefs::cycle_theme() drives theme::set() internally, so
+  // FR-15.4 next-frame swap semantics are preserved.
+  prefs::cycle_theme(-1);
 }
 void right(uint16_t /*addr*/, uint16_t /*cmd*/) {
   if (s_font_demo_scene != nullptr &&
@@ -93,7 +97,7 @@ void right(uint16_t /*addr*/, uint16_t /*cmd*/) {
     s_font_demo_scene->cycle(+1);
     return;
   }
-  theme::cycle(+1);
+  prefs::cycle_theme(+1);
 }
 
 // FR-17.5 dispatch table. `honour_repeats=false` everywhere because

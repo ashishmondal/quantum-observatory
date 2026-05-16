@@ -22,6 +22,7 @@
 #include "jupiter_state.h"
 #include "constellation_state.h"
 #include "moon_state.h"
+#include "prefs.h"
 #include "theme.h"
 #include "thermal_monitor.h"
 #include "time_of_day.h"
@@ -60,6 +61,7 @@ constexpr const char* kTopicIss     = "observatory/iss";     // phase 7.1+ iss d
 constexpr const char* kTopicJupiter = "observatory/jupiter"; // phase 7.3 jupiter data path
 constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
 constexpr const char* kTopicTheme   = "observatory/theme";   // FR-15.2 (phase T.4)
+constexpr const char* kTopicPrefsReset = "observatory/prefs/reset"; // FR-18.8 (phase P.5)
 constexpr const char* kTopicDebug   = "observatory/debug";   // phase IR.2 one-shot diagnostic dump (Pico → HA)
 #ifdef CLOCK_ANIM_TEST
 // Dev-only: synthetic digit-cascade trigger for the giant clock
@@ -700,9 +702,11 @@ void handle_constellation(char* buf, unsigned int length, uint32_t now_ms) {
 // The wire id is a lowercase enumerator name (e.g. "apollo_amber"); the
 // canonical mapping lives in theme::id_from_string. Unknown ids are
 // logged and dropped per FR-1.3 — the active theme keeps rendering.
-// theme::set() is itself idempotent (no-op when id is unchanged), so
-// HA echoing the current theme on reconnect is harmless. Per FR-15.4
-// the swap is next-frame, no scene re-init.
+// prefs::set_theme() is itself idempotent (no-op when id is unchanged),
+// so HA echoing the current theme on reconnect is harmless and does
+// NOT mark the prefs cache dirty. Per FR-15.4 the swap is next-frame,
+// no scene re-init. Per FR-18.3 / FR-15.2 the change is persisted via
+// the wear-protected writeback so it survives a power cycle.
 void handle_theme(char* buf, unsigned int length) {
   ++s_theme_msgs;
 
@@ -726,7 +730,7 @@ void handle_theme(char* buf, unsigned int length) {
     return;
   }
 
-  theme::set(id);
+  prefs::set_theme(id);
   Serial.print("[mqtt] theme applied id=");
   Serial.println(wire_id);
 }
@@ -820,6 +824,21 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
   if (strcmp(topic, kTopicTheme) == 0) {
     handle_theme(buf, length);
     return;
+  }
+  if (strcmp(topic, kTopicPrefsReset) == 0) {
+    // FR-18.8 — destructive escape hatch. Payload is empty by spec
+    // (mirrors clear_sticky); we accept any payload as the trigger
+    // because the topic itself is the gate — anyone publishing here
+    // is intentionally asking for a wipe. prefs::reset() deletes
+    // /prefs.json and disarms the writeback pipeline, then we hand
+    // off to rp2040.reboot() so FR-18.5 boot-restore re-applies
+    // stock defaults. Logged before the reboot so the operator can
+    // tell from serial that the trigger landed.
+    Serial.println("[mqtt] prefs/reset received — wiping and rebooting");
+    prefs::reset();
+    Serial.flush();
+    rp2040.reboot();
+    return;  // unreachable
   }
 #ifdef CLOCK_ANIM_TEST
   if (strcmp(topic, kTopicClockAnimTest) == 0) {
@@ -984,6 +1003,13 @@ bool publish_status(uint32_t now_ms) {
   // Active retro sci-fi theme id (FR-15.7 / phase T.4). Lets HA confirm
   // the device's state without round-tripping observatory/theme.
   doc["theme"] = theme::string_from_id(theme::current());
+  // FR-18.7 — surfaces whether the in-RAM prefs cache has changes
+  // not yet flushed to /prefs.json. HA (and the FR-17.8 info
+  // overlay) use this to confirm a setting has been durably saved;
+  // expect a brief `true` window of ≤ 35 s after a theme change
+  // (5 s settle + worst-case 30 s rate cap; first-ever flush skips
+  // the rate cap so it lands at settle+0).
+  doc["prefs_dirty"] = prefs::is_dirty();
 
   char payload[kStatusJsonCapacity];
   const size_t n = serializeJson(doc, payload, sizeof(payload));
@@ -1087,7 +1113,7 @@ void poll(uint32_t now_ms) {
         // does not support qos:2; qos:1 is the strongest option here
         // and the right one — duplicates are harmless because every
         // payload handler is idempotent (replace-state semantics).
-        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicConstellation, kTopicTheme
+        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicConstellation, kTopicTheme, kTopicPrefsReset
 #ifdef CLOCK_ANIM_TEST
             , kTopicClockAnimTest
 #endif
