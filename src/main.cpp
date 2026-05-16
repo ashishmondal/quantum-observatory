@@ -189,28 +189,12 @@ void setup() {
   // BEFORE set_dispatch() so a stray frame between begin() and the
   // first loop() can't call into an uninitialised buzzer module.
   buzzer::begin();
-  // FR-10.4 audible "device awake" cue — Westminster Quarters first
-  // phrase (G#5, F#5, E5, B4). The bell-like descending stepwise
-  // motif followed by the leap to the lower B4 reads instantly as
-  // "clock chime", which fits the observatory + clock identity. Sits
-  // in the C5..C7 sweet spot of the carrier piezo (4 kHz mechanical
-  // resonance) so the notes actually carry the pitch instead of
-  // collapsing to a single shrill beep, the way an >8 kHz melody
-  // does. Total wall-clock = 4*350 + 600 = 2000 ms but the last note
-  // is the longest "bong" — perceptually the chime is over by ~1.4 s
-  // and the rest is just the final bell ringing out. Non-blocking
-  // (buzzer::tick() in loop()) so this does not delay scene_state
-  // init or first-frame render. Cancels the FR-10.4 self-test chirp
-  // fired inside buzzer::begin() (play() calls stop_internal()
-  // first), which is fine — the first Westminster note IS the
-  // wiring witness.
-  static constexpr buzzer::Note kBootMelody[] = {
-      { 831, 350 },   // G#5  — "ding"
-      { 740, 350 },   // F#5  — "dong"
-      { 659, 350 },   // E5   — "ding"
-      { 494, 600 },   // B4   — "dong" (held; bell tail)
-  };
-  buzzer::play(kBootMelody, sizeof(kBootMelody) / sizeof(kBootMelody[0]));
+  // FR-10.8 boot quiet supersedes the prior FR-10.4 audible
+  // "device awake" Westminster boot melody \u2014 the buzzer is silent
+  // for the entire boot phase (until the FR-13.1 splash overlay
+  // clears on first MQTT connect). The driver defaults to
+  // s_quiet=true; main loop()'s override-snapshot block lifts it
+  // on the falling edge of (splash || night).
   // FR-17.5 — install the local-fast dispatch table for IR.3. Each
   // accepted press routes through scene_state::request() at priority
   // 1 / duration 120 s so a real ISS pass (priority 4) can still
@@ -295,6 +279,32 @@ void loop() {
   // dominant caller; theme-switch melodies (B.3) ride the same
   // tick.
   buzzer::tick(now_ms);
+
+  // FR-10.8 / FR-10.9 \u2014 driver-boundary mute gate. Buzzer is
+  // audible only when neither the boot splash nor night mode is
+  // active. Snapshot both override flags via the seqlock (lock-
+  // free, same path the SafetyOverlayLayer uses every frame), OR
+  // them, and push the result on change. Edge-tracked so the
+  // common "no transition" case is one read + one compare. The
+  // rising edge inside set_quiet() stops any in-flight melody
+  // (e.g. a theme cue still ringing when night mode trips).
+  {
+    bool splash = false, night = false;
+    scene_state::read_overrides(&splash, nullptr, &night, nullptr);
+    const bool want_quiet = splash || night;
+    static bool s_last_quiet = true;   // matches buzzer's default
+    if (want_quiet != s_last_quiet) {
+      s_last_quiet = want_quiet;
+      buzzer::set_quiet(want_quiet);
+      Serial.print("[buzzer] quiet=");
+      Serial.print(want_quiet ? 1 : 0);
+      Serial.print(" (splash=");
+      Serial.print(splash ? 1 : 0);
+      Serial.print(" night=");
+      Serial.print(night ? 1 : 0);
+      Serial.println(")");
+    }
+  }
 
   // Giant clock digit-roll "stepper" sound (Core 1 → Core 0). The
   // scene writes a packed (counter, slot) word on each visible

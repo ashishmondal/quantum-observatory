@@ -91,6 +91,27 @@ void play(const Note* notes, uint8_t n);
 // Safe to call before begin() (no-ops).
 void tick(uint32_t now_ms);
 
+// FR-10.8 / FR-10.9 — driver-boundary mute gate. While quiet,
+// chirp() / play() / tick_click() are dropped (NOT deferred) and
+// any in-flight melody is stopped immediately via noTone(). The
+// flag composes with logical OR across both override sources:
+// boot quiet (true until FR-13.1 splash clears) and night quiet
+// (true while light_sensor::is_night()). Caller (main.cpp) owns
+// the OR and pushes the result here on every transition.
+//
+// Default at module scope is `true` — the buzzer is silent until
+// something explicitly lifts the gate, so a stray cue fired before
+// main.cpp's first quiet computation (e.g. a theme rebuild during
+// prefs::begin()) cannot beep.
+//
+// Single-core write + read (Core 0 only — same as the rest of the
+// API), so plain bool with no atomics is correct.
+void set_quiet(bool quiet);
+
+// Returns the current quiet state. Useful for diagnostics / log
+// lines. Same single-core constraint as set_quiet().
+bool is_quiet();
+
 // Maximum melody length the scheduler will honour. The five v1
 // theme melodies (FR-10.7 table) top out at 4 notes; 8 leaves
 // headroom without committing to a runaway-long sequence.

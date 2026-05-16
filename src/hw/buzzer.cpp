@@ -11,6 +11,15 @@ namespace {
 
 bool s_begun = false;
 
+// FR-10.8 / FR-10.9 driver-boundary mute. Defaults to true so any
+// cue fired before main.cpp computes the first (splash || night)
+// snapshot is silently dropped — the most common offender is the
+// FR-10.7 theme melody triggered when prefs::begin() restores the
+// last-saved theme during setup(), well before the splash overlay
+// could possibly clear. main.cpp lifts this on the falling edge of
+// (splash || night) once the renderer is live.
+bool s_quiet = true;
+
 // Single-tone feedback chirp pitch (FR-10.6 key-press tick + FR-10.4
 // boot self-test). 9 kHz sits well above conversational pitch and
 // the dominant peaks of typical TV / music content, so the chirp
@@ -25,10 +34,8 @@ constexpr uint16_t kChirpFreqHz   = 9000;
 // into each other, long enough that the piezo's mechanical envelope
 // can actually start producing sound before we cut it.
 constexpr uint16_t kChirpMs       = 12;
-// FR-10.4 boot self-test: a single short tone at the chirp pitch
-// fired once from begin(). 30 ms <= 50 ms cap; long enough to be
-// audible across the room, short enough to not be annoying.
-constexpr uint16_t kSelfTestMs    = 30;
+// (FR-10.4 boot self-test removed by FR-10.8 boot quiet \u2014 the
+// kSelfTestMs constant was its only user.)
 
 // Digit-roll "tick" — short envelope (6 ms) so a 30 ms-spaced
 // burst during a cascade reads as a mechanical stepper. Pitch is
@@ -96,20 +103,17 @@ void begin() {
   s_begun = true;
   Serial.print("[buzzer] begin pin=");
   Serial.print(static_cast<int>(PIN_BUZZER));
-  Serial.print(" self-test ");
-  Serial.print(static_cast<int>(kChirpFreqHz));
-  Serial.print("Hz/");
-  Serial.print(static_cast<int>(kSelfTestMs));
-  Serial.println("ms");
-  // FR-10.4 self-test. Non-blocking; returns in microseconds. Not
-  // routed through play() because it's a single tone with no state
-  // machine cost — and we want it to fire even before the first
-  // tick() (which won't happen until loop() starts).
-  tone(PIN_BUZZER, kChirpFreqHz, kSelfTestMs);
+  Serial.println(" quiet=1 (FR-10.8 boot)");
+  // FR-10.8 supersedes the prior FR-10.4 boot self-test chirp \u2014
+  // the buzzer is unconditionally silent during the boot phase.
+  // The wiring witness is now the first post-boot cue (an IR-press
+  // chirp or the next theme melody fired after main.cpp lifts the
+  // quiet gate on splash-clear).
 }
 
 void chirp() {
   if (!s_begun) return;
+  if (s_quiet) return;   // FR-10.8 / FR-10.9 — silent during boot or night.
   // A user-input ack (FR-10.6) MUST cut through any in-flight
   // melody — the user just pressed a key and the visual response
   // is already happening; a stale theme cue from 200 ms ago must
@@ -123,6 +127,7 @@ void chirp() {
 
 void tick_click(uint16_t freq_hz) {
   if (!s_begun) return;
+  if (s_quiet) return;   // FR-10.8 / FR-10.9 — silent during boot or night.
   if (freq_hz == 0) return;   // 0 is the rest sentinel in Note[]
   // Coalesce rapid clicks: if the previous click is still ringing
   // (within kClickMs of the last call), skip re-arming the PWM.
@@ -142,6 +147,7 @@ void tick_click(uint16_t freq_hz) {
 
 void play(const Note* notes, uint8_t n) {
   if (!s_begun) return;
+  if (s_quiet) return;   // FR-10.8 / FR-10.9 — silent during boot or night.
   if (notes == nullptr || n == 0) return;
   if (n > kMaxMelodyNotes) n = kMaxMelodyNotes;
   // Rapid back-to-back play() (e.g. operator spam-cycling themes
@@ -171,5 +177,20 @@ void tick(uint32_t now_ms) {
   }
   start_current_note(now_ms);
 }
+
+void set_quiet(bool quiet) {
+  // Idempotent. On the rising edge (silence engaging), stop any
+  // in-flight melody immediately so a long tail (e.g. the 700 ms
+  // Goldsmith dissonance at the end of nostromo_green's wakeup)
+  // doesn't continue ringing into the night-mode swap. On the
+  // falling edge (silence lifting), do nothing — there's no queued
+  // playback per FR-10.8 / FR-10.9 (cues issued during quiet are
+  // dropped at the entry points, not deferred).
+  if (quiet == s_quiet) return;
+  s_quiet = quiet;
+  if (quiet) stop_internal();
+}
+
+bool is_quiet() { return s_quiet; }
 
 }  // namespace buzzer
