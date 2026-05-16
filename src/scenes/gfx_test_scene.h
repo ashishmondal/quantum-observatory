@@ -245,6 +245,7 @@ private:
       case theme::Id::VECTREX_NEON:   return "VEC";
       case theme::Id::BLADE_RUNNER:   return "BLR";
       case theme::Id::LCARS_TOS:      return "LCR";
+      case theme::Id::SECTION_NINE:   return "S9N";
       default:                         return "???";
     }
   }

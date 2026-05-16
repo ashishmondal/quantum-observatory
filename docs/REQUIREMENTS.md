@@ -109,6 +109,7 @@ The device also doubles as **the only clock in the room**. The current time MUST
   | `vectrex_neon`   | "Insert coin" — fast major arpeggio (1980s arcade cabinet)            | 523 / 70, 659 / 70, 784 / 70, 1047 / 240 |
   | `blade_runner`   | "CS-80 descent" — noir minor-key fall (Vangelis)                      | 587 / 280, 523 / 280, 415 / 700 |
   | `lcars_tos`      | "Courage hero call" — perfect-eleventh leap then resolve (TOS)         | 698 / 200, 1175 / 200, 880 / 600 |
+  | `section_nine`   | "Making of a Cyborg" — four-note minor descent, held tail (Kawai)     | 440 / 220, 392 / 220, 349 / 220, 330 / 600 |
 
   These are the canonical values; the per-theme melody tables live next to the per-theme color/font tables in `theme.cpp` (one source of truth per theme) and are exposed to the buzzer scheduler via a `theme::signature_melody()` accessor.
 
@@ -150,7 +151,7 @@ The Director (HA) is authoritative for *event* triggering (e.g. "ISS pass starts
 ### FR-15 Theming System
 Full design lives in [THEME.md](THEME.md); these are the contractual bullets.
 
-- **FR-15.1** The firmware SHALL ship at least five named themes drawn from canonical retro sci-fi reference points: `apollo_amber` (default), `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`. Each theme SHALL bundle its own ink palette, font selection, bracket convention, and layout hints — themes are not color-only swaps.
+- **FR-15.1** The firmware SHALL ship at least six named themes drawn from canonical retro sci-fi reference points: `apollo_amber` (default), `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`, `section_nine`. Each theme SHALL bundle its own ink palette, font selection, bracket convention, and layout hints — themes are not color-only swaps.
 - **FR-15.2** The active theme SHALL be selectable via MQTT topic `observatory/theme`, payload `{"id": "<theme_id>"}` (string id). Unknown ids SHALL be ignored and logged (FR-1.3 spirit). The firmware SHALL boot to the **last persisted theme** loaded by the FR-18 preferences subsystem (`apollo_amber` if no preference has ever been written), and SHALL accept the Director's choice on connect. Every theme change (MQTT or IR) SHALL be written through `prefs::set_theme(...)` so the choice survives the next reboot, subject to the FR-18 wear-protection discipline.
 - **FR-15.3** Scenes SHALL NOT hardcode ink colors, font selections, or bracket strings. All theme-affected rendering SHALL go through a `theme::*` API that resolves the active theme on every call. CI / code review SHALL flag literal RGB565 constants and `setFont(&...)` calls inside `src/scenes/`.
 - **FR-15.4** A theme switch SHALL take effect at the next-frame boundary with no torn frames and no scene re-init. The active scene SHALL continue rendering, simply consulting the new theme's values starting from the next `render()` call.

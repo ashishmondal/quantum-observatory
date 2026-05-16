@@ -335,7 +335,7 @@ mosquitto_pub -t observatory/constellation -m '{"index":2,"highlight_star":-1}'
 
 | Field | Type | Required | Range | Notes |
 |---|---|---|---|---|
-| `id` | string | one of `id` / `tint` required | one of `apollo_amber`, `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos` | lowercase wire id matching `theme::Id` enumerators (FR-15.1). Unknown ids → drop whole payload (FR-1.3). |
+| `id` | string | one of `id` / `tint` required | one of `apollo_amber`, `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`, `section_nine` | lowercase wire id matching `theme::Id` enumerators (FR-15.1). Unknown ids → drop whole payload (FR-1.3). |
 | `tint` | int (%) | one of `id` / `tint` required | 0..100 (default 50) | image-tint strength for non-default themes (FR-15.6). `0` = each themable BMP renders in its original baked palette regardless of theme; `100` = full duotone retoning. Out-of-range or non-integer → drop whole payload (FR-1.3, never half-apply). Apollo is passthrough at every value. |
 
 The swap takes effect at the next frame boundary with no scene re-init
@@ -358,6 +358,7 @@ confirm without round-tripping this topic. The
 ```bash
 mosquitto_pub -t observatory/theme -m '{"id":"apollo_amber"}'
 mosquitto_pub -t observatory/theme -m '{"id":"nostromo_green"}'
+mosquitto_pub -t observatory/theme -m '{"id":"section_nine"}'
 mosquitto_pub -t observatory/theme -m '{"tint":0}'
 mosquitto_pub -t observatory/theme -m '{"id":"nostromo_green","tint":30}'
 ```

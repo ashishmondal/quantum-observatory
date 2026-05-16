@@ -340,7 +340,7 @@ automation observatory_evening_rotation:
 # observatory/theme — active retro sci-fi theme (FR-15.2 / phase T.4)
 # ---------------------------------------------------------------------
 #
-# An MQTT `select` entity exposes the five themes as a dropdown in HA.
+# An MQTT `select` entity exposes the six themes as a dropdown in HA.
 # The firmware boots to `apollo_amber` (FR-15.2 — no flash persistence)
 # and accepts the Director's choice on connect; it also echoes the
 # active theme back in `observatory/status.theme` (FR-15.7), which we
@@ -373,6 +373,7 @@ mqtt:
         - vectrex_neon
         - blade_runner
         - lcars_tos
+        - section_nine
       icon: mdi:palette
 
   # observatory/theme — image-tint strength (FR-15.6 / phase T.11)

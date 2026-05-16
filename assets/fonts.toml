@@ -40,10 +40,11 @@ output = "include/fonts/digital_7__mono_14pt7b.h"
 note   = "Giant HH:MM digits. Recolored per theme; geometry never changes."
 
 # ─── HEADER role (per theme; FR-15.9 / THEME.md §5) ──────────────────
-# Three bundled HEADER fonts cover all five themes. Vectrex, Blade
-# Runner, and LCARS share Pixel Operator — their identity rides on
-# inks + layout hints (NEON_OUTLINE / FRAME_BORDER / BLOCK_BARS), not
-# the typeface. T.6 in PLAN.md tracks the bundling work.
+# Three bundled HEADER fonts cover all six themes. Vectrex, Blade
+# Runner, LCARS, and Section 9 share Pixel Operator — their identity
+# rides on inks + layout hints (NEON_OUTLINE / FRAME_BORDER /
+# BLOCK_BARS / hologram band motif), not the typeface. T.6 in
+# PLAN.md tracks the bundling work.
 
 [[font]]
 id     = "apollo_header_press_start_2p"
@@ -67,4 +68,4 @@ input  = "assets/fonts/PixelOperator8.ttf"
 size   = 8
 dpi    = 72
 output = "include/fonts/pixel_operator_8pt7b.h"
-note   = "VECTREX + BLADE_RUNNER + LCARS header (shared)."
+note   = "VECTREX + BLADE_RUNNER + LCARS + SECTION_NINE header (shared)."

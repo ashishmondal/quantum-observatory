@@ -53,23 +53,6 @@ private:
   static constexpr int16_t kSlotH     = 18;
   static constexpr int16_t kBaselineY = 19;
 
-  // Per-theme horizontal nudge for the centred date strip. Blade Runner
-  // and LCARS both render their date in Org_01 (5×6 sans w/ true
-  // lowercase); under those themes the optical centre of the glyph
-  // strip sits ~2 px left of the geometric centre returned by
-  // gfx::centered_x() — pushing the strip right by 2 px restores the
-  // visual centring. Apollo/Nostromo/Vectrex use Picopixel/TomThumb
-  // which are already optically centred, so they get 0.
-  static int16_t date_x_nudge() {
-    switch (theme::current()) {
-      case theme::Id::BLADE_RUNNER:
-      case theme::Id::LCARS_TOS:
-        return 2;
-      default:
-        return 0;
-    }
-  }
-
   // ── Digit-roll animation state ──────────────────────────────────
   // m_prev_hhmm holds the latched (post-cascade) string; idle slots
   // paint from this. m_anim_start[i]==0 means idle; otherwise it's
@@ -429,24 +412,46 @@ public:
     // green pulls the hue away from yellow toward burnt orange so it
     // doesn't visually merge with white digits above. Other themes
     // override BODY to their own data ink.
+    //
+    // Section 9 carve-out: the theme's BODY ink is hot pink, identical
+    // to the field of climbing data shafts behind the clock — the date
+    // strip would visually merge with the bg motif. Swap to STATUS_INFO
+    // (cyan) here so the date pops as the only non-magenta element on
+    // the clock face.
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
-    char date[16];  // "SAT 18 MAY 2024" + NUL = 16
+    // Date is day-of-week + day + month — no year. The full string
+    // ("SAT 18 MAY 2024") overflowed the 64 px panel under the
+    // Org_01 themes (Blade Runner / LCARS / Section 9 — ~5 px/char ×
+    // 15 chars ≈ 75 px), and `centered_x()` clamped to x=0 on
+    // overflow, leaving the rightmost glyph cut to a 1-px stem at the
+    // panel edge (reads as a stray vertical bar). Dropping the year
+    // also lets the strip centre cleanly across every theme.
+    char date[12];  // "SAT 18 MAY" + NUL = 11
     if (r.valid) {
       int16_t  yr;
       uint8_t  mo, d, dow;
       tod::date_from_local_epoch(r.local_epoch, &yr, &mo, &d, &dow);
-      snprintf(date, sizeof(date), "%s %02u %s %04d",
+      (void)yr;
+      snprintf(date, sizeof(date), "%s %02u %s",
                tod::weekday_abbrev(dow), static_cast<unsigned>(d),
-               tod::month_abbrev(mo), static_cast<int>(yr));
+               tod::month_abbrev(mo));
     } else {
-      strncpy(date, "--- -- --- ----", sizeof(date));
+      strncpy(date, "--- -- ---", sizeof(date));
       date[sizeof(date)-1] = '\0';
     }
-    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, date) + date_x_nudge(),
+    const theme::Ink date_ink = (theme::current() == theme::Id::SECTION_NINE)
+                                    ? theme::Ink::STATUS_INFO
+                                    : theme::Ink::BODY;
+    // Pure centre — no per-theme nudge. The previous date_x_nudge()
+    // bias was tuned for the 15-char "SAT 18 MAY 2024" string under
+    // Org_01; at 10 chars (~50 px) the geometric centre already reads
+    // as visually centred and the nudge would push the strip right of
+    // centre.
+    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, date),
                         /*y=*/29,
                         date,
-                        theme::ink(theme::Ink::BODY),
+                        theme::ink(date_ink),
                         theme::ink(theme::Ink::BODY_HALO));
 
     // ── Theme-change banner ─────────────────────────────────────────

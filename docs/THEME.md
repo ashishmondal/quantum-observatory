@@ -27,7 +27,7 @@ frame — scenes never hardcode color, font, or accent rules.
 
 ---
 
-## 2. The five themes
+## 2. The six themes
 
 ### 2.1 APOLLO_AMBER (default)
 70s NASA Mission Operations Control Room — burnt amber phosphor on black,
@@ -108,6 +108,46 @@ sans-serif labels in orange/yellow/red.
 > px is dominated by the colored block layout, not the typeface — Pixel
 > Operator in LCARS colors reads as LCARS to the eye.
 
+### 2.6 SECTION_NINE
+Ghost in the Shell 2017 — hot magenta/pink on deep teal with white pop
+and a cyan secondary accent. Identity rides on the Niihama "sologram"
+billboards: giant horizontal hologram glitch bands that sweep top-to-
+bottom and occasionally tear sideways for a frame on signal loss.
+
+- **Fonts:**
+  - `MICRO`  — Tiny3x3
+  - `BODY`   — Org_01 (5×6 sans, true lowercase — HUD feel)
+  - `HEADER` — Pixel Operator
+  - `CLOCK`  — Digital-7 mono 14pt (hot pink)
+- **Inks:** hot pink fg `0xF892` (H≈325°/V≈95%), white accent `0xFFFF`,
+  cyan secondary `0x05DF`, magenta halo `0x2002` (~12% V deep magenta
+  at the same hue as fg — reads as glow, not muddy black).
+- **Brackets:** `|` `|` (pipes) — doubles as visual hologram scan-edge.
+- **Hints:** `NEON_OUTLINE` (halo drawn in glow color, not black).
+  `SCANLINES` deliberately omitted — the clock-bg motif already owns
+  the horizontal-stripe identity, stacking the post-overlay scanlines
+  on top would muddy the band reading.
+- **Clock-bg motif:** cyberspace dive — twelve vertical data shafts
+  climb UP the panel at 1 or 2 px/frame. Each shaft is led by a
+  hand-pixel 5×7 katakana glyph (one of `ロ ニ エ ヨ ク シ`,
+  picked at respawn — the Matrix-code signal that also names the
+  theme as Japanese), trailing a 2-px-wide mid-then-dim column
+  beneath the glyph (total visual length 13 px). 4:1 magenta:cyan
+  colour mix gives the field hue variation without losing theme
+  identity. Deterministic LCG drives x-position, speed, colour, and
+  glyph index; a 1-frame ±2 px horizontal tear of the whole field
+  fires every ~120 frames (~7.5 s). Motion axis is strictly
+  vertical-UP — perpendicular to Blade Runner's +1/+1 diagonal
+  rain — and the glyph heads have far more visual weight than
+  rain's 1-px points.
+- **BG retoning:** highlight `#FF1493` hot pink, shadow `#002038` deep
+  teal, white anchor `#FFE0F0` rose-white.
+
+> **Note on Section 9:** the 2017 film's recurring katakana solograms
+> are deliberately *not* bundled — the look at 64×32 px is dominated
+> by the magenta×teal hue pair plus the band motif, not the script.
+> ASCII-only keeps the THEME.md §5 three-font budget intact.
+
 ---
 
 ## 3. Architecture
@@ -118,7 +158,7 @@ sans-serif labels in orange/yellow/red.
 namespace theme {
   enum class Id : uint8_t {
     APOLLO_AMBER = 0, NOSTROMO_GREEN, VECTREX_NEON,
-    BLADE_RUNNER, LCARS_TOS, COUNT
+    BLADE_RUNNER, LCARS_TOS, SECTION_NINE, COUNT
   };
 
   enum class Ink : uint8_t {
@@ -251,6 +291,7 @@ fonts, picked to match each theme's identity:
 | `vectrex_neon`    | Picopixel                         |
 | `blade_runner`    | Org_01 (5×6 sans, true lowercase)|
 | `lcars_tos`       | Org_01                           |
+| `section_nine`    | Org_01                           |
 
 > **TomThumb baseline quirk.** Adafruit's bundled TomThumb encodes
 > its glyph cells one pixel *above* the baseline used by Picopixel /
@@ -273,18 +314,20 @@ picks one:
 | `vectrex_neon`     | Pixel Operator        |
 | `blade_runner`     | Pixel Operator        |
 | `lcars_tos`        | Pixel Operator        |
+| `section_nine`     | Pixel Operator        |
 
-Three themes share Pixel Operator — their visual identity rides on
+Four themes share Pixel Operator — their visual identity rides on
 inks + layout hints (`NEON_OUTLINE` for Vectrex, `FRAME_BORDER` for
-Blade Runner, `BLOCK_BARS` for LCARS), not the typeface. This keeps
-the bundled-TTF count at three.
+Blade Runner, `BLOCK_BARS` for LCARS, the hologram band motif for
+Section 9), not the typeface. This keeps the bundled-TTF count at
+three.
 
 | File (`include/fonts/`) | Source TTF (`assets/fonts/`) | Used by |
 |---|---|---|
 | `digital_7__mono_14pt7b.h` *(shipped)* | `digital-7 (mono).ttf` *(shipped)* | All themes (`CLOCK`) |
 | `press_start_2p_8pt7b.h`       | `PressStart2P.ttf` (codeman38, OFL)         | APOLLO `HEADER` |
 | `nokiafc22_8pt7b.h`            | `nokiafc22.ttf` *(verify license before redistribution)* | NOSTROMO `HEADER` |
-| `pixel_operator_8pt7b.h`       | `PixelOperator8.ttf` (Jayvee Enaguas, CC0)  | VECTREX + BLADE_RUNNER + LCARS `HEADER` |
+| `pixel_operator_8pt7b.h`       | `PixelOperator8.ttf` (Jayvee Enaguas, CC0)  | VECTREX + BLADE_RUNNER + LCARS + SECTION_NINE `HEADER` |
 
 License attribution stubs land alongside each header in T-6. All
 three bundled TTFs above are confirmed permissive (OFL / CC0).

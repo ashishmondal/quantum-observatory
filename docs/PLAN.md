@@ -337,8 +337,9 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 
 ## Phase T — Retro Sci-Fi Theming System (FR-15)
 
-Full design in [THEME.md](THEME.md). Five themes (`apollo_amber` default,
-`nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`); each
+Full design in [THEME.md](THEME.md). Six themes (`apollo_amber` default,
+`nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`,
+`section_nine`); each
 bundles inks + fonts + brackets + layout hints + a duotone BG ramp.
 Scenes consume `theme::*`, never hardcode color/font/brackets.
 

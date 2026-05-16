@@ -51,21 +51,6 @@ public:
     matrix.setTextWrap(false);
   }
 
-private:
-  // Mirror of giant_clock_scene::date_x_nudge — Org_01 (BLADE_RUNNER /
-  // LCARS_TOS BODY font) is optically off-centre by 2 px left of its
-  // geometric centre. Other themes use Picopixel/TomThumb which are
-  // already centred. Kept in sync by hand: this is a 2-line table.
-  static int16_t date_x_nudge() {
-    switch (theme::current()) {
-      case theme::Id::BLADE_RUNNER:
-      case theme::Id::LCARS_TOS:
-        return 2;
-      default:
-        return 0;
-    }
-  }
-
 public:
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
@@ -107,20 +92,26 @@ public:
     // ── Date strip ──────────────────────────────────────────────────
     matrix.setFont(theme::font(theme::FontRole::BODY));
     matrix.setTextSize(1);
-    char date[16];  // "SAT 18 MAY 2024" + NUL
+    // Day-of-week + day + month — no year. Mirrors giant_clock_scene
+    // (see comment there): the full year overflowed the 64 px panel
+    // under the Org_01 themes and centered_x clamped to x=0, leaving
+    // a 1-px stem at the right edge. 10 chars centres cleanly across
+    // every theme without a per-theme nudge.
+    char date[12];  // "SAT 18 MAY" + NUL = 11
     if (r.valid) {
       int16_t  yr;
       uint8_t  mo, d, dow;
       tod::date_from_local_epoch(r.local_epoch, &yr, &mo, &d, &dow);
-      snprintf(date, sizeof(date), "%s %02u %s %04d",
+      (void)yr;
+      snprintf(date, sizeof(date), "%s %02u %s",
                tod::weekday_abbrev(dow), static_cast<unsigned>(d),
-               tod::month_abbrev(mo), static_cast<int>(yr));
+               tod::month_abbrev(mo));
     } else {
-      strncpy(date, "--- -- --- ----", sizeof(date));
+      strncpy(date, "--- -- ---", sizeof(date));
       date[sizeof(date)-1] = '\0';
     }
     matrix.setTextColor(kInk);
-    matrix.setCursor(gfx::centered_x(matrix, date) + date_x_nudge(), 29);
+    matrix.setCursor(gfx::centered_x(matrix, date), 29);
     matrix.print(date);
     // matrix.show() is called by loop1().
   }

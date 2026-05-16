@@ -73,6 +73,7 @@ enum class Id : uint8_t {
   VECTREX_NEON   = 2,   // Atari/Vectrex vector (T.7)
   BLADE_RUNNER   = 3,   // Neo-noir cyan/orange (T.7)
   LCARS_TOS      = 4,   // Star Trek LCARS-precursor (T.7)
+  SECTION_NINE   = 5,   // Ghost in the Shell 2017 hot-pink hologram (T.11)
   COUNT
 };
 

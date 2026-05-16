@@ -27,6 +27,7 @@
 #include "themes/blade_runner_theme.h"
 #include "themes/lcars_tos_theme.h"
 #include "themes/nostromo_green_theme.h"
+#include "themes/section_nine_theme.h"
 #include "themes/vectrex_neon_theme.h"
 
 namespace theme {
@@ -85,6 +86,7 @@ Theme* const kThemes[static_cast<int>(Id::COUNT)] = {
   &g_vectrex_neon_theme,    // VECTREX_NEON
   &g_blade_runner_theme,    // BLADE_RUNNER
   &g_lcars_tos_theme,       // LCARS_TOS
+  &g_section_nine_theme,    // SECTION_NINE
 };
 
 // Active id. Naturally-aligned uint8_t — atomic on RP2040, no mutex.
