@@ -1,0 +1,70 @@
+// Persistent user preferences (FR-18). Tiny LittleFS-backed store for
+// viewer-ergonomics choices that should survive a power cycle without
+// round-tripping HA — currently just the active retro sci-fi theme
+// (FR-15), with future room for default scene / brightness / mute.
+//
+// Phase P.1 — skeleton only:
+//   - In-RAM cache (Prefs struct) with sane defaults from config.h.
+//   - LittleFS mount (CODING_PRACTICES §3 — Core 0 only; the FS lives
+//     on the same QSPI flash arduino-pico's network/heap subsystem
+//     uses, so Core 1 must never touch it).
+//   - current() reader + dirty-flag plumbing.
+//   - NO load() / NO save() yet — those are P.2 / P.3. A missing or
+//     unmounted file is treated as "no prefs yet" (FR-18.5).
+//
+// Concurrency:
+//   begin() / set_*()    — Core 0 only.
+//   current() / is_*()   — readable from either core; the cached
+//                          struct is byte-stable once begin() returns
+//                          and setter writes are wrapped in s_mutex.
+//
+// The mutex guards the {cache, dirty, last_setter_ms} triple so the
+// debounced writeback tick (P.3) can read a coherent snapshot.
+
+#pragma once
+
+#include <stdint.h>
+
+#include "theme.h"  // theme::Id
+
+namespace prefs {
+
+// On-disk schema version. Bumped only when the JSON shape changes in
+// a way the boot-restore parser (P.2) needs to migrate. Callers on
+// the in-RAM side don't read this; it's only relevant to load/save.
+constexpr uint8_t kSchemaVersion = 1;
+
+// Flat record. Add fields here AND in the JSON serialiser/parser
+// (P.2/P.3) when the v1 scope grows. POD so we can byte-copy under
+// the mutex without worrying about non-trivial constructors.
+struct Prefs {
+  uint8_t   schema_v;  // = kSchemaVersion in RAM; tracks the on-disk
+                       // value once load() lands in P.2.
+  theme::Id theme;     // FR-18.2 — only persisted preference in v1.
+};
+
+// Mount the filesystem and initialise the in-RAM cache to defaults.
+// Idempotent — safe to call once from setup(). Logs the mount result.
+// MUST be called BEFORE the first prefs::current() reader. P.2 wires
+// the actual /prefs.json load into this same entry point.
+void begin();
+
+// Snapshot accessor. Returns a const reference to the in-RAM cache.
+// Safe to read from either core — the cache is only mutated by
+// Core 0 setters (none in P.1) so a render-side reader sees either
+// the pre- or post-write state, never a torn intermediate.
+const Prefs& current();
+
+// True iff the LittleFS partition mounted successfully. P.2 / P.3
+// gate their load + writeback logic on this so an unformatted or
+// missing partition degrades gracefully (defaults apply, nothing
+// persists) rather than crashing.
+bool is_mounted();
+
+// True iff the in-RAM cache differs from the last value successfully
+// written to flash (FR-18.7). P.1 always returns false — there are
+// no setters yet. The status-heartbeat plumbing (P.5) will read
+// this; surfacing it now keeps the API surface stable across phases.
+bool is_dirty();
+
+}  // namespace prefs

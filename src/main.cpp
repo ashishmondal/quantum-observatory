@@ -16,6 +16,7 @@
 #include "fixed_point.h"
 #include "gfx_text.h"
 #include "light_sensor.h"
+#include "prefs.h"
 #include "scene_state.h"
 #include "theme.h"
 #include "thermal_monitor.h"
@@ -101,6 +102,13 @@ void setup() {
   // lifecycle as the trig LUT: built once on Core 0, then read-only
   // from Core 1's render path.
   palette::init_all();
+
+  // Persistent preferences (FR-18, phase P.1). Mounts LittleFS and
+  // initialises the in-RAM cache to defaults; no /prefs.json load
+  // yet (P.2). MUST run before theme::set() so the future P.2
+  // boot-restore can replace the explicit APOLLO_AMBER bring-up
+  // below with whatever the operator last persisted.
+  prefs::begin();
 
   // Theming system (FR-15). Boots to APOLLO_AMBER per FR-15.2; HA may
   // push a non-default theme via observatory/theme later (T.4). The
