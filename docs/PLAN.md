@@ -302,6 +302,16 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 - [x] **6.5.6 Sky timelapse debug scene** *(removed)*
   - Originally landed: `SkyTimelapseScene` mapped `now_ms % 10000` to a 24 h synthetic UTC sweep so the gradient + sun arc were tunable in 10 s. Removed alongside 6.5.5 — with no sky background to validate, the diagnostic scene served no purpose. `SceneId::SKY_TIMELAPSE` slot reclaimed.
 
+- [x] **6.5.7 Animated giant clock face** (FR-9.7, FR-15.10)
+  - LCD ghost layer: `"18:88"` in `Ink::GHOST` with a black halo drawn first so the unlit-segment shadow reads as etched against any background.
+  - Per-slot **two-phase rolodex roll** for H2 / M1 / M2: constant-speed 30 ms/step digit scramble for `(dur − 1000) ms`, then a fixed ease-out cubic settle on the new value. Cascade rooted at the highest-order changed slot with durations 300 / 600 / 900 ms; H1 (blank or `1`) and `:` never roll. Boot-time and dropout `--:--` transitions silent-latch without triggering a cascade.
+  - **1 Hz colon pulse** with linear fade-out to a ~10 % floor over 900 ms (full theme value for the first 100 ms of each second). Dim ghost `:` underneath so the separator is always readable.
+  - **Per-theme animated background** (`BgType::THEME_CLOCK`) routed through `Theme::init_clock_bg()` / `render_clock_bg()` — each of the five themes ships a signature motion (Apollo CRT raster, Nostromo nebula drift, Vectrex perspective grid, etc.). Re-init on every theme switch (FR-15.4).
+  - **Transparent colon slot** — `render_colon()` no longer paints an opaque `fillRect` and the LCD ghost halo string is `"18 88"` (space at slot 2) so the per-theme background animation shows through between and around the two colon dots.
+  - Cross-core **click counter** (`g_clock_anim_click_seq`, packed `(seq << 3) | slot`) edge-detected per (slot, step) — Core 0 turns each visible digit tick into one short buzzer click; held frames are silent.
+  - Diagnostic synthetic-cascade trigger (`g_clock_anim_test_kind` = MINUTE / TEN_MIN / HOUR) wired to IR under `-DCLOCK_ANIM_TEST` and to MQTT `observatory/test/clock_anim` so the cascade is exercisable on demand.
+  - **Win:** the clock face feels like a living instrument — visible motion behind the digits, audible/visible odometer cascade on every minute roll, transparent colon revealing the bg animation.
+
 ---
 
 ## Phase 7 — First Real "Observatory" Scenes
