@@ -11,9 +11,15 @@
 //   observatory/time     — FR-9.5 RTC correction → tod::set_from_mqtt()
 //
 // Publishes:
-//   observatory/status   — §5.4 heartbeat every 30 s
-//   observatory/debug    — phase IR.2 one-shot diagnostic dumps
-//                          (cross-core via queue_debug())
+//   observatory/status         — §5.4 heartbeat every 30 s
+//   observatory/availability   — FR-20.3 LWT (retained: "online" on
+//                                connect, "offline" auto-published
+//                                by the broker on outage)
+//   homeassistant/<comp>/...   — FR-20.1 MQTT-Discovery configs,
+//                                one retained publish per entity on
+//                                each successful connect
+//   observatory/debug          — phase IR.2 one-shot diagnostic dumps
+//                                (cross-core via queue_debug())
 //
 // All inbound payloads are validated per FR-1.3 / FR-1.4: malformed
 // JSON or out-of-range fields are logged and dropped, never

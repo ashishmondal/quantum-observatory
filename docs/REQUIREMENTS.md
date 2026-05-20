@@ -1,7 +1,7 @@
 # Quantum Observatory — Requirements
 
-**Version:** 1.10
-**Status:** Draft — implementation in progress (W1–W5 landed; FR-12 color/background system landed; FR-13 splash landed; FR-14 on-device astronomical computation landed for ISS/sun/moon; FR-15 theming system in progress (T.1–T.2 landed); FR-16 compositor in progress (D.1–D.2 landed); FR-18 persistent prefs pending Phase P)
+**Version:** 1.12
+**Status:** Draft — implementation in progress (W1–W5 landed; FR-12 color/background system landed; FR-13 splash landed; FR-14 on-device astronomical computation landed for ISS/sun/moon, FR-14.6 launch-countdown pending Phase L; FR-15 theming system in progress (T.1–T.2 landed); FR-16 compositor in progress (D.1–D.2 landed); FR-18 persistent prefs pending Phase P)
 **Target hardware:** Raspberry Pi Pico W + Waveshare RGB-Matrix-P3 (64×32, FM6126A driver, HUB75)
 **Stack:** C++ on PlatformIO (earlephilhower Arduino-Pico core), Adafruit Protomatter, MQTT client, Home Assistant integration
 
@@ -147,6 +147,7 @@ The Director (HA) is authoritative for *event* triggering (e.g. "ISS pass starts
 - **FR-14.3** Jupiter visibility classification (above-horizon-and-dark / above-horizon-but-daylight / below-horizon) SHALL be derived on-device from Jupiter's RA/Dec (pushed by HA at low cadence — daily is sufficient), the RTC time, and the observer location. The `jupiter_visibility` scene consumes this derivation to decide between the headline framings ("Visible: East @ 9PM" vs. "Behind the Sun" vs. host constellation when above-horizon-but-daylight).
 - **FR-14.4** Moon phase (illuminated fraction, waxing/waning) SHALL be computed on-device from the RTC time using a closed-form approximation (≤ ±2% phase error). The `moon_phase` scene consumes this derivation; HA pushes only the moon's RA/Dec for altitude calculation when the scene needs "rise/set tonight" framing.
 - **FR-14.5** All FR-14 computations SHALL conform to NFR-1.3 (fixed-point math and/or precomputed LUTs; no software-emulated `float` in render loops). Trig and ephemeris work runs on Core 1 during slack windows and is published via the seqlock snapshot (FR-16.7).
+- **FR-14.6** Rocket-launch countdown (T-minus to the next scheduled launch) SHALL be derived on-device from the live RTC UTC epoch and a launch envelope pushed by HA at low cadence (hourly is sufficient — see [MQTT_TOPICS.md](MQTT_TOPICS.md) `observatory/launch`). HA performs raw API pass-through against a public launch feed (Rocket Launch Live "fdo" tier — `https://fdo.rocketlaunch.live/json/launches/next/5` — or equivalent: The Space Devs / Launch Library 2); HA selects the soonest still-future launch and emits `{t0_epoch, t0_estimate, t0_window_close_epoch?, provider, vehicle, mission, pad_code, result}`, with provider/pad abbreviations resolved from editable HA-side lookup tables (not in firmware flash). The `launch_countdown` scene consumes this snapshot to render five regimes — `T-Nd HHh` (> 24 h) / `T-HHh MMm` (1 h..24 h) / `T-MM:SS` (1 min..1 h) / blinking `T-SS` (< 60 s) / `LIVE` (window open, `t0_window_close_epoch` present and `now ∈ [t0_epoch, t0_window_close_epoch]`) — plus an `NET` (No Earlier Than) badge when `t0_estimate=true`. Snapshot freshness window SHALL be **4 h** to cover HA's hourly poll cadence + slippage; past freshness the scene falls back to `WAIT` rather than ticking down stale dates. A snapshot whose `t0_epoch` has elapsed by more than 1 h with no `t0_window_close_epoch` SHALL also fall to `WAIT` so a missed-launch payload doesn't render `T+...` forever — HA's next poll publishes the new top-of-queue. The scene MAY emit one audible cue per integer second in the final 10 s window and one "ignition" sting at `T-0`, both gated by the FR-19.4 `button_sound` pref.
 
 ### FR-15 Theming System
 Full design lives in [THEME.md](THEME.md); these are the contractual bullets.
@@ -543,6 +544,75 @@ to mute sounds or dim the background.
   low tick on row navigation, knob-pitch clicks on value change.
   All overlay cues SHALL be gated by `button_sound` (FR-19.4).
 
+### FR-20 Home Assistant Device Discovery
+
+The device SHALL self-register with Home Assistant via the standard
+MQTT-Discovery protocol so HA presents it as a single Device card
+with zero manual `mqtt: sensor:` / `mqtt: binary_sensor:` YAML.
+Reusing the existing `observatory/status` heartbeat as the shared
+state topic keeps steady-state wire chatter identical to the
+pre-FR-20 baseline (one ~500 B publish every 30 s).
+
+- **FR-20.1 Discovery publish.** On every successful MQTT connect,
+  the firmware SHALL publish one retained discovery config message
+  per entity to `<HA_DISCOVERY_PREFIX>/<component>/<MQTT_CLIENT_ID>/<object_id>/config`.
+  Configs SHALL be `retain: true` so HA recovers the entity set on
+  its own restart without waiting for the next device reconnect.
+
+- **FR-20.2 Device block.** Every discovery payload SHALL include
+  a `device` block with `identifiers = [MQTT_CLIENT_ID]`,
+  `name = "Quantum Observatory"`, `manufacturer`, `model`,
+  `sw_version` (from the compile-time `FW_VERSION` macro), and
+  `configuration_url = http://<WiFi.localIP()>` so all entities
+  group under one card and the card surfaces a clickable IP.
+
+- **FR-20.3 Availability via LWT.** The firmware SHALL publish a
+  retained `online` to `observatory/availability` on every
+  successful MQTT connect, and SHALL register a broker-side
+  Last-Will-Testament that publishes retained `offline` on the same
+  topic when the keepalive lapses or the TCP socket drops. Every
+  discovered entity SHALL reference this availability topic so the
+  device card greys out within seconds of an outage.
+
+- **FR-20.4 Shared state topic.** All discovered entities SHALL
+  read from `observatory/status` (§5.4) via per-entity
+  `value_template`. New per-sensor state topics SHALL NOT be
+  introduced — the steady-state publish cadence remains one
+  heartbeat every 30 s regardless of how many entities exist.
+
+- **FR-20.5 v1 entity set.** The discovered entity set SHALL be:
+  - **Sensors:** `scene`, `fps`, `render_slack_ms`, `uptime_s`,
+    `free_heap`, `rssi`, `temperature`, `light_raw`, `mqtt_state`,
+    `mqtt_rc`, `mqtt_backoff_s`.
+  - **Binary sensors:** `night` (device_class `light`),
+    `thermal_hot` (device_class `heat`), `prefs_dirty`
+    (device_class `problem`).
+  Diagnostic-only entities (FPS, heap, RSSI, MQTT link state, etc.)
+  SHALL set `entity_category: diagnostic`. The `temperature`
+  entity SHALL render as "unknown" until the first successful
+  DS3231 read (heartbeat publishes JSON `null` in that window).
+
+- **FR-20.6 Discovery prefix.** The prefix SHALL default to
+  `homeassistant` (the universal HA default) and be configurable at
+  compile time via the `HA_DISCOVERY_PREFIX` macro in `config.h`.
+
+- **FR-20.7 Existing entities unchanged.** The manually-configured
+  `mqtt: select:` (theme) and `mqtt: number:` (image tint)
+  entities in `homeassistant/packages/quantum_observatory.yaml`
+  remain operator-installed in v1 — they are stateful inputs whose
+  state is already echoed via `observatory/status` and they
+  continue to work unmodified. Auto-discovering them is a future
+  enhancement, not a v1 requirement.
+
+- **FR-20.8 Recorder advisory.** HA's recorder logs every state
+  change for every entity to SQLite by default. The diagnostic
+  entities (`fps`, `render_slack_ms`, `rssi`, `uptime_s`,
+  `free_heap`, `mqtt_backoff_s`, `mqtt_rc`) change on every
+  heartbeat (~20k rows/day total). Long-retention HA installs
+  SHOULD exclude them via `recorder: exclude_entities:`. This is
+  an HA-side configuration recommendation, NOT a firmware
+  requirement, and is documented in `docs/MQTT_TOPICS.md`.
+
 ---
 
 ## 3. Non-Functional Requirements
@@ -686,6 +756,7 @@ diagnostic in `IrTestScene`.
 | `moon_phase` | starfield | phase glyph + name | sticky |
 | `jupiter_visibility` | nebula | direction + magnitude/distance + visibility (or host constellation when above-horizon-but-daylight) | example in §5.1; on-device daylight derivation per FR-14 |
 | `constellation_now` | starfield | constellation art + name | sticky; HA picks current overhead constellation by date + observer lat/lon — see [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 1 |
+| `launch_countdown` | nebula | provider/vehicle + mission + live T-minus | sticky; on-device T-minus per FR-14.6; HA polls Rocket Launch Live hourly (`observatory/launch`) |
 
 All scenes above (except possibly `boot` during the splash window) carry the standard small clock readout per FR-9.2. All `bg_type` values in this table are subject to FR-15.6 — the actual palette used at render time is whatever `theme::bg_palette_for()` returns for the active theme.
 
@@ -707,6 +778,7 @@ plus Phase T theming and Phase D compositor).
 | **W6 — Theming system** | Five themes, MQTT-selectable, runtime BG duotone | Phase T |
 | **W7 — Compositor & idle-slack utilization** | Layer stack, fade transitions, overlays, toasts | Phase D |
 | **W7.5 — Persistent preferences** | LittleFS prefs store, wear-protected writeback, theme persists | Phase P |
+| **W7.6 — Launch countdown** | `launch_countdown` scene, hourly HA poll, on-device T-minus | Phase L |
 | **W8 — Polish & hardening** | OTA, registry-as-data, soak test, tag v1.0 | Phase 8–9 |
 
 ---

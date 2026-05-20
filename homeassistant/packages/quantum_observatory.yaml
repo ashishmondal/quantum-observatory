@@ -47,6 +47,24 @@
 # out below (search for "SUPERSEDED BY PYSCRIPT") with explanatory
 # headers so you can re-enable them if you uninstall pyscript.
 #
+# What this package does NOT define any more (FR-20):
+#
+# The sensor surface — ambient light, DS3231 temperature, render
+# diagnostics, MQTT link diagnostics, prefs_dirty, active scene —
+# is now auto-discovered from firmware via MQTT Discovery on every
+# successful connect. HA shows them under a single "Quantum
+# Observatory" device card with no manual `mqtt: sensor:` /
+# `mqtt: binary_sensor:` blocks here. The retained
+# `observatory/availability` topic (firmware-published `online` +
+# broker-published `offline` LWT) drives the unavailable state.
+# See docs/MQTT_TOPICS.md → "Home Assistant Device Discovery".
+#
+# The two `mqtt: select:` (theme) and `mqtt: number:` (image tint)
+# blocks at the bottom of this file are intentional exceptions:
+# they're stateful inputs the firmware echoes via observatory/status,
+# and HA discovery for `select` / `number` write-back entities is a
+# follow-up enhancement (FR-20.7).
+#
 # All publishes use retain=false on purpose. The firmware caches every
 # inbound payload for 1–24 h (per topic's `kFreshMs`), so a retained
 # message would only matter at first connect — and the automations

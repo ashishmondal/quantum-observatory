@@ -862,6 +862,256 @@ button per FR-11.3.
 
 ---
 
+## Phase HA — Home Assistant Device Discovery (FR-20)
+
+> Goal: the Pico W self-registers as a single HA Device card with
+> ambient-light, DS3231 temperature, network + render diagnostics, and
+> availability via LWT — zero new HA YAML required for the sensor
+> surface. Reuses `observatory/status` as the shared state topic so
+> steady-state wire chatter is unchanged.
+
+- [x] **HA.1 LWT + availability topic** — add
+    `observatory/availability`; switch `s_client.connect()` to the
+    5/8-arg form with `will="offline" retain=true qos=1`; publish
+    retained `"online"` immediately on every successful connect.
+    **Exit:** `mosquitto_sub -v -t 'observatory/availability'`
+    shows `online` on boot; pulling power makes the broker emit
+    `offline` within ~15 s.
+
+- [x] **HA.3 Status heartbeat expansion** — bump
+    `kStatusJsonCapacity` 256 → 512; add `light_raw`, `night`,
+    `temp_c` (null until first DS3231 read), `hot`, `mqtt_state`
+    (string), `mqtt_rc`, `mqtt_backoff_s` to `publish_status()`.
+    **Exit:** `mosquitto_sub -v -t 'observatory/status'` shows
+    all seven new fields in the next 30 s heartbeat.
+
+- [x] **HA.2 ha_discovery module** — new
+    `include/net/ha_discovery.h` + `src/net/ha_discovery.cpp`.
+    Table-driven `EntityDecl` with one row per entity; one shared
+    `format_and_publish()` builds the discovery topic + JSON payload
+    (always includes `device`, `availability_topic`, `unique_id`,
+    `state_topic`, `value_template`; appends optional unit /
+    device_class / state_class / entity_category / icon).
+    **Exit:** module compiles standalone; no callers yet.
+
+- [x] **HA.4 Entity table** — populate the 11 sensors +
+    3 binary_sensors per FR-20.5. Group by category (scene,
+    diagnostics, sensor surface, link diagnostics) for readability.
+    **Exit:** entity table reviewed against the FR-20.5 list.
+
+- [x] **HA.5 Wiring + docs** — call `ha_discovery::publish_all()`
+    from `mqtt_link.cpp` CONNECTING success path (after availability
+    `online`, before the subscribe loop); update header comment;
+    add FR-20 to `REQUIREMENTS.md` (this entry); add a "Home
+    Assistant device discovery" section to `docs/MQTT_TOPICS.md`
+    with the entity table and the FR-20.8 recorder advisory;
+    `quantum_observatory.yaml` header note that the sensor surface
+    is now auto-discovered.
+    **Exit:** `mosquitto_sub -v -t 'homeassistant/#'` after a fresh
+    connect shows 14 retained config publishes; HA Settings →
+    Devices lists a "Quantum Observatory" card with all 14 entities;
+    cover the LDR → `binary_sensor.*_night` flips ON within 30 s.
+
+- [x] **HA.6 Build verification** — `pio run -e pico-dev` clean.
+    **Exit:** firmware builds; ~14 KB flash added; RAM headroom
+    unchanged within ~0.1 % (table is .rodata + ~80 B of stack
+    during the one-shot publish burst).
+
+---
+
+## Phase L — Launch Countdown Scene (FR-14.6)
+
+> Promoted from [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 3. The
+> `launch_countdown` scene shows the next scheduled rocket launch
+> with a live on-device T-minus, plus provider / vehicle / mission /
+> pad context. Same architectural shape as `iss_pass` /
+> `jupiter_visibility`: HA does raw API pass-through against a public
+> launch feed (Rocket Launch Live "fdo" free tier in v1 — no API key,
+> hourly poll), firmware does the T-minus math against the live RTC
+> epoch every frame. Snapshot freshness = **4 h** so a single missed
+> poll doesn't blank the panel.
+>
+> Order matters: L.1 (wire contract) before L.2 (state module), L.2
+> before L.3 (scene skeleton); L.5 (HA publisher) can land in parallel
+> with L.2/L.3/L.4 once the wire contract is frozen by L.1.
+
+- [ ] **L.1 Wire contract + docs** (FR-14.6, FR-1.3 / FR-1.4)
+  - Add `observatory/launch` section to
+    [docs/MQTT_TOPICS.md](MQTT_TOPICS.md) — field table, validation
+    rules, freshness window (4 h), expired-payload rule (`now >
+    t0_epoch + 1 h` with no `t0_window_close_epoch` → drop to
+    `WAIT`), `pad_code` / `provider` abbreviation policy ("HA owns
+    the lookup table; firmware just renders the string"),
+    `t0_estimate` semantics (true when from `win_open` or
+    `est_date` — surfaces as `NET` badge on-panel), example
+    `mosquitto_pub` invocations for each render regime.
+  - **Exit:** field-by-field contract committed; sample
+    `mosquitto_pub` lines tested locally with `mosquitto_sub -v -t
+    'observatory/launch'` round-trip.
+
+- [ ] **L.2 `launch_state` module** (FR-14.6, FR-16.7)
+  - New `include/state/launch_state.h` + `src/state/launch_state.cpp`
+    mirroring `jupiter_state` / `iss_state` (single producer Core 0,
+    single consumer Core 1, FR-16.7 seqlock snapshot). Fields:
+    `int32_t t0_epoch`, `int32_t t0_window_close_epoch` (0 = absent),
+    `bool t0_estimate`, `int8_t result` (-1 scheduled), char-array
+    storage for `provider[12]`, `vehicle[12]`, `mission[14]`,
+    `pad_code[5]`, plus `uint32_t pushed_at_ms` for freshness +
+    `kFreshMs = 4UL * 60UL * 60UL * 1000UL`. Parser in
+    `mqtt_link::handle_launch()` (next to `handle_jupiter()`),
+    StaticJsonDocument sized per NFR-2.3 (≤ 256 B payload + 25 %
+    headroom → 320). Drop the whole payload on any required field
+    missing/malformed/out-of-range; `pad_code` / `vehicle` /
+    `mission` / `provider` are clamped to their fixed widths
+    (truncation is the Director's job per FR-4.4, the firmware just
+    null-terminates defensively).
+  - **Exit:** publishing a sample payload increments a
+    `s_stats.accepted` counter visible in the IR/MQTT diagnostic
+    overlay; malformed payloads bump `rejected`; the snapshot reads
+    back identical bytes via seqlock from Core 1 under
+    `CORE0_MQTT_FLOOD`.
+
+- [ ] **L.3 `LaunchCountdownScene` skeleton** (FR-14.6, FR-3.3)
+  - New `src/scenes/launch_countdown_scene.h`. Registry entry
+    + `id_from_string("launch_countdown")` map row. WAIT state when
+    no fresh snapshot: bracketed `LAUNCH` header on row 0, `WAIT`
+    centered on the data rows — same visual idiom as
+    `jupiter_visibility`'s `WAIT`. `wants_clock_chrome = true`
+    (small HH:MM corner readout per FR-9.2; the layout uses the
+    left 50 px so the corner clock fits).
+  - **Exit:** `mosquitto_pub -t observatory/scene -m
+    '{"scene_id":"launch_countdown"}'` brings up the WAIT panel
+    cleanly; publishing a sample `observatory/launch` payload flips
+    it to the populated layout (which is still placeholder text
+    until L.4).
+
+- [ ] **L.4 T-minus formatter + live layout** (FR-14.6, NFR-1.3)
+  - Integer-only T-minus arithmetic against `tod::now_epoch_utc()` —
+    no `float` in the render path. Five regimes, each its own format
+    helper, dispatched by absolute `t_minus`:
+    - `> 86400 s` (>24 h): `T-Nd HHh` (cap at `T-99d HHh`)
+    - `3600..86400 s` (1–24 h): `T-HHh MMm`
+    - `60..3600 s` (1 min..1 h): `T-MM:SS`
+    - `0..60 s` (<60 s): blinking `T-SS` at 2 Hz, halo flips
+      between `theme::ink(STATUS_OK)` and `STATUS_WARN`
+    - `t_minus ≤ 0` with `t0_window_close_epoch` set and
+      `now ≤ t0_window_close_epoch`: `LIVE` in `STATUS_OK` with a
+      1 Hz pulse
+  - 4-line layout (right of corner clock):
+    - row 0: bracketed `LAUNCH` (theme-aware)
+    - row 1: provider + vehicle (`SX FALCON 9`)
+    - row 2: mission (`STARLINK 17-42`), pre-truncated by HA per
+      FR-4.4
+    - row 3: T-minus string with `NET ` prefix when
+      `t0_estimate=true`, pad code suffix when there's room
+      (`T-04:12  VSF`); pad code drops first when the row would
+      overflow
+  - **Exit:** running the five sample payloads from the L.1
+    `mosquitto_pub` block exercises every regime; the blinking
+    final-minute branch is visibly distinguishable from the steady
+    `T-MM:SS` branch.
+
+- [ ] **L.5 HA publisher** (FR-14, separation of policy from render)
+  - New `publish_launch()` function in
+    [homeassistant/pyscript/observatory_publisher.py](../homeassistant/pyscript/observatory_publisher.py),
+    `@time_trigger("cron(7 * * * *)")` (top-of-hour + 7 min so it
+    doesn't collide with the existing 30 s / hourly publishers).
+    GET `https://fdo.rocketlaunch.live/json/launches/next/5` with
+    a 10 s timeout and `User-Agent: quantum-observatory/1.x`. Filter
+    `result == -1` (scheduled only) + drop entries whose effective
+    `t0` is older than `now - 6 h`. Effective `t0` resolution:
+    prefer `t0`, fall back to `win_open`, fall back to a
+    midday-UTC interpretation of `est_date` (with
+    `t0_estimate=true` set in the latter two cases). Take the
+    first remaining entry.
+  - Provider + pad abbreviation tables defined inline at the top
+    of the function (small Python dicts — operator-editable
+    without reflashing):
+    `PROVIDER_ABBREV = {"SpaceX": "SX", "Rocket Lab": "RKL",
+     "United Launch Alliance": "ULA", "Blue Origin": "BO", ...}`,
+    `PAD_ABBREV = {"vandenberg-sfb": "VSF",
+     "cape-canaveral-sfs": "CCS", "kennedy-space-center": "KSC",
+     "boca-chica-launch-site": "STR",
+     "rocket-lab-launch-complex-mahia-peninsula": "LC1", ...}`.
+    Unknown providers fall back to the first 3 uppercase letters;
+    unknown pads to first 3 letters of the slug — never block a
+    publish on a missing abbreviation.
+  - Mission name is uppercased + clipped to 14 chars (FR-4.4) with
+    "STARLINK (NN-NN)" → "STARLINK NN-NN" cleanup so the parens
+    don't waste two slots.
+  - On API failure (timeout, non-200, JSON parse error,
+    `result == []`): log + skip the publish. Firmware's 4 h
+    freshness window absorbs a single missed hour; longer outages
+    drop the scene to `WAIT` (correct fail-closed behaviour vs.
+    inventing data — same discipline as the recent ISS pyscript
+    fix that gated stale `sensor.iss_position` attrs).
+  - **Exit:** triggering the service manually (`service:
+    pyscript.publish_launch`) emits a single
+    `observatory/launch` payload that the firmware accepts;
+    `mosquitto_sub -v -t 'observatory/launch'` shows one publish
+    per hour thereafter.
+
+- [ ] **L.6 Audio cues** (FR-14.6, FR-10.7 spirit, FR-19.4)
+  - Add `buzzer::play_launch_tick()` (single 35 ms tick at
+    `LAUNCH_TICK_HZ ≈ 880`) and `buzzer::play_ignition()` (3-note
+    rising sting, ≤ 1500 ms total, defined next to the per-theme
+    melody table in `theme.cpp` so each theme could re-skin it
+    later — v1 ships a single theme-neutral sting since most
+    themes don't reference rocketry). Trigger inside
+    `launch_countdown_scene::render()` on the rising edge of
+    integer-second changes in the `0..10 s` window (one tick per
+    second, gated on `(slot, second)` so a held frame produces no
+    extra ticks — same idiom as the FR-9.7 giant-clock digit-roll
+    cascade), and once on the falling edge at `T-0`.
+  - All cues gated by `prefs::current().button_sound`
+    (FR-19.4), the FR-10.8 boot quiet, and FR-10.9 night quiet —
+    same composition rule every other cue already obeys.
+  - **Exit:** publishing a payload with `t0_epoch = now + 12` and
+    leaving the panel up for 15 s in a lit room produces 10
+    ticks + one ignition sting, then settles into `LIVE` (if a
+    window-close was provided) or fades to `WAIT`. Muting via
+    FR-19 SOUND → BUTTON silences the entire sequence.
+
+- [ ] **L.7 HA Discovery sensor** (FR-20)
+  - Add a `sensor.observatory_next_launch` entry to the FR-20.4
+    discovery table — `state_topic = "observatory/launch"`,
+    `value_template = "{{ value_json.mission }}"`, attributes
+    template surfaces `t0_epoch`, `provider`, `vehicle`,
+    `pad_code`, `t0_estimate`. HA recorder advisory: this state
+    only changes hourly so it does NOT need the FR-20.8 exclusion
+    list. Update the [docs/MQTT_TOPICS.md](MQTT_TOPICS.md) FR-20
+    entity table accordingly.
+  - **Exit:** HA Devices → Quantum Observatory shows a
+    "Next Launch" sensor whose attributes match what the firmware
+    is rendering; a Lovelace card can mirror the on-panel readout
+    elsewhere in the home.
+
+- [ ] **L.8 Diagnostic exercise in `gfx_test`** (FR-12.6 spirit)
+  - Extend the diagnostic exercise so a one-shot MQTT command
+    cycles the five render regimes (`T-30d` → `T-2h` → `T-3m` →
+    `T-9s` → `LIVE`) via synthetic payloads injected directly
+    into `launch_state::set_*()` — no wall-clock waiting required.
+    Reuses the FR-9.7 `CLOCK_ANIM_TEST` precedent (diagnostic
+    rebases time so the cascade is testable).
+  - **Exit:** one MQTT command exercises every regime in ≤ 30 s;
+    any visual regression in the formatter shows up immediately
+    without waiting for an actual launch window.
+
+- [ ] **L.9 Build + soak verification**
+  - `pio run -e pico-dev` clean. Leave the scene up for a full
+    hour against a live `observatory/launch` payload; confirm
+    Core 1 FPS stays flat (FR-16.7 seqlock read should be
+    ~free), `render_slack_ms` heartbeat stays > 8 ms (D.5 floor),
+    and the panel transitions cleanly across regime boundaries
+    without one-frame "0" glitches at `T-3600` and `T-60`
+    (off-by-one trap in any formatter that mixes `/` and `%`
+    sloppily).
+  - **Exit:** firmware builds; an hour-long observation shows no
+    FPS dip, no slack regression, no formatter glitch at the
+    regime boundaries.
+
+---
+
 ## Phase 9 — Hardening (final)
 
 - [ ] **9.1 Memory audit** — log free heap; confirm ≥ 32 KB headroom under all scenes; also flash budget — each `assets/*.bmp` costs ~2.4 KB; track total registry size

@@ -17,6 +17,7 @@
 
 #include "scene_state.h"
 #include "secrets.h"
+#include "ha_discovery.h"
 #include "light_sensor.h"
 #include "iss_state.h"
 #include "jupiter_state.h"
@@ -62,6 +63,7 @@ constexpr const char* kTopicJupiter = "observatory/jupiter"; // phase 7.3 jupite
 constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
 constexpr const char* kTopicTheme   = "observatory/theme";   // FR-15.2 (phase T.4)
 constexpr const char* kTopicPrefsReset = "observatory/prefs/reset"; // FR-18.8 (phase P.5)
+constexpr const char* kTopicAvailability = "observatory/availability"; // FR-20.3 LWT (phase HA.1)
 constexpr const char* kTopicDebug   = "observatory/debug";   // phase IR.2 one-shot diagnostic dump (Pico → HA)
 #ifdef CLOCK_ANIM_TEST
 // Dev-only: synthetic digit-cascade trigger for the giant clock
@@ -71,10 +73,11 @@ constexpr const char* kTopicDebug   = "observatory/debug";   // phase IR.2 one-s
 constexpr const char* kTopicClockAnimTest = "observatory/test/clock_anim";
 #endif
 
-// §5.4 example payload is ~85 bytes serialised. NFR-2.3 → max + 25%.
-// Using 256 here gives generous headroom for future fields without
-// wasting much SRAM.
-constexpr size_t kStatusJsonCapacity = 256;
+// §5.4 example payload is ~85 bytes serialised originally; phase HA.3
+// added seven sensor/diagnostic fields (light_raw, night, temp_c, hot,
+// mqtt_state, mqtt_rc, mqtt_backoff_s) that take the worst-case
+// payload to ~360 B. NFR-2.3 → max + 25% headroom, bumped to 512.
+constexpr size_t kStatusJsonCapacity = 512;
 
 // §5.1 example payload is ~150 bytes. The `overrides.text` field is
 // the largest variable contributor — Director-side truncation caps it
@@ -1059,6 +1062,52 @@ bool publish_status(uint32_t now_ms) {
     doc["tick_sound_mode"] = static_cast<int>(p.tick_sound_mode);
   }
 
+  // FR-20 — sensor + link diagnostics consumed by the auto-discovered
+  // HA entities (phase HA.3). Re-using observatory/status (vs minting
+  // new per-entity state topics) means steady-state MQTT chatter is
+  // identical to pre-phase-HA: one ~500 B message every 30 s.
+
+  // Ambient light (FR-7.1). Raw 12-bit ADC: HIGHER = DARKER on this
+  // hardware (see config.h LIGHT_NIGHT_THRESHOLD_DEFAULT). The
+  // `night` boolean is the debounced Schmitt-decision already used by
+  // the safety overlay; exposing both lets HA build a calibration
+  // chart AND drive automations.
+  doc["light_raw"] = light_sensor::raw();
+  doc["night"]     = light_sensor::is_night();
+
+  // DS3231 silicon temperature (FR-7.3). last_temp_c() returns
+  // INT8_MIN before the first successful poll; publish JSON null in
+  // that window so HA shows "unknown" instead of -128 °C.
+  {
+    const int8_t t = thermal_monitor::last_temp_c();
+    if (t == INT8_MIN) doc["temp_c"] = nullptr;
+    else               doc["temp_c"] = static_cast<int>(t);
+  }
+  doc["hot"] = thermal_monitor::is_hot();
+
+  // MQTT link diagnostics — echoed so the HA device card surfaces
+  // the same precise outage detail the info overlay shows on-panel
+  // (FR-17.8 / IR.4). mqtt_state is a short enum string so the HA
+  // entity reads naturally in automations; mqtt_rc + mqtt_backoff_s
+  // round it out for support-style queries. We're inside CONNECTED
+  // by construction here (publish_status only fires from that
+  // branch), so the value is always "connected" on the wire — but
+  // we render it generically anyway so a future "publish a final
+  // status on disconnect" path can reuse the same code.
+  {
+    const char* state_str = "connected";
+    switch (s_state) {
+      case State::IDLE:         state_str = "idle";         break;
+      case State::WAIT_WIFI:    state_str = "wait_wifi";    break;
+      case State::CONNECTING:   state_str = "connecting";   break;
+      case State::CONNECTED:    state_str = "connected";    break;
+      case State::DISCONNECTED: state_str = "disconnected"; break;
+    }
+    doc["mqtt_state"]     = state_str;
+    doc["mqtt_rc"]        = static_cast<int>(s_last_rc);
+    doc["mqtt_backoff_s"] = static_cast<uint32_t>(s_backoff_ms / 1000u);
+  }
+
   char payload[kStatusJsonCapacity];
   const size_t n = serializeJson(doc, payload, sizeof(payload));
   if (n == 0 || n >= sizeof(payload)) {
@@ -1137,14 +1186,43 @@ void poll(uint32_t now_ms) {
       if (static_cast<int32_t>(now_ms - s_next_attempt_ms) < 0) {
         return;  // waiting on backoff
       }
+      // FR-20.3 Last-Will-Testament: ask the broker to publish a
+      // retained "offline" on observatory/availability the moment our
+      // keepalive lapses or the TCP socket drops. PubSubClient's
+      // 8-arg connect() signature is (clientId, user, pass, willTopic,
+      // willQoS, willRetain, willMessage). We use qos:1 + retain=true
+      // so HA's MQTT integration sees the same offline marker on a
+      // fresh subscribe long after the device went dark. Matched by
+      // the retained "online" publish below on every successful
+      // (re)connect — same retain flag so HA always reads ground
+      // truth from the retained value, not from a missed live edge.
       const bool has_auth = (MQTT_USERNAME[0] != '\0');
       const bool ok = has_auth
-          ? s_client.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD)
-          : s_client.connect(MQTT_CLIENT_ID);
+          ? s_client.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD,
+                             kTopicAvailability, /*willQoS=*/1,
+                             /*willRetain=*/true, /*willMessage=*/"offline")
+          : s_client.connect(MQTT_CLIENT_ID,
+                             /*willTopic=*/kTopicAvailability,
+                             /*willQoS=*/1, /*willRetain=*/true,
+                             /*willMessage=*/"offline");
       if (ok) {
         s_state = State::CONNECTED;
         s_backoff_ms = kBackoffStartMs;  // FR-5.2 reset on success
         s_last_status_ms = now_ms - kStatusIntervalMs;  // publish immediately
+        // FR-20.3: announce "online" retained immediately so HA
+        // entities flip available before the first discovery config
+        // or status heartbeat is processed. Idempotent — the broker
+        // is happy to overwrite its own retained value.
+        s_client.publish(kTopicAvailability, "online", /*retain=*/true);
+        Serial.print("[mqtt] pub ");
+        Serial.print(kTopicAvailability);
+        Serial.println(" online (retain)");
+        // FR-20.1: publish the 15 Home Assistant Discovery config
+        // messages so the device + every entity registers without
+        // any manual HA YAML. One-shot per session; configs are
+        // retained at the broker so HA picks them up on the next
+        // restart without us re-publishing.
+        ha_discovery::publish_all(s_client);
         // FR-1.1 / FR-7.4: re-subscribe on every (re)connect — broker
         // doesn't remember non-persistent sessions across our outages.
         // All three subscriptions go through the same on_mqtt_message

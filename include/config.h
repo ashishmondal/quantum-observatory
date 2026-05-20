@@ -198,3 +198,20 @@ inline constexpr uint8_t kRemoteCycleCount =
 // frame on itself without speculative work piling on. Consumers land in
 // D.6 and later — D.5 only publishes the measurement.
 #define RENDER_SLACK_FLOOR_MS_DEFAULT  8
+
+// ---- Home Assistant MQTT-Discovery (FR-20) -------------------------------
+// Discovery prefix the HA MQTT integration listens on. `homeassistant`
+// is the universal default for every stock HA install; override at the
+// build level if your HA is configured with a custom `discovery_prefix:`.
+#ifndef HA_DISCOVERY_PREFIX
+#define HA_DISCOVERY_PREFIX "homeassistant"
+#endif
+
+// Firmware version string surfaced in the HA device card
+// (device.sw_version). Override from `platformio.ini` with e.g.
+// `-DFW_VERSION='"v1.0-rc3"'` (driven from `git describe`) so the UI
+// shows a meaningful chip. Falls back to the compile timestamp so a
+// developer build is still self-identifying.
+#ifndef FW_VERSION
+#define FW_VERSION (__DATE__ " " __TIME__)
+#endif

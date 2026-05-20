@@ -327,6 +327,94 @@ mosquitto_pub -t observatory/constellation -m '{"index":0,"highlight_star":1}'
 mosquitto_pub -t observatory/constellation -m '{"index":2,"highlight_star":-1}'
 ```
 
+### `observatory/launch` — raw HA pass-through for the `launch_countdown` scene
+
+```json
+{ "t0_epoch": 1779243060, "t0_estimate": false, "provider": "SX", "vehicle": "FALCON 9", "mission": "STARLINK 17-42", "pad_code": "VSF", "result": -1 }
+```
+
+| Field | Type | Required | Range | Notes |
+|---|---|---|---|---|
+| `t0_epoch` | int (Unix UTC seconds) | yes | now − 1 h .. now + 100 d | Best available T-zero. HA SHALL resolve in priority order: confirmed `t0`, else launch-window `win_open`, else midday-UTC interpretation of `est_date` (`year`/`month`/`day`). Out-of-range rejects the whole payload (FR-1.3) — the firmware refuses to count down to a past event or to render `T-100D+`. |
+| `t0_estimate` | bool | yes | — | `true` when `t0_epoch` came from `win_open` or `est_date` (i.e. **No Earlier Than**). The scene surfaces this as a small `NET` badge so the operator knows the countdown is an upper bound, not a confirmed clock. |
+| `t0_window_close_epoch` | int (Unix UTC seconds) | no | `t0_epoch` .. `t0_epoch + 86400` | Only present when the source feed gives `win_close`. Enables the `LIVE` render regime while `now ∈ [t0_epoch, t0_window_close_epoch]`. Absent (or 0) means the launch is an instantaneous T-zero; once `now > t0_epoch + 1 h`, the snapshot is treated as expired and the scene falls to `WAIT` rather than rendering `T+...` forever. |
+| `provider` | string | yes | ≤ 12 chars, uppercase | Pre-abbreviated provider tag (e.g. `SX`, `RKL`, `ULA`, `BO`). HA owns the abbreviation table — see [docs/PLAN.md](PLAN.md) Phase L.5. Firmware just renders the bytes; truncation discipline per FR-4.4. |
+| `vehicle` | string | yes | ≤ 12 chars, uppercase | Vehicle name (e.g. `FALCON 9`, `STARSHIP`, `ELECTRON`, `ATLAS V`). HA may uppercase + light cleanup from the feed's `vehicle.name`. |
+| `mission` | string | yes | ≤ 14 chars, uppercase | Mission identifier (e.g. `STARLINK 17-42`, `STARSHIP FL12`). HA pre-truncates per FR-4.4 — the firmware does not wrap or re-truncate. Recommended cleanups: drop redundant parens (`Starlink (17-42)` → `STARLINK 17-42`), collapse `Flight 12` → `FL12`. |
+| `pad_code` | string | yes | 3..4 chars, uppercase | Short tag for the launch site, from an HA-side `pad.location.slug` → 3–4 letter dict (e.g. `VSF`=Vandenberg, `CCS`=Cape Canaveral, `KSC`=Kennedy, `STR`=Starbase, `LC1`=Rocket Lab Māhia). Unknown slugs SHALL fall back to first-3-uppercase-letters in HA — never block a publish on a missing entry. The scene renders it as a row-3 suffix when there's room. |
+| `result` | int | no | -1, 0, 1, 2 | Mission outcome from the feed (-1 = scheduled, 0 = failure, 1 = success, 2 = partial). Defaults to -1 (scheduled) if absent. The publisher SHOULD filter `result != -1` upstream — this field exists so the firmware can defensively skip a stale entry that slipped through. |
+
+If any **required** field is missing, malformed, or out of range, the
+whole payload is dropped per FR-1.3 / FR-1.4 — the scene keeps using
+the previous fresh snapshot (or `WAIT` if none).
+
+**Where HA gets the data — and why HA does no observer-frame logic.**
+Same pass-through contract as `observatory/iss` / `observatory/jupiter`.
+HA polls a public launch feed once an hour and re-emits the resolved
+fields. The reference feed in v1 is Rocket Launch Live's free "fdo"
+tier:
+
+- `https://fdo.rocketlaunch.live/json/launches/next/5` — no API key
+  (the JSON returns `"valid_auth": false`, that is normal); the
+  result array is sorted ascending by `sort_date` (Unix epoch).
+- HA filters `result == -1` (scheduled only) + drops any entry whose
+  effective `t0` is older than `now - 6 h` (defensive — the feed
+  occasionally lags), then takes the first remaining entry.
+- Effective `t0` resolution mirrors the firmware field policy
+  above: `t0` (confirmed) → `win_open` (`t0_estimate=true`) →
+  midday-UTC `est_date` (`t0_estimate=true`).
+- Provider + pad abbreviations come from operator-editable Python
+  dicts at the top of `publish_launch()` in
+  [homeassistant/pyscript/observatory_publisher.py](../homeassistant/pyscript/observatory_publisher.py) —
+  intentionally NOT baked into firmware so the abbreviation set is
+  updatable without a reflash.
+- The Space Devs Launch Library 2 (`https://ll.thespacedevs.com/2.2.0/launch/upcoming/`)
+  is a documented fallback if RLL's free tier disappears; field
+  mapping is similar (`net` → `t0_epoch`, `window_start` /
+  `window_end` → `t0_epoch` / `t0_window_close_epoch`).
+
+**On-device derivation (no firmware HTTP, no firmware abbreviation
+tables).** Every render frame the `launch_countdown` scene computes:
+
+1. `t_minus = t0_epoch - tod::now_epoch_utc()` — integer seconds,
+   single subtraction, no float (NFR-1.3).
+2. Render regime dispatch on `|t_minus|`:
+
+| Condition | Rendered as |
+|---|---|
+| `t_minus > 86400` (>24 h) | `T-Nd HHh` (`N` capped at 99) |
+| `3600 ≤ t_minus ≤ 86400` (1–24 h) | `T-HHh MMm` |
+| `60 ≤ t_minus < 3600` (1 min..1 h) | `T-MM:SS` |
+| `0 ≤ t_minus < 60` (<60 s) | blinking `T-SS` (2 Hz) |
+| `t_minus ≤ 0` AND `t0_window_close_epoch` present AND `now ≤ t0_window_close_epoch` | `LIVE` (1 Hz pulse) |
+| `t_minus ≤ -3600` (snapshot expired) AND no window | `WAIT` (next HA poll publishes the replacement) |
+| No fresh snapshot (kFreshMs exceeded) | `WAIT` |
+| `t0_estimate = true` | `NET ` prefix added to whichever regime above is active |
+
+Snapshot is treated as fresh for **4 h** (`launch_state::kFreshMs`),
+which covers HA's hourly poll cadence + slippage and a single missed
+poll. Beyond that the scene falls back to `WAIT` rather than ticking
+down a stale date — same fail-closed discipline as the recent ISS
+pyscript fix that gated on `last_updated` freshness.
+
+The 4-line layout (the corner clock chrome occupies the top-left
+~15 px per FR-9.2, so the scene uses the remaining right region):
+
+- row 0: bracketed `LAUNCH` header (theme-aware via `theme::bracket_*`)
+- row 1: `<provider> <vehicle>` (e.g. `SX FALCON 9`)
+- row 2: `<mission>` (e.g. `STARLINK 17-42`)
+- row 3: T-minus string, with `<pad_code>` suffix when the row has
+  room (e.g. `T-04:12  VSF`); pad code drops first on overflow
+
+```bash
+# >24 h regime — Vandenberg Starlink, confirmed t0
+mosquitto_pub -t observatory/launch -m '{"t0_epoch":1779243060,"t0_estimate":false,"provider":"SX","vehicle":"FALCON 9","mission":"STARLINK 17-42","pad_code":"VSF","result":-1}'
+# 1–24 h regime + NET badge — Starship launch window
+mosquitto_pub -t observatory/launch -m '{"t0_epoch":1779402600,"t0_window_close_epoch":1779410580,"t0_estimate":true,"provider":"SX","vehicle":"STARSHIP","mission":"STARSHIP FL12","pad_code":"STR","result":-1}'
+# Estimated date only — Rocket Lab Electron, NET 22 May 2026
+mosquitto_pub -t observatory/launch -m '{"t0_epoch":1779494400,"t0_estimate":true,"provider":"RKL","vehicle":"ELECTRON","mission":"VIVA LA STRIX","pad_code":"LC1","result":-1}'
+```
+
 ### `observatory/theme` — active retro sci-fi theme + image tint (FR-15.2 / FR-15.6)
 
 ```json
@@ -394,7 +482,7 @@ mosquitto_pub -t observatory/prefs/reset -n
 Published every 30 s.
 
 ```json
-{ "scene_id": "clock", "fps": 24, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber", "image_tint_pct": 50, "prefs_dirty": false }
+{ "scene_id": "clock", "fps": 24, "rssi": -55, "uptime_s": 1234, "free_heap": 180000, "render_slack_ms": 21, "theme": "apollo_amber", "image_tint_pct": 50, "prefs_dirty": false, "theme_sound": true, "button_sound": true, "tick_sound_mode": 1, "light_raw": 2800, "night": false, "temp_c": 28, "hot": false, "mqtt_state": "connected", "mqtt_rc": 0, "mqtt_backoff_s": 0 }
 ```
 
 | Field | Type | Notes |
@@ -408,6 +496,113 @@ Published every 30 s.
 | `theme` | string | active retro sci-fi theme wire-id (FR-15.7); matches `observatory/theme` payloads. |
 | `image_tint_pct` | int (%) | FR-15.6 / FR-15.7 — active image-tint strength, 0..100 (default 50). `0` = original baked palettes under any theme; `100` = full duotone retoning. Apollo is passthrough at every value. |
 | `prefs_dirty` | bool | FR-18.7 — `true` iff the in-RAM prefs cache differs from `/prefs.json` (a setting hasn't been durably saved yet). Expect a `true` window of ≤ 35 s after a theme change (5 s settle + worst-case 30 s rate cap), then `false` once the FR-18.4 writeback tick lands. |
+| `theme_sound` | bool | FR-19.4 — `true` = FR-10.7 theme-change melody enabled. |
+| `button_sound` | bool | FR-19.4 — `true` = IR / on-board button chirps AND the FR-19 menu cues enabled. |
+| `tick_sound_mode` | int | FR-19.4 — giant-clock digit-roll click cadence: `0`=NONE, `1`=MIN, `2`=10MIN, `3`=HOUR. |
+| `light_raw` | int (0..4095) | FR-7.1 / FR-20 — latest debounced 12-bit ADC reading from the photoresistor. On this board HIGHER = DARKER. |
+| `night` | bool | FR-7.2 / FR-20 — debounced Schmitt-decision night state already used by the safety overlay. |
+| `temp_c` | int (°C) or null | FR-7.3 / FR-20 — DS3231 silicon temperature. `null` until the first successful poll completes (HA renders "unknown"). |
+| `hot` | bool | FR-7.3 / FR-20 — `true` iff `thermal_safe` thermal override is active. |
+| `mqtt_state` | string | FR-20 — current `mqtt_link::State` lower-cased: `idle` / `wait_wifi` / `connecting` / `connected` / `disconnected`. Always `connected` on the wire (a status publish only happens from that state), but published generically so a future "publish a final status on disconnect" path can reuse the same code. |
+| `mqtt_rc` | int | FR-20 — PubSubClient rc captured at the most recent failed connect / dropped session; `0` = no outage observed yet. See `include/net/mqtt_link.h::last_rc()` for the value table. |
+| `mqtt_backoff_s` | int (sec) | FR-20 — current FR-5.2 retry-backoff delay (`s_backoff_ms / 1000`); `0` while connected. |
+
+---
+
+## Home Assistant Device Discovery (FR-20)
+
+The firmware self-registers as a single Home Assistant Device on
+every successful MQTT connect, exposing the FR-7 sensor surface
+plus render + link diagnostics. Reuses `observatory/status` as the
+shared state topic so steady-state wire chatter is unchanged
+(one ~500 B publish every 30 s, regardless of how many entities
+exist).
+
+**Discovery prefix:** `homeassistant` by default; override at build
+time via `-DHA_DISCOVERY_PREFIX="..."` in `platformio.ini`.
+
+**Topic shape:** retained config per entity, published one-shot per
+successful MQTT connect:
+
+```
+<HA_DISCOVERY_PREFIX>/<component>/<MQTT_CLIENT_ID>/<object_id>/config
+```
+
+**Availability** (`observatory/availability`):
+- Retained `"online"` published immediately on every successful connect.
+- Retained `"offline"` published by the broker as a Last-Will-Testament
+  the moment the keepalive lapses or the TCP socket drops.
+- Every discovered entity references this topic — HA greys out the
+  device card within seconds of an outage.
+
+**v1 entity surface** (FR-20.5) — all 14 entities reference
+`observatory/status` via `value_template`:
+
+| object_id | component | template | unit | device_class | category |
+|---|---|---|---|---|---|
+| `scene` | sensor | `value_json.scene_id` | — | — | — |
+| `temperature` | sensor | `value_json.temp_c if not none else 'unknown'` | °C | temperature | — |
+| `light_raw` | sensor | `value_json.light_raw` | — | — | diagnostic |
+| `night` | binary_sensor | `'ON' if value_json.night else 'OFF'` | — | light | — |
+| `thermal_hot` | binary_sensor | `'ON' if value_json.hot else 'OFF'` | — | heat | diagnostic |
+| `prefs_dirty` | binary_sensor | `'ON' if value_json.prefs_dirty else 'OFF'` | — | problem | diagnostic |
+| `fps` | sensor | `value_json.fps` | fps | — | diagnostic |
+| `render_slack` | sensor | `value_json.render_slack_ms` | ms | — | diagnostic |
+| `uptime` | sensor | `value_json.uptime_s` | s | duration | diagnostic |
+| `free_heap` | sensor | `value_json.free_heap` | B | data_size | diagnostic |
+| `rssi` | sensor | `value_json.rssi` | dBm | signal_strength | diagnostic |
+| `mqtt_state` | sensor | `value_json.mqtt_state` | — | — | diagnostic |
+| `mqtt_rc` | sensor | `value_json.mqtt_rc` | — | — | diagnostic |
+| `mqtt_backoff` | sensor | `value_json.mqtt_backoff_s` | s | duration | diagnostic |
+
+**What's NOT discovered (intentionally).** The `mqtt: select:`
+(theme) and `mqtt: number:` (image tint) entities in
+`homeassistant/packages/quantum_observatory.yaml` remain operator-
+installed. They're stateful inputs whose state is already echoed
+via `observatory/status`, and the existing YAML pattern works.
+Auto-discovering them is a future enhancement.
+
+### HA recorder advisory (FR-20.8)
+
+The diagnostic entities (`fps`, `render_slack`, `rssi`, `uptime`,
+`free_heap`, `mqtt_backoff`, `mqtt_rc`) change on every heartbeat.
+Worst case ~20k recorder rows/day, ~7 MB/day after compression.
+Static entities (`scene`, `night`, `thermal_hot`, `temperature`,
+`prefs_dirty`, `mqtt_state`, `light_raw`) only log on actual
+change → near zero. If you run a long-retention HA history,
+exclude the diagnostic entities — drop this block into your HA
+`configuration.yaml`:
+
+```yaml
+recorder:
+  exclude:
+    entities:
+      - sensor.quantum_observatory_fps
+      - sensor.quantum_observatory_render_slack
+      - sensor.quantum_observatory_rssi
+      - sensor.quantum_observatory_uptime
+      - sensor.quantum_observatory_free_heap
+      - sensor.quantum_observatory_mqtt_backoff
+      - sensor.quantum_observatory_mqtt_rc
+```
+
+The Logbook / History UIs already hide `entity_category: diagnostic`
+entries by default, so this is purely about recorder disk usage —
+optional unless your install is space-constrained.
+
+### `observatory/availability` — Last-Will-Testament (FR-20.3)
+
+Retained boolean availability used by every discovered entity.
+
+| Payload | Published by | When |
+|---|---|---|
+| `online` | firmware (retain=true, qos=1) | every successful MQTT connect, immediately before discovery configs + the first status heartbeat |
+| `offline` | broker (retain=true, qos=1) | automatically, on keepalive lapse or TCP drop, as registered via the MQTT CONNECT will |
+
+No firmware-side traffic between connects — the broker owns the
+offline transition. There is no manual subscribe path for HA; this
+topic is referenced by `availability_topic` in every entity's
+discovery config (FR-20.1).
 
 ### `observatory/debug` — one-shot diagnostic dumps (phase IR.2)
 
