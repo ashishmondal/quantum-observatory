@@ -29,6 +29,7 @@
 #include "launch_imminent.h"
 #include "sun_position.h"
 #include "jupiter_state.h"
+#include "exoplanet_state.h"
 #include "launch_state.h"
 #include "constellation_state.h"
 #include "moon_state.h"
@@ -175,6 +176,12 @@ void setup() {
   // data path (observatory/jupiter). Falls back to a "WAIT"
   // placeholder when no fresh value has been pushed.
   jupiter_state::init();
+
+  // Exoplanet stats IPC for the exoplanet_count scene's MQTT data
+  // path (observatory/exoplanet). 48 h freshness ceiling; falls
+  // back to a "WAIT" view when no fresh archive snapshot has been
+  // pushed.
+  exoplanet_state::init();
 
   // Launch-countdown IPC for the launch_countdown scene's MQTT
   // data path (observatory/launch). Falls back to a "WAIT" view

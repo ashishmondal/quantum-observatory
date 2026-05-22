@@ -61,6 +61,7 @@ enum class SceneId : uint8_t {
   FONT_DEMO          = 20,  // diagnostic: cycle Adafruit_GFX builtin fonts
   LAUNCH_COUNTDOWN   = 21,  // next-scheduled rocket launch T-minus (phase L)
   SPECTRUM_DEMO      = 22,  // visible-spectrum bar + sweeping absorption-line marker (phase 7.6, offline)
+  EXOPLANET_COUNT    = 23,  // animated procedural planet + NASA Exoplanet Archive stats (phase 7.7)
 };
 
 // One-time mutex init. Call from setup() before either core spins.

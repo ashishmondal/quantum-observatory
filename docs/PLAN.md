@@ -324,6 +324,7 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 - [x] **7.4** `constellation_now` — overhead constellation art + name (sticky); HA picks current overhead constellation by date + observer lat/lon. See [FUTURE_SCENES.md](FUTURE_SCENES.md) for the long-tail scene backlog.
 - [x] **7.5** Home Assistant automations & sensors that publish them
 - [ ] **7.6** `spectrum_demo` — visible-spectrum bar + sweeping marker over famous absorption lines; fully offline, procedural `constexpr` gradient (promoted from [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 2)
+- [x] **7.7** `exoplanet_count` — animated procedural planet (FNV-1a-seeded archetype + hue + bands) + NASA Exoplanet Archive stats (`TOT N` / `±N WK` / `NR x.xLY`); HA pyscript daily poll → `observatory/exoplanet`; ships with reusable `planet::ProceduralPlanet` renderer (`include/render/planet_renderer.h`) for future visibility scenes (saturn / mars / venus_phase); intro animation dot→zoom→park-right at ~75 % height, then typewriter overlays planet (promoted from [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 2)
 
 ---
 

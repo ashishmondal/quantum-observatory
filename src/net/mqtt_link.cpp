@@ -22,6 +22,7 @@
 #include "light_sensor.h"
 #include "iss_state.h"
 #include "jupiter_state.h"
+#include "exoplanet_state.h"
 #include "launch_state.h"
 #include "constellation_state.h"
 #include "moon_state.h"
@@ -62,6 +63,7 @@ constexpr const char* kTopicTime    = "observatory/time";    // FR-9.5
 constexpr const char* kTopicMoon    = "observatory/moon";    // phase 7.2 follow-up
 constexpr const char* kTopicIss     = "observatory/iss";     // phase 7.1+ iss data path
 constexpr const char* kTopicJupiter = "observatory/jupiter"; // phase 7.3 jupiter data path
+constexpr const char* kTopicExoplanet = "observatory/exoplanet"; // phase 7.7 NASA Exoplanet Archive stats
 constexpr const char* kTopicLaunch  = "observatory/launch";  // phase L     next-launch T-minus data path
 constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
 constexpr const char* kTopicTheme   = "observatory/theme";   // FR-15.2 (phase T.4)
@@ -147,6 +149,7 @@ uint32_t s_time_msgs            = 0; uint32_t s_time_rejects          = 0;
 uint32_t s_moon_msgs            = 0; uint32_t s_moon_rejects          = 0;
 uint32_t s_iss_msgs             = 0; uint32_t s_iss_rejects           = 0;
 uint32_t s_jupiter_msgs         = 0; uint32_t s_jupiter_rejects       = 0;
+uint32_t s_exoplanet_msgs       = 0; uint32_t s_exoplanet_rejects     = 0;
 uint32_t s_launch_msgs          = 0; uint32_t s_launch_rejects        = 0;
 uint32_t s_constellation_msgs   = 0; uint32_t s_constellation_rejects = 0;
 uint32_t s_theme_msgs           = 0; uint32_t s_theme_rejects         = 0;
@@ -647,6 +650,122 @@ void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
   }
   Serial.print(" con_idx=");
   Serial.print(constellation_index);
+  Serial.println();
+}
+
+// observatory/exoplanet handler — phase 7.7 NASA Exoplanet Archive
+// stats data path (FR-14 spirit).
+//
+// Wire payload (see docs/MQTT_TOPICS.md):
+//   {
+//     "total_count":         5847,                 // required, 0..2_000_000
+//     "added_recent":        12,                   // optional, -10000..+10000
+//     "nearest_name":        "Proxima b",          // required, 1..23 ASCII chars
+//     "nearest_distance_ly": 4.24                  // optional, 0..6553.5
+//   }
+//
+// Validation (FR-1.3 / FR-1.4 — any failure drops the whole payload,
+// the previous fresh snapshot keeps rendering):
+//   • total_count is required (uint, sanity-capped at 2_000_000).
+//   • nearest_name is required, must fit in 23 chars, ASCII printable
+//     (32..126). The procedural-planet renderer seeds from this
+//     string; non-printable bytes would still hash but would render
+//     as garbage on screen, so we reject early.
+//   • added_recent / nearest_distance_ly are optional; out-of-range
+//     demotes them to "absent" without rejecting the rest.
+void handle_exoplanet(char* buf, unsigned int length, uint32_t now_ms) {
+  ParsedJson<256> p(buf, length, "exoplanet", s_exoplanet_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
+
+  // ── Required: total_count ──────────────────────────────────────
+  if (!doc["total_count"].is<long>() && !doc["total_count"].is<int>()) {
+    ++s_exoplanet_rejects;
+    Serial.print("[mqtt] exoplanet missing total_count payload=");
+    Serial.println(buf);
+    return;
+  }
+  const long tc_in = doc["total_count"].as<long>();
+  if (tc_in < 0 || tc_in > 2000000) {
+    ++s_exoplanet_rejects;
+    Serial.print("[mqtt] exoplanet total_count out-of-range=");
+    Serial.println(tc_in);
+    return;
+  }
+  const uint32_t total_count = static_cast<uint32_t>(tc_in);
+
+  // ── Required: nearest_name ─────────────────────────────────────
+  const char* name_in = doc["nearest_name"].as<const char*>();
+  if (name_in == nullptr || name_in[0] == '\0') {
+    ++s_exoplanet_rejects;
+    Serial.print("[mqtt] exoplanet missing nearest_name payload=");
+    Serial.println(buf);
+    return;
+  }
+  const size_t name_len = strlen(name_in);
+  if (name_len >= exoplanet_state::kNameCap) {
+    ++s_exoplanet_rejects;
+    Serial.print("[mqtt] exoplanet nearest_name too long len=");
+    Serial.println(name_len);
+    return;
+  }
+  for (size_t i = 0; i < name_len; ++i) {
+    const unsigned char c = static_cast<unsigned char>(name_in[i]);
+    if (c < 32 || c > 126) {
+      ++s_exoplanet_rejects;
+      Serial.print("[mqtt] exoplanet nearest_name non-ASCII at i=");
+      Serial.println(i);
+      return;
+    }
+  }
+
+  // ── Optional: added_recent ─────────────────────────────────────
+  bool    have_added_recent = false;
+  int16_t added_recent      = 0;
+  if (doc["added_recent"].is<int>() || doc["added_recent"].is<long>()) {
+    const long a = doc["added_recent"].as<long>();
+    if (a >= -10000 && a <= 10000) {
+      have_added_recent = true;
+      added_recent      = static_cast<int16_t>(a);
+    } else {
+      Serial.print("[mqtt] exoplanet added_recent out-of-range=");
+      Serial.println(a);
+    }
+  }
+
+  // ── Optional: nearest_distance_ly (×10 fixed-point) ────────────
+  bool     have_nearest_distance   = false;
+  uint16_t nearest_distance_ly_x10 = 0;
+  if (doc["nearest_distance_ly"].is<float>() ||
+      doc["nearest_distance_ly"].is<int>()) {
+    const float d = doc["nearest_distance_ly"].as<float>();
+    if (d >= 0.0f && d <= 6553.5f) {
+      have_nearest_distance   = true;
+      nearest_distance_ly_x10 = static_cast<uint16_t>(d * 10.0f + 0.5f);
+    } else {
+      Serial.print("[mqtt] exoplanet nearest_distance_ly out-of-range=");
+      Serial.println(d);
+    }
+  }
+
+  exoplanet_state::set_from_mqtt(total_count,
+                                 have_added_recent, added_recent,
+                                 name_in,
+                                 have_nearest_distance,
+                                 nearest_distance_ly_x10,
+                                 now_ms);
+  Serial.print("[mqtt] exoplanet applied total=");
+  Serial.print(total_count);
+  Serial.print(" near=");
+  Serial.print(name_in);
+  if (have_added_recent) {
+    Serial.print(" +rec=");
+    Serial.print(added_recent);
+  }
+  if (have_nearest_distance) {
+    Serial.print(" dist_ly=");
+    Serial.print(nearest_distance_ly_x10 / 10.0f);
+  }
   Serial.println();
 }
 
@@ -1204,6 +1323,7 @@ constexpr Route kRoutes[] = {
   { kTopicMoon,          256, handle_moon,          &s_moon_msgs,          &s_moon_rejects,          "moon"         },
   { kTopicIss,           256, handle_iss,           &s_iss_msgs,           &s_iss_rejects,           "iss"          },
   { kTopicJupiter,       256, handle_jupiter,       &s_jupiter_msgs,       &s_jupiter_rejects,       "jupiter"      },
+  { kTopicExoplanet,     256, handle_exoplanet,     &s_exoplanet_msgs,     &s_exoplanet_rejects,     "exoplanet"    },
   { kTopicLaunch,        768, handle_launch,        &s_launch_msgs,        &s_launch_rejects,        "launch"       },
   { kTopicConstellation, 128, handle_constellation, &s_constellation_msgs, &s_constellation_rejects, "constellation"},
   { kTopicTheme,         128, handle_theme,         &s_theme_msgs,         &s_theme_rejects,         "theme"        },

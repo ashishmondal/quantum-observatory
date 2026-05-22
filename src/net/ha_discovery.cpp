@@ -138,6 +138,17 @@ constexpr EntityDecl kEntities[] = {
     "{{ value_json.mission | default('') }}",
     nullptr, nullptr, nullptr, nullptr, "mdi:rocket-launch",
     "observatory/launch" },
+
+  // ── NASA Exoplanet Archive (phase 7.7) ──────────────────────────
+  // Bound to observatory/exoplanet (HA-pyscript-owned daily push).
+  // State = total confirmed-exoplanet count; nearest_name +
+  // distance + weekly-added live in payload-attribute templates a
+  // dashboard card can pull on its own.
+  { "sensor",        "exoplanet_count",
+    "Exoplanets known",
+    "{{ value_json.total_count | default('') }}",
+    nullptr, nullptr, "measurement", nullptr, "mdi:earth",
+    "observatory/exoplanet" },
 };
 constexpr size_t kEntityCount = sizeof(kEntities) / sizeof(kEntities[0]);
 

@@ -152,6 +152,137 @@ def _compute_jupiter(lat_deg, lon_deg):
         return {"_error": f"{type(exc).__name__}: {exc}"}
 
 
+# ---------------------------------------------------------------------
+# NASA Exoplanet Archive — phase 7.7 exoplanet_count scene.
+#
+# Pulled via the public TAP synchronous endpoint
+# (https://exoplanetarchive.ipac.caltech.edu/TAP/sync). Two queries:
+#   1. total count of confirmed exoplanets
+#   2. nearest known planet by sy_dist (distance in parsecs)
+#
+# Network-only — no skyfield, no ephemeris. Lives behind
+# @pyscript_executor so the urllib requests don't block HA's event
+# loop. Failure modes (network error, archive HTTP 5xx, schema
+# change) return {"_error": ...} which _publish() then drops without
+# touching the wire (firmware sees no update and falls back to its
+# 48 h freshness window or finally to "WAIT").
+# ---------------------------------------------------------------------
+
+# Parsecs → light-years conversion factor (CODATA-derived, exact to
+# six digits — the archive's sy_dist precision is well below this).
+_PC_TO_LY = 3.26156
+
+# TAP base; we add per-query overrides at call time.
+_EXOARCHIVE_TAP = (
+    "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
+)
+
+# Polite User-Agent so the archive admins can identify traffic on the
+# off chance our daily poll ever shows up in their logs as suspicious.
+# NASA docs don't publish a hard rate limit for the sync TAP endpoint,
+# but daily-cadence polling with a clear identifier is the right thing.
+_EXOARCHIVE_UA = "quantum-observatory/1.0 (+https://github.com/) pyscript"
+
+
+@pyscript_executor
+def _compute_exoplanet():
+    """Compute current exoplanet count + nearest-known planet.
+
+    Returns a dict matching the observatory/exoplanet wire schema
+    minus `added_recent` (added by the @service caller after rolling-
+    window math), or {"_error": ...} on any failure.
+
+    Validated 2026-05-22: TAP endpoint returns JSON arrays of dicts;
+    `select top N ... order by` is BROKEN on pscomppars (Oracle
+    applies the rownum cap before the sort), so the nearest query
+    has to wrap the sort with a `min()` sub-select. Don't "simplify"
+    it back to top-N-order-by without re-verifying against live
+    data — the previous form silently returned Kepler-1581 b (493 pc)
+    instead of Proxima Cen b (1.30 pc) and looked superficially fine.
+    """
+    try:
+        import urllib.parse
+        import urllib.request
+        import json as _json
+
+        def _tap_get(query):
+            url = (_EXOARCHIVE_TAP + "?"
+                   + urllib.parse.urlencode(
+                        {"query": query, "format": "json"}))
+            req = urllib.request.Request(
+                url, headers={"User-Agent": _EXOARCHIVE_UA})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return _json.loads(r.read().decode("utf-8"))
+
+        # --- 1. total confirmed-exoplanet count ----------------------
+        # pscomppars = planetary systems composite parameters, the
+        # archive's "one row per planet, best-available values" table.
+        # count(*) on pscomppars matches the headline "confirmed
+        # exoplanets" number on the archive's home page.
+        rows = _tap_get("select count(*) as n from pscomppars")
+        if not rows or "n" not in rows[0]:
+            return {"_error": "exoplanet total: empty or malformed response"}
+        total_count = int(rows[0]["n"])
+
+        # --- 1b. year-to-date discoveries ----------------------------
+        # Used by _exoplanet_added_recent to bootstrap a synthetic
+        # back-dated history entry on first run — lets the firmware
+        # show a real YTD-pace-extrapolated weekly delta from day 1
+        # instead of "+0 WK" until measured history accumulates.
+        # disc_year is `int`, no quoting needed. NASA TAP supports
+        # extract(year from ...) but disc_year is the canonical field
+        # for this and avoids a function call on every row.
+        from datetime import datetime as _dt, timezone as _tz
+        current_year = _dt.now(_tz.utc).year
+        rows = _tap_get(
+            f"select count(*) as n from pscomppars "
+            f"where disc_year = {current_year}"
+        )
+        ytd_count = int(rows[0]["n"]) if rows and "n" in rows[0] else 0
+
+        # --- 2. nearest known planet (by sy_dist, parsecs) -----------
+        # Avoid `select top 1 ... order by sy_dist asc` — it's broken
+        # on pscomppars (returns ~493 pc as #1, misses Proxima at
+        # 1.30 pc). Use a min() sub-select instead; the result set is
+        # tiny (the nearest distance is shared by Proxima Cen b + d,
+        # so we get 1–2 rows) and we pick the first deterministically.
+        rows = _tap_get(
+            "select pl_name, sy_dist from pscomppars "
+            "where sy_dist = (select min(sy_dist) from pscomppars "
+            "where sy_dist is not null)"
+        )
+        if not rows or "pl_name" not in rows[0]:
+            return {"_error": "exoplanet nearest: empty or malformed response"}
+        # Pick the alphabetically-first name from the tied set so the
+        # firmware doesn't see the planet flip between "Proxima Cen b"
+        # and "Proxima Cen d" depending on database ordering whims
+        # (would re-seed the procedural planet for no good reason).
+        rows_sorted = sorted(rows, key=lambda r: str(r.get("pl_name", "")))
+        nearest_name_raw = str(rows_sorted[0]["pl_name"])
+        sy_dist_pc       = float(rows_sorted[0]["sy_dist"])
+        nearest_ly       = round(sy_dist_pc * _PC_TO_LY, 2)
+
+        # Wire validation mirrors the firmware (handle_exoplanet):
+        # 1..23 ASCII chars. The archive normally returns short names
+        # like "Proxima Cen b" (13 chars); a future renaming campaign
+        # could exceed the cap, in which case we want a graceful drop
+        # on this end rather than a per-publish reject on-device.
+        nearest_name = nearest_name_raw[:23]
+        if not nearest_name or not all(
+                32 <= ord(c) <= 126 for c in nearest_name):
+            return {"_error":
+                    f"exoplanet nearest_name failed wire check: {nearest_name_raw!r}"}
+
+        return {
+            "total_count":         total_count,
+            "ytd_count":           ytd_count,
+            "nearest_name":        nearest_name,
+            "nearest_distance_ly": max(0.0, min(6553.5, nearest_ly)),
+        }
+    except Exception as exc:  # noqa: BLE001 — log, don't crash the trigger
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
 @pyscript_executor
 def _compute_moon():
     """Compute synodic-month phase + illumination for the current UTC.
@@ -1216,6 +1347,151 @@ def publish_launch(**_):
         for w in warnings:
             log.warning(f"observatory_publisher: launch parse: {w}")
     _publish("observatory/launch", result)
+
+
+# ---------------------------------------------------------------------
+# Exoplanet rolling-history state — persists across HA restarts via
+# pyscript's `state.set` (which writes to /config/.storage/pyscript).
+# Stored as a single state entity (`pyscript.exoplanet_history`) with
+# the most-recent snapshot list in an attribute. Keeps the last ~9
+# days of (iso_time, count) tuples; trims older entries on each push.
+# ---------------------------------------------------------------------
+
+_EXO_HISTORY_ENTITY = "pyscript.exoplanet_history"
+_EXO_HISTORY_KEEP_DAYS  = 9     # prune anything older
+_EXO_DELTA_TARGET_DAYS  = 7     # delta vs the snapshot closest to this age
+_EXO_DELTA_MIN_AGE_DAYS = 5     # ...but only if at least this old
+
+
+def _exoplanet_added_recent(current_total, ytd_count=0):
+    """Maintain rolling history; return the 7-day delta (or None).
+
+    Reads `pyscript.exoplanet_history`'s `snapshots` attribute, picks
+    the entry whose age is closest to 7 d (and ≥ 5 d), computes delta,
+    appends the current snapshot, prunes to the keep window, and
+    writes back. Returns None when there is no eligible historical
+    snapshot yet AND no bootstrap estimate is available.
+
+    First-run bootstrap (FR-UX): when history is empty, synthesise a
+    single back-dated snapshot at `now - 7 d` whose value is
+    `current_total - est_7d`, where `est_7d = round(ytd_count *
+    7 / day_of_year)` extrapolates the year-to-date discovery pace.
+    The firmware then sees a real, statistically-grounded weekly
+    delta on day 1 instead of the +0 WK placeholder. Subsequent
+    daily runs append real snapshots; once any real entry is closer
+    in age to 7 d than the synthetic one (day 8+), the synthetic
+    entry is pruned automatically by the 9-day keep window and the
+    delta reflects measured truth from then on. This means: days
+    1–7 show extrapolated pace, days 8+ show measured delta.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    now_utc = datetime.now(timezone.utc)
+
+    snapshots = []
+    try:
+        attrs = state.getattr(_EXO_HISTORY_ENTITY) or {}
+        snapshots = list(attrs.get("snapshots", []))
+    except Exception:  # noqa: BLE001 — first-ever run, entity missing
+        snapshots = []
+
+    # --- bootstrap: synthesise a 7d-ago entry when no usable history --
+    # Fires on first-ever run AND on runs where the only existing
+    # snapshots are too young (< MIN_AGE) to compute a delta from \u2014
+    # i.e. the bootstrap window is "no eligible historical entry
+    # exists yet", not just "the entity doesn't exist". Without this
+    # the second condition, a user who triggers the publisher twice
+    # on day 1 would still see +0 WK (the first publish stored a
+    # today-dated entry which then suppresses seeding).
+    has_eligible = False
+    for entry in snapshots:
+        if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+            continue
+        try:
+            age_d = (now_utc
+                     - datetime.fromisoformat(entry[0])).total_seconds() / 86400.0
+            if age_d >= _EXO_DELTA_MIN_AGE_DAYS:
+                has_eligible = True
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    if not has_eligible and int(ytd_count) > 0:
+        day_of_year = now_utc.timetuple().tm_yday
+        if day_of_year >= 7:
+            est_7d = int(round(int(ytd_count) * 7.0 / day_of_year))
+        else:
+            # Very early January \u2014 not enough YTD signal yet. Fall
+            # back to the prior-year-average weekly pace by
+            # extrapolating ytd over the full year then /52.
+            est_7d = int(round(int(ytd_count) / 52.0)) if ytd_count else 0
+        if est_7d != 0:
+            seed_ts = now_utc - timedelta(days=7)
+            seed_val = max(0, int(current_total) - est_7d)
+            snapshots.append([seed_ts.isoformat(), seed_val])
+
+    delta = None
+    best_gap = None
+    for entry in snapshots:
+        if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+            continue
+        iso_s, count_s = entry
+        try:
+            ts = datetime.fromisoformat(iso_s)
+            age_d = (now_utc - ts).total_seconds() / 86400.0
+        except Exception:  # noqa: BLE001 — corrupt entry, skip
+            continue
+        if age_d < _EXO_DELTA_MIN_AGE_DAYS:
+            continue
+        gap = abs(age_d - _EXO_DELTA_TARGET_DAYS)
+        if best_gap is None or gap < best_gap:
+            best_gap = gap
+            delta = int(current_total) - int(count_s)
+
+    # Append current snapshot + prune entries older than the keep window.
+    snapshots.append([now_utc.isoformat(), int(current_total)])
+    keep_after = now_utc - timedelta(days=_EXO_HISTORY_KEEP_DAYS)
+    pruned = []
+    for entry in snapshots:
+        if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+            continue
+        try:
+            if datetime.fromisoformat(entry[0]) >= keep_after:
+                pruned.append(list(entry))
+        except Exception:  # noqa: BLE001
+            continue
+
+    state.set(_EXO_HISTORY_ENTITY, str(int(current_total)),
+              new_attributes={"snapshots": pruned})
+
+    return delta
+
+
+@service
+@time_trigger("startup", "cron(17 6 * * *)")
+def publish_exoplanet(**_):
+    """Exoplanet count — daily at 06:17 local (random-ish minute to
+    be polite to the NASA archive). Firmware kFreshMs = 48 h, so a
+    missed publish doesn't blank the scene.
+
+    Computes the 7-day rolling delta from the persisted history
+    snapshots; omits `added_recent` on the wire until ≥ 5 days of
+    history exists (so the firmware renders the "+0 WK" placeholder
+    rather than lying with a 1-day delta in the first week).
+
+    Also exposed as service `pyscript.publish_exoplanet` so
+    homeassistant/setup_mqtt.py --verify-publisher can force-call it.
+    """
+    result = _compute_exoplanet()
+    if isinstance(result, dict) and "_error" not in result:
+        # ytd_count is publisher-internal; strip it before passing the
+        # dict to _publish so it doesn't leak onto the MQTT wire (the
+        # firmware schema doesn't know the field and would reject the
+        # payload if it grew past the 256 B route-table cap).
+        ytd = int(result.pop("ytd_count", 0))
+        delta = _exoplanet_added_recent(result.get("total_count", 0), ytd)
+        if delta is not None:
+            result["added_recent"] = int(delta)
+    _publish("observatory/exoplanet", result)
 
 
 @service

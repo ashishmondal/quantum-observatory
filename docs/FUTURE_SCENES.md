@@ -101,10 +101,12 @@ Static `hr.bmp` of the Hertzsprung–Russell scatter, with a single
 overlay pixel highlighting the night's "featured star" position.
 Ambitious in 64×32 but doable.
 
-### `exoplanet_count`
+### ~~`exoplanet_count`~~ — **promoted to PLAN.md Phase 7.7**
 `TODAY: 5847 EXOPLANETS` / `+12 THIS WEEK` / `NEAREST 4LY`. Pulled
 from NASA Exoplanet Archive via HA daily. The "number is going up"
-loop has built-in engagement.
+loop has built-in engagement. Ships with a reusable procedural
+planet renderer seeded from `nearest_name` (FNV-1a → archetype +
+hue + bands) — same hook reused by future planet-visibility scenes.
 
 ### `orbital_mechanics`
 Animated 1-pixel "Earth" orbiting the sun with current Earth angle

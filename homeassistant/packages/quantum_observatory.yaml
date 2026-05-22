@@ -349,6 +349,7 @@ automation observatory_evening_rotation:
         - iss_pass
         - constellation_now
         - launch_countdown
+        - exoplanet_count
       tick: "{{ ((now().hour * 60 + now().minute) // 5) % (scenes | length) }}"
       scene_id: "{{ scenes[tick] }}"
     actions:

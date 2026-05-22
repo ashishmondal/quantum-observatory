@@ -267,6 +267,94 @@ mosquitto_pub -t observatory/jupiter -m '{"bearing_deg":90,"elevation_deg":45,"m
 mosquitto_pub -t observatory/jupiter -m '{"bearing_deg":270,"elevation_deg":-12,"constellation_index":58}'
 ```
 
+### `observatory/exoplanet` — raw HA pass-through for the `exoplanet_count` scene
+
+```json
+{ "total_count": 6291, "added_recent": 12, "nearest_name": "Proxima Cen b", "nearest_distance_ly": 4.24 }
+```
+
+| Field | Type | Required | Range | Notes |
+|---|---|---|---|---|
+| `total_count` | int | yes | 0..2 000 000 | Current count of confirmed exoplanets in the NASA Exoplanet Archive (`pscomppars` table). Renders as `TOT %u` (e.g. `TOT 6291`). |
+| `added_recent` | int | no | -10 000..10 000 | Signed delta over the HA-pinned 7-day rolling window. Signed because the archive occasionally revises down on re-classification. Renders as `%+d WK` (e.g. `+12 WK`); rendered as `+0 WK` placeholder when absent. |
+| `nearest_name` | string | yes | 1..23 ASCII printable chars | Name of the nearest known exoplanet (e.g. `Proxima Cen b`). Seeds the procedural-planet renderer via FNV-1a hash, so the same name reproducibly maps to the same planet look across reboots. Non-printable bytes or oversize → whole payload rejected. |
+| `nearest_distance_ly` | float (ly) | no | 0..6553.5 | Distance to the nearest known exoplanet, light-years. Stored ×10 fixed-point on-device for float-free render (NFR-1.3). Renders `NR 4.2LY`, or `NR ?LY` when absent. |
+
+If any **required** field is missing, malformed, or out of range,
+the whole payload is dropped per FR-1.3 / FR-1.4. Out-of-range
+optional fields are demoted to "absent" without rejecting the rest
+(same partial-update pattern as `observatory/jupiter`'s `magnitude` /
+`distance_au`).
+
+**Where HA gets the data — and why HA does no logic.** Same
+pass-through contract as the other Tier-1 scene topics. The HA-side
+[pyscript publisher](../homeassistant/pyscript/observatory_publisher.py)
+hits the NASA Exoplanet Archive TAP synchronous endpoint
+(`https://exoplanetarchive.ipac.caltech.edu/TAP/sync`) once a day
+with two SQL queries — `select count(*) as n from pscomppars` for
+the total and a `min()` sub-select for the nearest planet:
+
+```sql
+select pl_name, sy_dist from pscomppars
+where sy_dist = (select min(sy_dist) from pscomppars
+                 where sy_dist is not null)
+```
+
+(The intuitive `select top 1 ... order by sy_dist asc` is **broken**
+on `pscomppars` — NASA TAP's Oracle backend applies the `rownum` cap
+before the sort and silently returns ~493 pc as #1 instead of
+Proxima Cen b at 1.30 pc. Validated against the live endpoint
+2026-05-22; don't "simplify" the publisher back to top-N-order-by.)
+Parsecs → light-years conversion (×3.26156) is the only "math"
+performed on the HA side; everything else is straight pass-through.
+The 7-day delta is computed by the publisher from a small rolling-
+history state entity (`pyscript.exoplanet_history`) that persists
+across HA restarts. On the very first run the history is empty, so
+the publisher synthesises a back-dated snapshot at `now − 7 d` whose
+value is `total − round(ytd_count × 7 / day_of_year)` — i.e. an
+extrapolation from the YTD discovery pace via a third TAP query
+(`count(*) where disc_year = <current year>`). That lets the
+firmware show a real, statistically-grounded `±N WK` from day 1
+instead of the `+0 WK` placeholder for a week. Days 1–7 show the
+extrapolated pace; from day 8 onward real measured snapshots are
+closer to the 7-day target age than the synthetic seed, so the
+delta naturally converges to measured truth (the seed is pruned
+once it ages past the 9-day keep window). The request sets a
+`User-Agent` of `quantum-observatory/1.0` so the archive admins
+can identify our traffic; NASA does not publish a hard rate limit
+for the sync TAP endpoint, and daily-cadence polling of three
+trivial queries is well within "polite client" territory.
+
+**On-device derivation.** Minimal — there's no observer-frame math
+to do for global archive stats. The `exoplanet_count` scene:
+
+1. Calls `planet::ProceduralPlanet::seed(nearest_name)` once per
+   change (FNV-1a → 8-archetype selection + base hue + band freq +
+   palette synthesis), then renders the planet every frame at the
+   current (cx, cy, r) from the dot/zoom/slide/settled animation
+   timeline.
+2. Types out the three Picopixel data lines via the shared
+   `typewriter::compute()` kernel once the SETTLED phase starts
+   (`t ≥ 1900 ms` since scene entry).
+
+Snapshot is treated as fresh for **48 h** (`exoplanet_state::kFreshMs`).
+The NASA archive only updates daily at most, and the "nearest known"
+rarely changes year-to-year (Proxima Cen b has held the title since
+2016), so a 48 h window survives a missed publish without blanking
+the scene; past that the scene falls back to `TOT ? / WAIT / NR ?`
+rather than fabricating a stale count.
+
+```bash
+# Minimal — added_recent and nearest_distance_ly will render as placeholders.
+mosquitto_pub -t observatory/exoplanet -m '{"total_count":6291,"nearest_name":"Proxima Cen b"}'
+
+# Full payload.
+mosquitto_pub -t observatory/exoplanet -m '{"total_count":6291,"added_recent":12,"nearest_name":"Proxima Cen b","nearest_distance_ly":4.24}'
+
+# Force a re-seed of the procedural planet — same payload, different name.
+mosquitto_pub -t observatory/exoplanet -m '{"total_count":6291,"added_recent":12,"nearest_name":"Kepler-22b","nearest_distance_ly":620.0}'
+```
+
 ### `observatory/constellation` — Director-pushed selector for the `constellation_now` scene
 
 ```json

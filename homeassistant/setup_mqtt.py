@@ -249,6 +249,10 @@ PYSCRIPT_PUBLISHERS = [
     # provider/pad abbreviation. No skyfield — pure HTTP + dict
     # shaping. Firmware kFreshMs = 4 h gives 4× headroom.
     ("publish_launch",        "observatory/launch"),
+    # Exoplanet count publisher (phase 7.7). Daily poll of the NASA
+    # Exoplanet Archive TAP endpoint; rolling 7-day delta persisted
+    # in pyscript state. Firmware kFreshMs = 48 h.
+    ("publish_exoplanet",     "observatory/exoplanet"),
 ]
 
 

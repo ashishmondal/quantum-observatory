@@ -6,6 +6,7 @@
 #include "scenes/clock_scene.h"
 #include "scenes/color_cycle_scene.h"
 #include "scenes/constellation_now_scene.h"
+#include "scenes/exoplanet_count_scene.h"
 #include "scenes/font_demo_scene.h"
 #include "scenes/gfx_test_scene.h"
 #include "scenes/giant_clock_scene.h"
@@ -57,6 +58,7 @@ IrTestScene            s_ir_test_scene;            // phase IR.1 — IR receiver
 FontDemoScene          s_font_demo_scene;          // diagnostic: cycle Adafruit_GFX builtin fonts
 LaunchCountdownScene   s_launch_countdown_scene;   // phase L     — next-scheduled rocket launch T-minus
 SpectrumDemoScene      s_spectrum_demo_scene;      // phase 7.6   — visible-spectrum bar + sweeping absorption-line marker (offline)
+ExoplanetCountScene    s_exoplanet_count_scene;    // phase 7.7   — animated procedural planet + NASA Exoplanet Archive stats
 
 }  // namespace
 
@@ -86,6 +88,7 @@ Scene* scene_for(scene_state::SceneId id) {
     case SI::IR_TEST:            return &s_ir_test_scene;
     case SI::LAUNCH_COUNTDOWN:   return &s_launch_countdown_scene;
     case SI::SPECTRUM_DEMO:      return &s_spectrum_demo_scene;
+    case SI::EXOPLANET_COUNT:    return &s_exoplanet_count_scene;
     case SI::FONT_DEMO:          return &s_font_demo_scene;
   }
   return nullptr;
