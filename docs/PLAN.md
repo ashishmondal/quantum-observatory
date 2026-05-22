@@ -935,7 +935,7 @@ button per FR-11.3.
 > before L.3 (scene skeleton); L.5 (HA publisher) can land in parallel
 > with L.2/L.3/L.4 once the wire contract is frozen by L.1.
 
-- [ ] **L.1 Wire contract + docs** (FR-14.6, FR-1.3 / FR-1.4)
+- [x] **L.1 Wire contract + docs** (FR-14.6, FR-1.3 / FR-1.4)
   - Add `observatory/launch` section to
     [docs/MQTT_TOPICS.md](MQTT_TOPICS.md) — field table, validation
     rules, freshness window (4 h), expired-payload rule (`now >
@@ -949,7 +949,7 @@ button per FR-11.3.
     `mosquitto_pub` lines tested locally with `mosquitto_sub -v -t
     'observatory/launch'` round-trip.
 
-- [ ] **L.2 `launch_state` module** (FR-14.6, FR-16.7)
+- [x] **L.2 `launch_state` module** (FR-14.6, FR-16.7)
   - New `include/state/launch_state.h` + `src/state/launch_state.cpp`
     mirroring `jupiter_state` / `iss_state` (single producer Core 0,
     single consumer Core 1, FR-16.7 seqlock snapshot). Fields:
@@ -971,7 +971,7 @@ button per FR-11.3.
     back identical bytes via seqlock from Core 1 under
     `CORE0_MQTT_FLOOD`.
 
-- [ ] **L.3 `LaunchCountdownScene` skeleton** (FR-14.6, FR-3.3)
+- [x] **L.3 `LaunchCountdownScene` skeleton** (FR-14.6, FR-3.3)
   - New `src/scenes/launch_countdown_scene.h`. Registry entry
     + `id_from_string("launch_countdown")` map row. WAIT state when
     no fresh snapshot: bracketed `LAUNCH` header on row 0, `WAIT`
@@ -985,7 +985,7 @@ button per FR-11.3.
     it to the populated layout (which is still placeholder text
     until L.4).
 
-- [ ] **L.4 T-minus formatter + live layout** (FR-14.6, NFR-1.3)
+- [x] **L.4 T-minus formatter + live layout** (FR-14.6, NFR-1.3)
   - Integer-only T-minus arithmetic against `tod::now_epoch_utc()` —
     no `float` in the render path. Five regimes, each its own format
     helper, dispatched by absolute `t_minus`:
@@ -1011,7 +1011,7 @@ button per FR-11.3.
     final-minute branch is visibly distinguishable from the steady
     `T-MM:SS` branch.
 
-- [ ] **L.5 HA publisher** (FR-14, separation of policy from render)
+- [x] **L.5 HA publisher** (FR-14, separation of policy from render)
   - New `publish_launch()` function in
     [homeassistant/pyscript/observatory_publisher.py](../homeassistant/pyscript/observatory_publisher.py),
     `@time_trigger("cron(7 * * * *)")` (top-of-hour + 7 min so it
@@ -1051,7 +1051,8 @@ button per FR-11.3.
     `mosquitto_sub -v -t 'observatory/launch'` shows one publish
     per hour thereafter.
 
-- [ ] **L.6 Audio cues** (FR-14.6, FR-10.7 spirit, FR-19.4)
+- [x] **L.6 Audio cues** (FR-14.6, FR-10.7 spirit, FR-19.4)
+  - Implementation note: kept cues inline in `LaunchCountdownScene` using the existing `buzzer::tick_click()` + `buzzer::play(Note*, n)` APIs rather than adding `play_launch_tick()` / `play_ignition()` to `buzzer.h`. Single caller — keeping the public surface narrow.
   - Add `buzzer::play_launch_tick()` (single 35 ms tick at
     `LAUNCH_TICK_HZ ≈ 880`) and `buzzer::play_ignition()` (3-note
     rising sting, ≤ 1500 ms total, defined next to the per-theme
@@ -1072,7 +1073,8 @@ button per FR-11.3.
     window-close was provided) or fades to `WAIT`. Muting via
     FR-19 SOUND → BUTTON silences the entire sequence.
 
-- [ ] **L.7 HA Discovery sensor** (FR-20)
+- [x] **L.7 HA Discovery sensor** (FR-20)
+  - Implementation note: added an optional `state_topic` override field to `EntityDecl` so the `next_launch` sensor binds to `observatory/launch` directly (instead of plumbing mission into the shared `observatory/status` heartbeat). All existing rows pass `nullptr` and keep the heartbeat behaviour.
   - Add a `sensor.observatory_next_launch` entry to the FR-20.4
     discovery table — `state_topic = "observatory/launch"`,
     `value_template = "{{ value_json.mission }}"`, attributes
@@ -1086,7 +1088,7 @@ button per FR-11.3.
     is rendering; a Lovelace card can mirror the on-panel readout
     elsewhere in the home.
 
-- [ ] **L.8 Diagnostic exercise in `gfx_test`** (FR-12.6 spirit)
+- [ ] **L.8 Diagnostic exercise in `gfx_test`** (FR-12.6 spirit) — deferred (post-build soak first)
   - Extend the diagnostic exercise so a one-shot MQTT command
     cycles the five render regimes (`T-30d` → `T-2h` → `T-3m` →
     `T-9s` → `LIVE`) via synthetic payloads injected directly
@@ -1097,7 +1099,8 @@ button per FR-11.3.
     any visual regression in the formatter shows up immediately
     without waiting for an actual launch window.
 
-- [ ] **L.9 Build + soak verification**
+- [~] **L.9 Build + soak verification**
+  - `pio run -e pico-dev` clean: RAM 33.3%, Flash 32.5% (+0.8% flash vs baseline). Hour-long soak against a real `observatory/launch` payload still TODO.
   - `pio run -e pico-dev` clean. Leave the scene up for a full
     hour against a live `observatory/launch` payload; confirm
     Core 1 FPS stays flat (FR-16.7 seqlock read should be

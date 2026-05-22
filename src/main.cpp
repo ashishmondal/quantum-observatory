@@ -26,8 +26,10 @@
 #include "iss_state.h"
 #include "iss_geometry.h"
 #include "iss_visibility.h"
+#include "launch_imminent.h"
 #include "sun_position.h"
 #include "jupiter_state.h"
+#include "launch_state.h"
 #include "constellation_state.h"
 #include "moon_state.h"
 #include "ir_remote.h"
@@ -94,6 +96,21 @@ static volatile bool s_core0_ready = false;
 
 void setup() {
   Serial.begin(115200);
+  // macOS + earlephilhower arduino-pico CDC quirk: Serial.print() bytes
+  // emitted before the host has opened the CDC endpoint are dropped
+  // (not buffered). On Windows enumeration is fast enough that boot
+  // logs survive; on macOS the device usually finishes setup() first,
+  // so every Serial.println in setup() (and even the 1 Hz [render]
+  // tick for a while) vanishes. Block for up to 2 s waiting for the
+  // host. Power-only / headless boots fall through after the timeout
+  // so this never adds latency in production, only when a Mac is
+  // attached. (FR-17 / serial diagnostics)
+  {
+    const uint32_t t0 = millis();
+    while (!Serial && (millis() - t0) < 2000u) {
+      delay(10);
+    }
+  }
 
   // Build the integer trig LUT before any scene that uses it. (NFR-1.3)
   // Lives on Core 0 because it's a one-shot init and Core 1 spins waiting
@@ -158,6 +175,11 @@ void setup() {
   // data path (observatory/jupiter). Falls back to a "WAIT"
   // placeholder when no fresh value has been pushed.
   jupiter_state::init();
+
+  // Launch-countdown IPC for the launch_countdown scene's MQTT
+  // data path (observatory/launch). Falls back to a "WAIT" view
+  // when no fresh next-launch payload has been pushed.
+  launch_state::init();
 
   // Constellation selector IPC for the constellation_now scene's
   // MQTT data path (observatory/constellation). Falls back to a
@@ -374,6 +396,12 @@ void loop() {
   // beat the sticky); a falling edge clears the sticky only when
   // ISS_PASS is still the active scene.
   iss_visibility::tick(now_ms);
+
+  // Phase L — launch-imminent auto-switch. Same 1 Hz rate-limited
+  // edge detector as iss_visibility; rising edge of (t_minus in
+  // [0, 5min]) requests LAUNCH_COUNTDOWN sticky at priority 5 (the
+  // FR-2.1 ceiling) and plays a short heads-up arpeggio.
+  launch_imminent::tick(now_ms);
 
   // FR-17.5 / IR.3 — the IrTestScene learning wizard (phase IR.2)
   // captures NEC frames directly off ir_remote::stats() and would be

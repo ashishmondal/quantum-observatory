@@ -70,9 +70,17 @@ mosquitto_pub -t observatory/clear_sticky -m ''
 | Field | Type | Range | Notes |
 |---|---|---|---|
 | `epoch_utc` | long (Unix sec) | 1577836800..4102444800 (2020-01-01..2100-01-01) | DS3231 BCD year limit |
-| `tz_offset_min` | int (min) | -720..840 | IANA range with slack |
+| `tz_offset_min` | int (min) | -720..840 | IANA range with slack. Cached in `tod::Reading.tz_offset_min` so on-device astronomy (sun-position gating for ISS / Jupiter visibility) can derive UTC from the local RTC without a compile-time constant. |
 
 This is the *correction* path only — readers always go through `tod::now()` against the RTC. (FR-9.5)
+
+> **Wire-time convention.** Every other topic that carries an
+> `_epoch` field (currently `observatory/launch`'s `t0_local_epoch` /
+> `t0_window_close_local_epoch`) is in **HA-local** seconds-since-1970,
+> matching what the RTC stores. Only this topic carries UTC, because
+> it must — it's the seed that defines the local frame. New topics
+> that publish time SHOULD follow the local-epoch convention and
+> name their fields `*_local_epoch` accordingly.
 
 ### `observatory/moon` — lunar state push for `moon_phase` scene
 
@@ -330,18 +338,32 @@ mosquitto_pub -t observatory/constellation -m '{"index":2,"highlight_star":-1}'
 ### `observatory/launch` — raw HA pass-through for the `launch_countdown` scene
 
 ```json
-{ "t0_epoch": 1779243060, "t0_estimate": false, "provider": "SX", "vehicle": "FALCON 9", "mission": "STARLINK 17-42", "pad_code": "VSF", "result": -1 }
+{ "t0_local_epoch": 1779243060, "t0_estimate": false, "provider": "SX", "vehicle": "FALCON 9", "mission": "STARLINK 17-42", "pad_code": "VSF", "org": "SPACEX", "pad_country": "CA, USA", "description": "Batch of Starlink internet satellites delivered to LEO.", "result": -1 }
 ```
+
+**Time frame.** All epoch fields on this topic are **HA-local wall
+seconds since 1970** — not UTC. HA's pyscript publisher does the
+UTC→local conversion once at the producer (see
+[homeassistant/pyscript/observatory_publisher.py](../homeassistant/pyscript/observatory_publisher.py)
+`_parse_iso_local_epoch`). The firmware's DS3231 stores the same
+local frame (Phase 3.6.3 decision), so the countdown collapses to a
+pure subtraction with zero tz state on the device side. Renaming
+from the older `t0_epoch` was deliberate: any future producer that
+emits UTC seconds will be rejected by the handler instead of silently
+producing a tz-shifted countdown.
 
 | Field | Type | Required | Range | Notes |
 |---|---|---|---|---|
-| `t0_epoch` | int (Unix UTC seconds) | yes | now − 1 h .. now + 100 d | Best available T-zero. HA SHALL resolve in priority order: confirmed `t0`, else launch-window `win_open`, else midday-UTC interpretation of `est_date` (`year`/`month`/`day`). Out-of-range rejects the whole payload (FR-1.3) — the firmware refuses to count down to a past event or to render `T-100D+`. |
-| `t0_estimate` | bool | yes | — | `true` when `t0_epoch` came from `win_open` or `est_date` (i.e. **No Earlier Than**). The scene surfaces this as a small `NET` badge so the operator knows the countdown is an upper bound, not a confirmed clock. |
-| `t0_window_close_epoch` | int (Unix UTC seconds) | no | `t0_epoch` .. `t0_epoch + 86400` | Only present when the source feed gives `win_close`. Enables the `LIVE` render regime while `now ∈ [t0_epoch, t0_window_close_epoch]`. Absent (or 0) means the launch is an instantaneous T-zero; once `now > t0_epoch + 1 h`, the snapshot is treated as expired and the scene falls to `WAIT` rather than rendering `T+...` forever. |
+| `t0_local_epoch` | int (HA-local wall seconds since 1970) | yes | now_local − 1 h .. now_local + 100 d | Best available T-zero, expressed in HA's local zone. HA SHALL resolve in priority order: confirmed `t0`, else launch-window `win_open`, else midday-local interpretation of `est_date` (`year`/`month`/`day`). Out-of-range rejects the whole payload (FR-1.3) — the firmware refuses to count down to a past event or to render `T-100D+`. |
+| `t0_estimate` | bool | yes | — | `true` when `t0_local_epoch` came from `win_open` or `est_date` (i.e. **No Earlier Than**). The scene surfaces this as a small `NET` badge so the operator knows the countdown is an upper bound, not a confirmed clock. |
+| `t0_window_close_local_epoch` | int (HA-local wall seconds since 1970) | no | `t0_local_epoch` .. `t0_local_epoch + 86400` | Only present when the source feed gives `win_close`. Enables the `LIVE` render regime while `now_local ∈ [t0_local_epoch, t0_window_close_local_epoch]`. Absent (or 0) means the launch is an instantaneous T-zero; once `now_local > t0_local_epoch + 1 h`, the snapshot is treated as expired and the scene falls to `WAIT` rather than rendering `T+...` forever. |
 | `provider` | string | yes | ≤ 12 chars, uppercase | Pre-abbreviated provider tag (e.g. `SX`, `RKL`, `ULA`, `BO`). HA owns the abbreviation table — see [docs/PLAN.md](PLAN.md) Phase L.5. Firmware just renders the bytes; truncation discipline per FR-4.4. |
 | `vehicle` | string | yes | ≤ 12 chars, uppercase | Vehicle name (e.g. `FALCON 9`, `STARSHIP`, `ELECTRON`, `ATLAS V`). HA may uppercase + light cleanup from the feed's `vehicle.name`. |
 | `mission` | string | yes | ≤ 14 chars, uppercase | Mission identifier (e.g. `STARLINK 17-42`, `STARSHIP FL12`). HA pre-truncates per FR-4.4 — the firmware does not wrap or re-truncate. Recommended cleanups: drop redundant parens (`Starlink (17-42)` → `STARLINK 17-42`), collapse `Flight 12` → `FL12`. |
-| `pad_code` | string | yes | 3..4 chars, uppercase | Short tag for the launch site, from an HA-side `pad.location.slug` → 3–4 letter dict (e.g. `VSF`=Vandenberg, `CCS`=Cape Canaveral, `KSC`=Kennedy, `STR`=Starbase, `LC1`=Rocket Lab Māhia). Unknown slugs SHALL fall back to first-3-uppercase-letters in HA — never block a publish on a missing entry. The scene renders it as a row-3 suffix when there's room. |
+| `pad_code` | string | yes | 3..4 chars, uppercase | Short tag for the launch site, from an HA-side `pad.location.slug` → 3–4 letter dict (e.g. `VSF`=Vandenberg, `CCS`=Cape Canaveral, `KSC`=Kennedy, `STR`=Starbase, `LC1`=Rocket Lab Māhia). Unknown slugs SHALL fall back to first-3-uppercase-letters in HA — never block a publish on a missing entry. Retained as a fallback when `pad_country` is absent; the scene prefers `pad_country` for the typewriter info row. |
+| `org` | string | no | ≤ 20 chars, uppercase | Full launch-provider name (e.g. `SPACEX`, `ROCKET LAB`, `UNITED LAUNCH ALLIANCE`). HA shapes this from LL2's `launch_service_provider.name`, stripping common legal suffixes (`, Inc.`, `LLC`, `GmbH`). Empty string when LL2 omits the name. Surfaced on the typewriter info row's `ORG:` slide. |
+| `pad_country` | string | no | ≤ 20 chars, uppercase | Country (or `"STATE, USA"` for US sites) parsed from the last comma-segment of LL2's `pad.location.name`. e.g. `"FL, USA"`, `"NEW ZEALAND"`, `"PEOPLE'S REPUBLIC OF CHINA"`. Empty when absent. Rendered without a label on the typewriter info row (the value reads self-evidently as geography). |
+| `description` | string | no | ≤ 240 chars, ASCII | Mission blurb from LL2's `mission.description`, NFKD-folded to ASCII, control chars stripped, whitespace collapsed, clipped at a word boundary with `...` if truncated. Scrolled in the bottom marquee at ~17 px/s. Empty string when absent (marquee falls back to a `PROV VEHICLE MISSION @ PAD` tag line). |
 | `result` | int | no | -1, 0, 1, 2 | Mission outcome from the feed (-1 = scheduled, 0 = failure, 1 = success, 2 = partial). Defaults to -1 (scheduled) if absent. The publisher SHOULD filter `result != -1` upstream — this field exists so the firmware can defensively skip a stale entry that slipped through. |
 
 If any **required** field is missing, malformed, or out of range, the
@@ -350,69 +372,91 @@ the previous fresh snapshot (or `WAIT` if none).
 
 **Where HA gets the data — and why HA does no observer-frame logic.**
 Same pass-through contract as `observatory/iss` / `observatory/jupiter`.
-HA polls a public launch feed once an hour and re-emits the resolved
-fields. The reference feed in v1 is Rocket Launch Live's free "fdo"
-tier:
+HA polls a public launch feed and re-emits the resolved fields. The
+v1 reference feed is **The Space Devs' Launch Library 2** (free tier,
+15 req/h anon):
 
-- `https://fdo.rocketlaunch.live/json/launches/next/5` — no API key
-  (the JSON returns `"valid_auth": false`, that is normal); the
-  result array is sorted ascending by `sort_date` (Unix epoch).
-- HA filters `result == -1` (scheduled only) + drops any entry whose
-  effective `t0` is older than `now - 6 h` (defensive — the feed
-  occasionally lags), then takes the first remaining entry.
-- Effective `t0` resolution mirrors the firmware field policy
-  above: `t0` (confirmed) → `win_open` (`t0_estimate=true`) →
-  midday-UTC `est_date` (`t0_estimate=true`).
-- Provider + pad abbreviations come from operator-editable Python
-  dicts at the top of `publish_launch()` in
-  [homeassistant/pyscript/observatory_publisher.py](../homeassistant/pyscript/observatory_publisher.py) —
-  intentionally NOT baked into firmware so the abbreviation set is
-  updatable without a reflash.
-- The Space Devs Launch Library 2 (`https://ll.thespacedevs.com/2.2.0/launch/upcoming/`)
-  is a documented fallback if RLL's free tier disappears; field
-  mapping is similar (`net` → `t0_epoch`, `window_start` /
-  `window_end` → `t0_epoch` / `t0_window_close_epoch`).
+- `https://ll.thespacedevs.com/2.3.0/launches/upcoming/?limit=5&hide_recent_previous=false&mode=normal`
+  — no API key required.
+- HA polls every **10 minutes** (`cron(*/10 * * * *)`) so a status
+  flip (e.g. LL2's `Success` after orbit insertion) reaches the
+  panel within at most 10 min.
+- Two-pass selection (see `_compute_launch` in
+  [homeassistant/pyscript/observatory_publisher.py](../homeassistant/pyscript/observatory_publisher.py)):
+  Pass A keeps a *just-launched* entry (LL2 status 3/4/6/7 —
+  Success / Failure / In Flight / Partial) selected for 30 min
+  post-t0 so the operator sees the outcome on the post-t0 count-up
+  scene. Pass B otherwise picks the soonest upcoming entry whose
+  effective `net` is within `now - 6 h`.
+- `t0_estimate` is derived from LL2's `net_precision.abbrev` —
+  `SEC` / `MIN` are exact; `HR` and coarser flip the badge to `NET`.
+- Provider abbreviations come from LL2's `launch_service_provider.abbrev`
+  (no hand-curated dict needed in v1). Pad codes still come from an
+  operator-editable `_LL2_PAD_ABBREV` dict at the top of the
+  publisher; the friendlier `pad_country` is computed inline by
+  `_shape_pad_country` from the last comma-segment of
+  `pad.location.name`.
+- Rocket Launch Live (`https://fdo.rocketlaunch.live/json/launches/next/5`)
+  was the v0 source; it was dropped because LL2's `net` field is
+  always populated whereas RLL's `t0` was frequently empty for
+  Starship / TBD missions, producing a silent off-by-window
+  countdown.
 
 **On-device derivation (no firmware HTTP, no firmware abbreviation
 tables).** Every render frame the `launch_countdown` scene computes:
 
-1. `t_minus = t0_epoch - tod::now_epoch_utc()` — integer seconds,
-   single subtraction, no float (NFR-1.3).
-2. Render regime dispatch on `|t_minus|`:
+1. `t_minus = t0_local_epoch - tod::now(now_ms).local_epoch` —
+   integer seconds, single subtraction, no float (NFR-1.3), no tz
+   math (both operands are in HA-local-epoch).
+2. Render regime on integer `t_minus`:
 
 | Condition | Rendered as |
 |---|---|
-| `t_minus > 86400` (>24 h) | `T-Nd HHh` (`N` capped at 99) |
-| `3600 ≤ t_minus ≤ 86400` (1–24 h) | `T-HHh MMm` |
-| `60 ≤ t_minus < 3600` (1 min..1 h) | `T-MM:SS` |
-| `0 ≤ t_minus < 60` (<60 s) | blinking `T-SS` (2 Hz) |
-| `t_minus ≤ 0` AND `t0_window_close_epoch` present AND `now ≤ t0_window_close_epoch` | `LIVE` (1 Hz pulse) |
-| `t_minus ≤ -3600` (snapshot expired) AND no window | `WAIT` (next HA poll publishes the replacement) |
-| No fresh snapshot (kFreshMs exceeded) | `WAIT` |
-| `t0_estimate = true` | `NET ` prefix added to whichever regime above is active |
+| `0 ≤ t_minus < 100 h` | `T-HH:MM:SS` six-cell odometer (each digit slides down 180 ms on change); steady `STATUS_INFO` ink. Final 60 s pulses 2 Hz between `ALERT` and `STATUS_WARN`. |
+| `-35 min < t_minus < 0` | `T+HH:MM:SS` count-up odometer; steady `STATUS_INFO` ink (no pulse — the urgency moment is over). |
+| `t0_estimate = true` AND `t_minus ≥ 0` | Prefix swaps from `T-` to `~T` in `STATUS_WARN` ink so the operator sees the target is soft. |
+| outside both windows / no fresh snapshot / no RTC | Six dashes (`-- --:--`) frozen on `STATUS_DIM`; marquee shows `AWAITING SCHEDULE`. |
 
 Snapshot is treated as fresh for **4 h** (`launch_state::kFreshMs`),
 which covers HA's hourly poll cadence + slippage and a single missed
-poll. Beyond that the scene falls back to `WAIT` rather than ticking
-down a stale date — same fail-closed discipline as the recent ISS
-pyscript fix that gated on `last_updated` freshness.
+poll. Beyond that the scene falls back to the dash placeholder
+rather than ticking down a stale date — same fail-closed discipline
+as the recent ISS pyscript fix that gated on `last_updated` freshness.
 
-The 4-line layout (the corner clock chrome occupies the top-left
-~15 px per FR-9.2, so the scene uses the remaining right region):
+**32×64 layout** (corner clock chrome paints on top of the header row):
 
-- row 0: bracketed `LAUNCH` header (theme-aware via `theme::bracket_*`)
-- row 1: `<provider> <vehicle>` (e.g. `SX FALCON 9`)
-- row 2: `<mission>` (e.g. `STARLINK 17-42`)
-- row 3: T-minus string, with `<pad_code>` suffix when the row has
-  room (e.g. `T-04:12  VSF`); pad code drops first on overflow
+- `y=0..7`   bracketed `LNCH` header (theme `ALERT` ink with a 1.5 s dim pulse).
+- `y=10..17` six-cell `T-HH:MM:SS` odometer (built-in 6×8 font).
+- `y=18..23` typewriter info row (TomThumb 3×5) cycling one short fact
+  every 4 s with a per-char reveal + 2 Hz cursor blink:
+  mission name → `ORG:` → `VEH:` → country (no label) → `LIFTOFF:` →
+  `CONFIRMED`/`NET` → `WIN:` → post-t0 `IN FLIGHT`/`SUCCESS`/`FAIL`/
+  `PARTIAL`. Labels render at half RGB intensity, values at full ink.
+- `y=25..31` bottom marquee (TomThumb 3×5) scrolling `description`
+  at 1 px/frame in `BODY` ink; falls back to a
+  `PROV VEHICLE MISSION @ PAD` tag line when `description` is empty,
+  or `AWAITING SCHEDULE` when the snapshot is stale.
+
+**Auto-switch + audio (FR-14.6).** A Core 0 1 Hz edge detector
+([src/state/launch_imminent.cpp](../src/state/launch_imminent.cpp))
+preempts the active scene with `LAUNCH_COUNTDOWN` at **priority 5
+sticky** during the final 5 minutes before T-0 and plays a
+`C6 → E6 → G6 → C7` fanfare. Per-second 880 Hz ticks fire on each
+integer second in `[T-10, T-1]`, followed by a `C5 → E5 → G5` ignition
+sting at T-0. The auto-switch (and every audio cue) is suppressed
+while `light_sensor::is_night()` is true so a sleeping operator is
+not woken; the FR-10.9 buzzer mute is the second line of defence and
+the NIGHT compositor overlay (FR-7.2) is the third. The countdown
+remains reachable by manual IR ▲/▼ or `observatory/scene` MQTT
+request at any hour.
 
 ```bash
-# >24 h regime — Vandenberg Starlink, confirmed t0
-mosquitto_pub -t observatory/launch -m '{"t0_epoch":1779243060,"t0_estimate":false,"provider":"SX","vehicle":"FALCON 9","mission":"STARLINK 17-42","pad_code":"VSF","result":-1}'
+# >24 h regime — Vandenberg Starlink, confirmed t0 (epoch is HA-local)
+mosquitto_pub -t observatory/launch -m '{"t0_local_epoch":1779243060,"t0_estimate":false,"provider":"SX","vehicle":"FALCON 9","mission":"STARLINK 17-42","pad_code":"VSF","org":"SPACEX","pad_country":"CA, USA","description":"Batch of Starlink internet satellites to LEO.","result":-1}'
 # 1–24 h regime + NET badge — Starship launch window
-mosquitto_pub -t observatory/launch -m '{"t0_epoch":1779402600,"t0_window_close_epoch":1779410580,"t0_estimate":true,"provider":"SX","vehicle":"STARSHIP","mission":"STARSHIP FL12","pad_code":"STR","result":-1}'
+mosquitto_pub -t observatory/launch -m '{"t0_local_epoch":1779402600,"t0_window_close_local_epoch":1779410580,"t0_estimate":true,"provider":"SX","vehicle":"STARSHIP","mission":"STARSHIP FL12","pad_code":"STR","org":"SPACEX","pad_country":"TX, USA","description":"Twelfth integrated test flight of Starship.","result":-1}'
 # Estimated date only — Rocket Lab Electron, NET 22 May 2026
-mosquitto_pub -t observatory/launch -m '{"t0_epoch":1779494400,"t0_estimate":true,"provider":"RKL","vehicle":"ELECTRON","mission":"VIVA LA STRIX","pad_code":"LC1","result":-1}'
+mosquitto_pub -t observatory/launch -m '{"t0_local_epoch":1779494400,"t0_estimate":true,"provider":"RKL","vehicle":"ELECTRON","mission":"VIVA LA STRIX","pad_code":"LC1","org":"ROCKET LAB","pad_country":"NEW ZEALAND","description":"Dedicated rideshare to sun-synchronous orbit.","result":-1}'
 ```
 
 ### `observatory/theme` — active retro sci-fi theme + image tint (FR-15.2 / FR-15.6)

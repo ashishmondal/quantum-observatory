@@ -43,10 +43,21 @@
 #   4. This file is at /config/pyscript/observatory_publisher.py
 #   5. Pyscript reload triggered (or HA restarted).
 #
-# All publishes use retain=False — same reason as the YAML
-# automations: the firmware caches every inbound payload for
+# All publishes use retain=False by default — same reason as the
+# YAML automations: the firmware caches every inbound payload for
 # 1–24 h per topic's kFreshMs, and a retained message would
 # only leak stale data after an HA outage.
+#
+# Exception: observatory/launch is published retained. Cron fires
+# only once an hour (cron(7 * * * *)) and the firmware's freshness
+# clock is keyed on RECEIVE time, not the t0 epoch, so a device
+# that reboots or reconnects mid-hour would otherwise sit on
+# "AWAITING SCHEDULE" for up to ~60 min until the next tick.
+# Retention is harmless here because the firmware re-validates t0
+# against tod::now() at apply time — a stale retained launch whose
+# t0 has slipped past `now - 3600 s` is rejected (handle_launch
+# bounds check), not rendered.
+_RETAIN_TOPICS = {"observatory/launch"}
 
 import json
 
@@ -540,6 +551,542 @@ def _observer_lat_lon():
         return 0.0, 0.0
 
 
+# ---------------------------------------------------------------------
+# Next-launch fetcher (FR-14.6, phase L) — pure HTTP + dict-shaping,
+# no skyfield. Talks to The Space Devs' Launch Library 2 (LL2) free
+# `launches/upcoming` endpoint and shapes the soonest pending entry
+# into the firmware launch_state.h schema. Per FR-14 architectural
+# rule, HA does NO observer-frame logic — we just pass through the
+# schedule plus table-driven name compaction; the firmware does all
+# T-minus math.
+#
+# Why LL2 (was: RocketLaunch.Live fdo `next/5`):
+#   * LL2's `net` field is the official liftoff time and is always
+#     populated. RLL's `t0` was frequently empty for Starship/TBD
+#     missions, forcing the publisher onto `win_open` (~30 min earlier
+#     than liftoff for SpaceX), producing a silent off-by-window
+#     countdown vs SpaceX's own page.
+#   * LL2 ships `launch_service_provider.abbrev` (e.g. "SpX", "RKLB",
+#     "ULA") so we no longer need a hand-curated provider dict.
+#   * `net_precision.abbrev` ("SEC"/"MIN"/"HR"/"DAY"/...) is an
+#     honest estimate flag — set t0_estimate when precision is HR
+#     or coarser.
+#   * Free tier: 15 req/h anon (we poll once an hour at :07, so 14
+#     spare). 1000/h with a free API key if we ever need bursts.
+#   * `lldev.thespacedevs.com` (no-SLA dev mirror) is the same
+#     schema; swap the host for local testing without burning quota.
+#
+# LL2 wire fields we read (mode=normal):
+#   net                         — required, ISO-8601 UTC liftoff time
+#   net_precision.abbrev        — "SEC" | "MIN" | "HR" | "DAY" | ...
+#   window_end                  — optional, ISO-8601 UTC window close
+#   status.id / status.abbrev   — 1=Go, 2=TBD, 3=Success, 4=Failure,
+#                                 6=In Flight, 7=Partial Failure,
+#                                 8=TBC. We only consider 1, 2, 8.
+#   launch_service_provider.abbrev — e.g. "SpX" → upcased to "SPX"
+#   rocket.configuration.name   — e.g. "Starship"
+#   mission.name                — e.g. "Flight 12"
+#   pad.location.name           — e.g. "SpaceX Starbase, TX, USA"
+# ---------------------------------------------------------------------
+
+# LL2's upcoming-launches endpoint. `hide_recent_previous=true` drops
+# the past-12 h "Success/Failure" entries the bare endpoint includes
+# for context, so we don't have to filter them ourselves. `mode=normal`
+# is the middle response detail tier — gives us
+# provider/rocket/mission/pad without dragging the 50 KB `detailed`
+# tree (which includes wiki blurbs, full agency stats, etc).
+_LAUNCH_URL = ("https://ll.thespacedevs.com/2.3.0/launches/upcoming/"
+               "?limit=5&hide_recent_previous=false&mode=normal")
+
+# LL2 launch status IDs we treat as upcoming. Anything else means the
+# launch has already happened (3/4/6/7) or is on hold (5=Hold). TBD
+# and TBC still get on screen so the operator sees what's queued.
+_LL2_UPCOMING_STATUS = frozenset({1, 2, 8})  # Go, TBD, TBC
+
+# LL2 statuses past t0 that we keep on the panel for `_POST_T0_HOLD_S`
+# seconds after liftoff so the operator sees how the launch resolved
+# instead of the scene silently swapping to the next upcoming entry
+# the moment the odometer reaches T-0. Mapping into the firmware's
+# `result` field (see include/state/launch_state.h):
+#   3 Success         → result = 1
+#   4 Failure         → result = 0
+#   6 In Flight       → result = -1  (firmware infers "in flight" from
+#                                     now > t0 + result == -1)
+#   7 Partial Failure → result = 2
+_LL2_POST_T0_STATUS = frozenset({3, 4, 6, 7})
+_LL2_STATUS_TO_RESULT = {3: 1, 4: 0, 7: 2}  # 6 stays -1
+
+# How long after t0 to keep a post-t0 entry selected before falling
+# back to the soonest upcoming launch. 30 min is long enough to
+# resolve outcome for most missions (LL2 typically flips Success
+# within a few minutes of orbit insertion) and short enough that an
+# extended in-flight phase won't crowd out a back-to-back launch.
+_POST_T0_HOLD_S = 30 * 60
+
+# `net_precision.abbrev` values that count as "exact enough to not
+# bother surfacing as an estimate". SEC = accurate to the second
+# (typical for SpaceX & Rocket Lab on launch day). MIN = good enough
+# — that's a ±60 s ambiguity, smaller than the typical hold/scrub.
+# Anything else (HR, DAY, MONTH, QUARTER, YEAR) is an estimate and
+# the panel paints `~T` instead of `T-`.
+_LL2_EXACT_PRECISION = frozenset({"SEC", "MIN"})
+
+# Pad location name → ≤4-char tag for the firmware display. LL2 gives
+# us `pad.location.name` as a human-readable string ("SpaceX Starbase,
+# TX, USA"); we map common ones to the same 3-4 char codes
+# RocketLaunch.Live's slug table used so on-panel pad codes stay
+# stable across the source swap. Unknown locations fall through to
+# `_derive_pad_code()` which slugifies + truncates.
+_LL2_PAD_ABBREV = {
+    "SpaceX Starbase, TX, USA":                       "STR",
+    "Cape Canaveral SFS, FL, USA":                    "CCS",
+    "Kennedy Space Center, FL, USA":                  "KSC",
+    "Vandenberg SFB, CA, USA":                        "VSF",
+    "Wallops Flight Facility, VA, USA":               "WAL",
+    "Mid-Atlantic Regional Spaceport, VA, USA":       "MAR",
+    "Mahia Peninsula, New Zealand":                   "LC1",
+    "Wallops Flight Facility, Virginia, USA":         "WAL",
+    "Baikonur Cosmodrome, Republic of Kazakhstan":    "BAI",
+    "Plesetsk Cosmodrome, Russian Federation":        "PLE",
+    "Vostochny Cosmodrome, Russian Federation":       "VOS",
+    "Guiana Space Centre, French Guiana":             "KRU",
+    "Satish Dhawan Space Centre, India":              "SDS",
+    "Tanegashima Space Center, Japan":                "TNG",
+    "Uchinoura Space Center, Japan":                  "UCH",
+    "Wenchang Space Launch Site, People's Republic of China": "WEN",
+    "Xichang Satellite Launch Center, People's Republic of China": "XIC",
+    "Jiuquan Satellite Launch Center, People's Republic of China": "JIU",
+    "Taiyuan Satellite Launch Center, People's Republic of China": "TAI",
+}
+
+
+@pyscript_compile  # called from @pyscript_executor _compute_launch — must be native
+def _derive_pad_code(loc_name):
+    """Fallback ≤4-char ALLCAPS pad code when the location isn't in
+    _LL2_PAD_ABBREV. Takes the first two whitespace-separated words
+    of `loc_name` and concatenates their leading letters, e.g.
+    'New Glenn Pad' → 'NGP'. Single-word locations fall back to the
+    first 3 alpha letters."""
+    if not loc_name:
+        return "?"
+    parts = [p for p in loc_name.replace(",", " ").split() if p]
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        head = "".join(c for c in parts[0] if c.isalpha()).upper()
+        return head[:3] if head else "?"
+    initials = "".join(p[0] for p in parts[:3] if p and p[0].isalpha()).upper()
+    return initials[:4] if initials else "?"
+
+
+@pyscript_compile  # called from @pyscript_executor _compute_launch — must be native
+def _shape_provider(abbrev, full_name):
+    """Provider tag, ≤11 chars + NUL (kProviderCap-1). LL2 ships a
+    pre-computed `abbrev` we just uppercase + clip; if it's missing
+    we fall back to the first 3 alpha letters of the full name."""
+    if abbrev:
+        return abbrev.upper()[:11]
+    if full_name:
+        head = "".join(c for c in full_name.split()[0] if c.isalpha()).upper()
+        return head[:3] if head else "?"
+    return "?"
+
+
+@pyscript_compile  # called from @pyscript_executor _compute_launch — must be native
+def _shape_org(full_name):
+    """Full provider/organisation name, ≤20 chars + NUL (kOrgCap-1).
+    Used by the typewriter info row's `ORG:` slide so the operator
+    sees the company name (\"SPACEX\", \"ROCKET LAB\") in addition to
+    the compact 2-letter `provider` abbrev. Empty string when LL2
+    doesn't supply a name."""
+    if not full_name:
+        return ""
+    # Drop common legal-suffix noise so \"SpaceX, Inc.\" doesn't burn
+    # 5 chars on chrome. Conservative \u2014 only strip the trailing
+    # token, never substrings.
+    s = full_name.strip()
+    for suffix in (", Inc.", ", Inc", " Inc.", " Inc",
+                   ", LLC", " LLC", ", S.A.", " S.A.", " GmbH"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)].rstrip()
+            break
+    return s.upper()[:20]
+
+
+# US country tokens we treat as "this is the United States" — the
+# country segment is the last comma-separated piece of LL2's
+# `pad.location.name`. ALLCAPS for case-insensitive compare against
+# `.upper()`. Includes the common short and long forms LL2 has been
+# observed to emit.
+_US_COUNTRY_TOKENS = frozenset({
+    "USA",
+    "UNITED STATES",
+    "UNITED STATES OF AMERICA",
+})
+
+
+@pyscript_compile  # called from @pyscript_executor _compute_launch — must be native
+def _shape_pad_country(loc_name):
+    """Country (or \"STATE, USA\") slug for the typewriter info row,
+    ≤20 chars + NUL (kPadCountryCap-1). LL2's `pad.location.name` is
+    full \"City, STATE, COUNTRY\" form for US sites and \"City,
+    COUNTRY\" for everything else (e.g. \"Cape Canaveral SFS, FL,
+    USA\" vs \"Mahia Peninsula, New Zealand\"). We surface the
+    country alone for international sites (the operator already gets
+    the city via PAD context elsewhere; country is the navigation-
+    map-level cue) and \"STATE, USA\" for US sites so the half-dozen
+    Florida/California/Texas pads stay distinguishable on a glance.
+    Empty string on absent input."""
+    if not loc_name:
+        return ""
+    parts = [p.strip() for p in loc_name.split(",") if p.strip()]
+    if not parts:
+        return ""
+    country = parts[-1]
+    if country.upper() in _US_COUNTRY_TOKENS and len(parts) >= 3:
+        state = parts[-2]
+        result = f"{state}, USA"
+    else:
+        result = country
+    return result.upper()[:20]
+
+
+@pyscript_compile  # called from @pyscript_executor _compute_launch — must be native
+def _shape_vehicle(name):
+    """Vehicle ALLCAPS, clipped to 11 chars (kVehicleCap-1)."""
+    if not name:
+        return "?"
+    return name.upper()[:11]
+
+
+@pyscript_compile  # called from @pyscript_executor _compute_launch — must be native
+def _shape_mission(name):
+    """Mission ALLCAPS, clipped to 13 chars (kMissionCap-1) with a
+    couple of common-case compactions so that 'Starlink Group 17-42'
+    and 'Flight 12' read sensibly inside the budget.
+    """
+    if not name:
+        return "?"
+    s = name.strip()
+    # "Starlink Group 17-42" / "Starlink 17-42" → "STARLINK 17-42"
+    # (the firmware will then clip if still over budget).
+    s = s.replace("Group ", "")
+    # "Flight 12" → "FL12" (Starship test flights).
+    if s.lower().startswith("flight "):
+        tail = s.split(" ", 1)[1].strip()
+        s = "FL" + tail
+    # Strip trailing parenthetical suffixes — "Demo-2 (Crewed)" → "Demo-2"
+    if "(" in s:
+        s = s.split("(", 1)[0].strip()
+    return s.upper()[:13]
+
+
+# Firmware launch_state::kDescriptionCap - 1 = 240 chars usable.
+# Keep this constant in sync with include/state/launch_state.h.
+_DESCRIPTION_CAP = 240
+
+
+@pyscript_compile  # called from @pyscript_executor _compute_launch — must be native
+def _shape_description(text):
+    """Normalise LL2's `mission.description` prose to something the
+    firmware's 6×8 mono marquee can render cleanly.
+
+    Steps (in order):
+      1. NFKD-decompose + drop combining marks → "café" → "cafe".
+         The firmware uses Adafruit_GFX's built-in font which only
+         covers ASCII 0x20..0x7E; a stray U+00E9 would render as the
+         block-character placeholder and the marquee would look like
+         it ate something.
+      2. Replace control chars (CR, LF, TAB, BS, …) with a single
+         space — LL2 prose contains literal '\\r\\n' line breaks that
+         on the marquee read as garbage glyphs.
+      3. Collapse runs of whitespace to a single space + strip ends.
+      4. Drop any remaining non-ASCII / non-printable bytes.
+      5. Hard-clip to _DESCRIPTION_CAP. If the clip lands mid-word,
+         walk back to the last space so the marquee never ends mid-
+         token; on clip we replace the final 3 chars with "..." so
+         the reader knows the prose was truncated. (firmware accepts
+         only up to kDescriptionCap-1 and rejects the whole publish
+         if exceeded, so the cap must be enforced HA-side.)
+    Returns "" on empty/None input."""
+    if not text:
+        return ""
+    try:
+        import unicodedata
+        # 1. ASCII-fold via NFKD + drop combining marks.
+        decomposed = unicodedata.normalize("NFKD", text)
+        ascii_text = decomposed.encode("ascii", "ignore").decode("ascii")
+        # 2 + 3. Replace control chars with spaces, collapse runs.
+        cleaned_chars = []
+        for ch in ascii_text:
+            o = ord(ch)
+            if o < 0x20 or o == 0x7F:
+                cleaned_chars.append(" ")
+            elif o > 0x7E:
+                continue  # belt + braces; .encode('ascii','ignore') already dropped these
+            else:
+                cleaned_chars.append(ch)
+        s = "".join(cleaned_chars)
+        # Collapse whitespace and strip.
+        s = " ".join(s.split())
+        if not s:
+            return ""
+        # 5. Clip with word-boundary preservation + ellipsis.
+        if len(s) <= _DESCRIPTION_CAP:
+            return s
+        # Reserve 3 chars for the ellipsis indicator.
+        budget = _DESCRIPTION_CAP - 3
+        cut = s.rfind(" ", 0, budget)
+        if cut < budget // 2:  # don't lose more than half to a word boundary
+            cut = budget
+        return s[:cut].rstrip() + "..."
+    except Exception:  # noqa: BLE001 — never break the publish over cosmetics
+        return ""
+
+
+@pyscript_compile  # called from @pyscript_executor _compute_launch — must be native
+def _parse_iso_local_epoch(s, tz_name):
+    """Parse an ISO-8601 timestamp (UTC, 'Z' or '+00:00' suffix) and
+    return the Unix epoch of that instant **as expressed in HA's
+    local clock** (the tz named by `tz_name`, e.g.
+    "America/Los_Angeles").
+
+    Rationale: the firmware's RTC stores local time and every
+    countdown is `wire_epoch - tod::now().local_epoch`, so the wire
+    contract for time-bearing payloads is *local epoch* (= UTC epoch
+    shifted by HA's tz offset). HA owns the tz and is the only place
+    that needs to know it; the device does pure subtraction.
+
+    IMPORTANT: we explicitly resolve the tz from HA's configured
+    `hass.config.time_zone` (passed in here as `tz_name`) instead of
+    relying on `datetime.astimezone()` with no argument — the latter
+    uses the Python process's `TZ` env, which inside the HA /
+    pyscript container is frequently UTC even when HA itself is
+    configured for a different zone.
+
+    Returns None on parse failure."""
+    if not s:
+        return None
+    try:
+        from datetime import datetime, timezone
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:  # pragma: no cover — Python <3.9
+            from backports.zoneinfo import ZoneInfo  # type: ignore
+        # Python ≥3.11 accepts 'Z' directly via fromisoformat, but
+        # 3.10 (HA's typical pyscript runtime) does not.
+        normalised = s.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalised)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        zone = ZoneInfo(tz_name) if tz_name else None
+        # Convert to HA's configured zone, drop tz, then re-stamp as
+        # UTC so .timestamp() returns (real_utc_epoch + tz_offset_s)
+        # — i.e. a synthetic epoch whose integer value equals the
+        # wall-clock seconds-since-1970 of the HA-local zone.
+        local_naive = (dt.astimezone(zone) if zone is not None
+                       else dt.astimezone()).replace(tzinfo=None)
+        return int(local_naive.replace(tzinfo=timezone.utc).timestamp())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@pyscript_executor
+def _compute_launch(tz_name):
+    """Fetch LL2 upcoming launches and pick the soonest pending entry,
+    returning a dict matching the observatory/launch wire schema (see
+    docs/MQTT_TOPICS.md). Returns `{"_error": "..."}` on any network
+    or parse failure — `_publish` records that on the witness entity
+    and the firmware keeps the previous fresh snapshot until the next
+    hourly retry.
+
+    `tz_name` MUST be HA's configured `hass.config.time_zone` (e.g.
+    "America/Los_Angeles"). The pyscript container's TZ env can
+    differ from HA's configured zone (commonly UTC inside the
+    container while HA itself is local), and using the container's
+    zone here produced a silent tz-offset error on the countdown
+    wire. The caller resolves the zone and passes it explicitly so
+    this function stays a pure executor with no HA-global access.
+
+    Selection rules (two-pass, post-t0 hold wins over upcoming):
+      Pass A — post-t0 hold (FR-14.6 "don't leave the operator
+         guessing what happened"): scan for entries whose effective
+         t0 sits in [now - `_POST_T0_HOLD_S`, now + 60 s] AND whose
+         status is one of `_LL2_POST_T0_STATUS` (Success/Failure/
+         In Flight/Partial). Pick the most recent (largest t0) such
+         entry; populate `result` via `_LL2_STATUS_TO_RESULT` (or -1
+         for in-flight). The firmware paints the count-up T+ odometer
+         and the typewriter row's RESULT slide off this payload.
+      Pass B — next upcoming (the original flow):
+        1. Filter to `status.id \u2208 _LL2_UPCOMING_STATUS`.
+        2. Effective t0 = `net` (LL2 guarantees this is populated).
+           No fallback path needed — if `net` is missing the entry
+           is malformed and we skip it.
+        3. `t0_estimate = net_precision.abbrev \u2209 {SEC, MIN}`. HR or
+           coarser \u2192 on-panel `~T` prefix flag.
+        4. Drop if effective t0 < now - 6 h. The 6 h grace covers a
+           slipping window that the operator might still want to
+           see post-instant.
+        5. First survivor wins (API returns chronologically by `net`).
+    """
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            _LAUNCH_URL,
+            headers={
+                # LL2 asks API consumers to identify themselves so
+                # they can contact you if your traffic pattern is
+                # ever a problem. The URL is informational only.
+                "User-Agent": "quantum-observatory/1.0 (+https://github.com)",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        doc = json.loads(body)
+        launches = doc.get("results") or []
+        if not isinstance(launches, list) or not launches:
+            return {"_error": "LL2 returned no upcoming launches"}
+
+        # `now` in the same local-epoch frame as the parsed net values
+        # below — wall-clock seconds-since-1970 of HA's local zone.
+        # Resolve via HA's configured tz_name (not the container's TZ
+        # env) so this matches what _parse_iso_local_epoch emits.
+        from datetime import datetime as _dt, timezone as _tz
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+        except ImportError:  # pragma: no cover — Python <3.9
+            from backports.zoneinfo import ZoneInfo as _ZI  # type: ignore
+        _zone = _ZI(tz_name) if tz_name else None
+        _now_utc = _dt.now(tz=_tz.utc)
+        _now_local_naive = (_now_utc.astimezone(_zone) if _zone is not None
+                            else _now_utc.astimezone()).replace(tzinfo=None)
+        now = int(_now_local_naive.replace(tzinfo=_tz.utc).timestamp())
+
+        entry_failures = []  # see RocketLaunch.Live version for rationale
+
+        # Helper to shape one LL2 entry into the wire payload dict.
+        # Kept inside _compute_launch so it closes over `tz_name` and
+        # `entry_failures` and stays @pyscript_executor-pure (no HA
+        # globals). The `result` arg is resolved by the caller from
+        # the entry's LL2 status before this runs \u2014 Pass A pulls it
+        # from `_LL2_STATUS_TO_RESULT`, Pass B always passes -1.
+        def _shape_entry(entry, t0_epoch, result_val):
+            precision = (entry.get("net_precision") or {}).get("abbrev", "")
+            t0_estimate = precision not in _LL2_EXACT_PRECISION
+
+            # Optional window close (LL2 ships `window_end` in the
+            # same UTC ISO frame). Sanity-check it sits in
+            # [t0, t0 + 24 h] so a botched schema doesn't enable
+            # LIVE regime at a wildly wrong time.
+            win_close_epoch = 0
+            wc = _parse_iso_local_epoch(entry.get("window_end"), tz_name)
+            if wc is not None and wc > t0_epoch and wc < t0_epoch + 86400:
+                win_close_epoch = wc
+
+            provider = entry.get("launch_service_provider") or {}
+            rocket   = entry.get("rocket") or {}
+            config   = rocket.get("configuration") or {}
+            mission  = entry.get("mission") or {}
+            pad      = entry.get("pad") or {}
+            pad_loc  = (pad.get("location") or {}).get("name", "")
+
+            return {
+                "t0_local_epoch":              t0_epoch,
+                "t0_estimate":                 bool(t0_estimate),
+                "t0_window_close_local_epoch": win_close_epoch,
+                "provider": _shape_provider(provider.get("abbrev"),
+                                            provider.get("name")),
+                "vehicle":  _shape_vehicle(config.get("name")),
+                "mission":  _shape_mission(mission.get("name")
+                                           or entry.get("name", "")),
+                "pad_code": _LL2_PAD_ABBREV.get(pad_loc)
+                            or _derive_pad_code(pad_loc),
+                "org":         _shape_org(provider.get("name")),
+                "pad_country": _shape_pad_country(pad_loc),
+                "description": _shape_description(
+                    mission.get("description", "")),
+                "result":   int(result_val),
+            }
+
+        # ---- Pass A: post-t0 hold (FR-14.6 outcome visibility) ----
+        # Walk all entries, collect the post-t0 candidates whose t0
+        # sits within the hold window. Pick the largest t0 (= most
+        # recent liftoff) \u2014 LL2 may interleave past/future when
+        # `hide_recent_previous=false` and we want the freshest
+        # outcome on screen, not a stale one from 28 minutes ago
+        # if a newer launch already happened.
+        post_t0_best = None  # (t0_epoch, status_id, entry)
+        for idx, entry in enumerate(launches):
+            try:
+                status_id = (entry.get("status") or {}).get("id")
+                if status_id not in _LL2_POST_T0_STATUS:
+                    continue
+                t0_epoch = _parse_iso_local_epoch(entry.get("net"), tz_name)
+                if t0_epoch is None:
+                    continue
+                # +60 s upper bound covers clock-skew between HA and
+                # LL2 \u2014 a launch whose `net` lands a few seconds in
+                # the future but whose status already reads "Success"
+                # is post-t0 in reality, not upcoming.
+                if t0_epoch < now - _POST_T0_HOLD_S or t0_epoch > now + 60:
+                    continue
+                if post_t0_best is None or t0_epoch > post_t0_best[0]:
+                    post_t0_best = (t0_epoch, status_id, entry)
+            except Exception as exc:  # noqa: BLE001 \u2014 per-entry guard
+                entry_failures.append(
+                    f"entry[{idx}] (post-t0 scan): "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                continue
+
+        if post_t0_best is not None:
+            t0_epoch, status_id, entry = post_t0_best
+            result_val = _LL2_STATUS_TO_RESULT.get(status_id, -1)
+            try:
+                payload = _shape_entry(entry, t0_epoch, result_val)
+                if entry_failures:
+                    payload["_warnings"] = entry_failures
+                return payload
+            except Exception as exc:  # noqa: BLE001
+                entry_failures.append(
+                    f"post-t0 shape failed: {type(exc).__name__}: {exc}"
+                )
+                # Fall through to upcoming-pass on shape failure so
+                # the panel still has *something* fresh on it.
+
+        # ---- Pass B: soonest upcoming (existing flow) ----
+        for idx, entry in enumerate(launches):
+            try:
+                status = entry.get("status") or {}
+                if status.get("id") not in _LL2_UPCOMING_STATUS:
+                    continue
+
+                t0_epoch = _parse_iso_local_epoch(entry.get("net"), tz_name)
+                if t0_epoch is None:
+                    continue
+                if t0_epoch < now - 6 * 3600:
+                    continue
+
+                payload = _shape_entry(entry, t0_epoch, -1)
+                if entry_failures:
+                    payload["_warnings"] = entry_failures
+                return payload
+            except Exception as exc:  # noqa: BLE001 \u2014 per-entry guard
+                entry_failures.append(
+                    f"entry[{idx}]: {type(exc).__name__}: {exc}"
+                )
+                continue
+
+        return {
+            "_error": "no upcoming launches in LL2 window",
+            "_warnings": entry_failures,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
 def _publish(topic, payload_dict):
     """Wrapper around mqtt.publish that logs the outcome and writes a
     success-witness HA state.
@@ -577,9 +1124,10 @@ def _publish(topic, payload_dict):
     # ≤hourly publish is a trivial cost for guaranteed delivery.
     # Matches the qos:1 setting on every YAML mqtt.publish in
     # ../packages/quantum_observatory.yaml.
+    retain = topic in _RETAIN_TOPICS
     service.call(
         "mqtt", "publish",
-        topic=topic, payload=payload, retain=False, qos=1,
+        topic=topic, payload=payload, retain=retain, qos=1,
     )
 
     # ISO-8601 UTC, second precision — matches HA's own datetime
@@ -631,6 +1179,43 @@ def publish_constellation(**_):
     Also exposed as service `pyscript.publish_constellation`."""
     lat, lon = _observer_lat_lon()
     _publish("observatory/constellation", _compute_constellation(lat, lon))
+
+
+@service
+@time_trigger("startup", "cron(*/10 * * * *)")
+def publish_launch(**_):
+    """Next-scheduled rocket launch — every 10 min.
+
+    Cadence rationale: the post-t0 hold window (`_POST_T0_HOLD_S` =
+    30 min) needs to see LL2's status flip from In Flight \u2192 Success
+    /Failure/Partial soon enough to land on the panel before the
+    hold expires and the scene moves on to the next upcoming entry.
+    Hourly was fine when the only payload was the next-upcoming
+    countdown (4 h kFreshMs gave 4\u00d7 headroom); 10 min keeps the
+    result slide accurate to within ~10 min of LL2 publishing the
+    outcome. 6 calls/hour is well under LL2's 15/hr unauthenticated
+    throttle.
+
+    Also exposed as service `pyscript.publish_launch`."""
+    # Resolve HA's configured tz_name here (the @service body has the
+    # pyscript-injected `hass` global) and pass it into the executor.
+    # _compute_launch can't read hass.config itself — @pyscript_executor
+    # functions run as native Python on a worker thread without
+    # pyscript globals.
+    try:
+        tz_name = str(hass.config.time_zone) if hass.config.time_zone else None
+    except Exception:  # noqa: BLE001
+        tz_name = None
+    result = _compute_launch(tz_name)
+    # Drain the side-channel diagnostics _compute_launch could not log
+    # itself (it's @pyscript_executor, so `log` is unavailable there).
+    # Pop them BEFORE handing off to _publish so they don't end up on
+    # the MQTT wire or the witness entity's attributes.
+    warnings = result.pop("_warnings", None) if isinstance(result, dict) else None
+    if warnings:
+        for w in warnings:
+            log.warning(f"observatory_publisher: launch parse: {w}")
+    _publish("observatory/launch", result)
 
 
 @service

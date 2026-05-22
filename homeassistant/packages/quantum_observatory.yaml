@@ -312,33 +312,43 @@ rest:
 
 automation observatory_evening_rotation:
   - id: observatory_evening_rotation
-    alias: "Observatory — rotate evening scenes (sunset → 22:30)"
+    alias: "Observatory — rotate featured scenes (07:00 → 22:30)"
     description: >-
-      Cycles featured scenes every 5 minutes during prime sky-
-      watching hours. Halts before bedtime so the LDR-driven night
-      mode (FR-7.2) takes over cleanly.
+      Cycles featured scenes every 5 minutes throughout the waking
+      day. Halts before bedtime so the LDR-driven night mode
+      (FR-7.2) takes over cleanly; the LDR override is the real
+      night gate (a covered sensor at noon still suppresses
+      everything) — the 22:30 cutoff is belt + braces for the case
+      where the room stays lit past bedtime.
     triggers:
       - trigger: time_pattern
         minutes: "/5"
     conditions:
-      # `sun.sun` is below the horizon (= evening or later) AND we're
-      # before 22:30 local. Daylight hours show the giant clock; the
-      # late-night cutoff keeps us out of LDR-night's way.
-      - condition: state
-        entity_id: sun.sun
-        state: below_horizon
+      # Waking-hours window. No `sun.sun` condition any more — the
+      # cycle now runs during the day too so scenes like
+      # launch_countdown (which is meaningful 24/7, not just at
+      # twilight) get airtime. Firmware-side NIGHT override (LDR,
+      # FR-7.2) is the authoritative dark-room gate; this 07:00 /
+      # 22:30 window just prevents a published-but-overridden
+      # scene from sitting in the latch when the room is dark.
       - condition: template
-        value_template: "{{ now().hour < 22 or (now().hour == 22 and now().minute < 30) }}"
+        value_template: "{{ now().hour >= 7 and (now().hour < 22 or (now().hour == 22 and now().minute < 30)) }}"
     variables:
-      # Walk a 5-step cycle: clock → moon → jupiter → iss → constellation.
-      # `tick` is "minutes since midnight / 5", giving a stable rotation
-      # that doesn't reset on HA restart.
+      # 6-step cycle. launch_countdown joins the rotation because it
+      # carries 24/7-relevant data (next scheduled liftoff is
+      # interesting at 10 a.m. as well as 9 p.m.) and the
+      # launch_imminent auto-switch only fires inside the final 5
+      # min anyway — the rest of the day this rotation slot is the
+      # only way the scene gets airtime. `tick` is "minutes since
+      # midnight / 5", giving a stable rotation that doesn't reset
+      # on HA restart.
       scenes:
         - clock
         - moon_phase
         - jupiter_visibility
         - iss_pass
         - constellation_now
+        - launch_countdown
       tick: "{{ ((now().hour * 60 + now().minute) // 5) % (scenes | length) }}"
       scene_id: "{{ scenes[tick] }}"
     actions:

@@ -12,6 +12,7 @@
 #include "scenes/ir_test_scene.h"
 #include "scenes/iss_pass_scene.h"
 #include "scenes/jupiter_visibility_scene.h"
+#include "scenes/launch_countdown_scene.h"
 #include "scenes/moon_phase_scene.h"
 #include "scenes/night_scene.h"
 #include "scenes/offline_scene.h"
@@ -53,6 +54,7 @@ JupiterVisibilityScene s_jupiter_visibility_scene; // phase 7.3 — Jupiter look
 ConstellationNowScene  s_constellation_now_scene;  // phase 7.4 — dynamic constellation art
 IrTestScene            s_ir_test_scene;            // phase IR.1 — IR receiver POC readout
 FontDemoScene          s_font_demo_scene;          // diagnostic: cycle Adafruit_GFX builtin fonts
+LaunchCountdownScene   s_launch_countdown_scene;   // phase L     — next-scheduled rocket launch T-minus
 
 }  // namespace
 
@@ -80,6 +82,7 @@ Scene* scene_for(scene_state::SceneId id) {
     case SI::JUPITER_VISIBILITY: return &s_jupiter_visibility_scene;
     case SI::CONSTELLATION_NOW:  return &s_constellation_now_scene;
     case SI::IR_TEST:            return &s_ir_test_scene;
+    case SI::LAUNCH_COUNTDOWN:   return &s_launch_countdown_scene;
     case SI::FONT_DEMO:          return &s_font_demo_scene;
   }
   return nullptr;

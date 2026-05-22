@@ -18,6 +18,9 @@ struct State {
   bool     valid       = false;  // true iff last poll() succeeded AND OSF clear
   int32_t  local_epoch = 0;      // local-time epoch seconds at read_at_ms
   uint32_t read_at_ms  = 0;      // millis() sampled around the i2c read
+  int16_t  tz_offset_min = 0;    // minutes east of UTC; updated by
+                                 // set_from_mqtt(). 0 until HA's first
+                                 // observatory/time push.
 };
 
 State      s_state;
@@ -93,6 +96,12 @@ bool set_from_mqtt(int32_t epoch_utc, int16_t tz_offset_min, uint32_t now_ms) {
     return false;
   }
   ds3231::clear_oscillator_stopped();
+  // Stash the offset for callers (sun_position math) that need UTC.
+  // Done under the same lock as poll() so a reader can't see a
+  // mismatched (epoch, offset) pair.
+  mutex_enter_blocking(&s_mutex);
+  s_state.tz_offset_min = tz_offset_min;
+  mutex_exit(&s_mutex);
   poll(now_ms);
   return true;
 }
@@ -103,14 +112,17 @@ Reading now(uint32_t now_ms) {
   bool     valid;
   int32_t  local_epoch;
   uint32_t read_at_ms;
+  int16_t  tz_offset_min;
   mutex_enter_blocking(&s_mutex);
-  valid       = s_state.valid;
-  local_epoch = s_state.local_epoch;
-  read_at_ms  = s_state.read_at_ms;
+  valid         = s_state.valid;
+  local_epoch   = s_state.local_epoch;
+  read_at_ms    = s_state.read_at_ms;
+  tz_offset_min = s_state.tz_offset_min;
   mutex_exit(&s_mutex);
 
   Reading r{};
-  r.valid = valid;
+  r.valid         = valid;
+  r.tz_offset_min = tz_offset_min;
   if (!valid) {
     return r;
   }

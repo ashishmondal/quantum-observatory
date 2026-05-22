@@ -137,10 +137,12 @@ etc.). Lines: `PERSEIDS` / `60/HR` / `RAD NE`. Bonus: animated
 1-pixel streaks across the bg. HA has a static calendar; firmware
 reads RTC date.
 
-### `launch_countdown`
-Next rocket launch from a public API (Rocket Launch Live / The
-Space Devs). `LAUNCH` / `SX FALCON9` / `IN 4H 12M`. High novelty
-for a teenager.
+### ~~`launch_countdown`~~ — **promoted to PLAN.md Phase L**
+Next rocket launch from Rocket Launch Live's free `fdo` tier
+(`https://fdo.rocketlaunch.live/json/launches/next/5`). HA hourly
+poll → `observatory/launch` → on-device T-minus per FR-14.6. See
+[MQTT_TOPICS.md](MQTT_TOPICS.md) `observatory/launch` for the wire
+contract.
 
 ### `satellite_pass` (generalised)
 Same engine as `iss_pass`, swappable target: Hubble / Tiangong /
@@ -216,8 +218,9 @@ If picking 2–3 phases after 7.5 (HA wiring), in priority order:
    almost verbatim; satisfies the 80% astronomy bias.
 2. **`sunrise_sunset` + `twilight_now`** — zero MQTT cost, pure RTC.
    Free wins that keep the dashboard alive when HA is down.
-3. **`meteor_shower`** + **`launch_countdown`** — sticky scenes,
-   high novelty, kid will tell their friends.
+3. **`meteor_shower`** ~~+ **`launch_countdown`**~~ — sticky scenes,
+   high novelty, kid will tell their friends. (`launch_countdown`
+   promoted to PLAN.md Phase L.)
 4. **`exoplanet_count`** + **`solar_activity`** — the astrophysics
    20%. Both have real data feeds, both genuinely change over time
    so the dashboard rewards being looked at.

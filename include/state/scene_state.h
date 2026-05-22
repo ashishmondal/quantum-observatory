@@ -59,6 +59,7 @@ enum class SceneId : uint8_t {
   CONSTELLATION_NOW  = 18,  // dynamic constellation art + name (phase 7.4)
   IR_TEST            = 19,  // IR receiver POC readout (phase IR.1)
   FONT_DEMO          = 20,  // diagnostic: cycle Adafruit_GFX builtin fonts
+  LAUNCH_COUNTDOWN   = 21,  // next-scheduled rocket launch T-minus (phase L)
 };
 
 // One-time mutex init. Call from setup() before either core spins.

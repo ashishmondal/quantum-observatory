@@ -17,10 +17,12 @@
 
 #include "scene_state.h"
 #include "secrets.h"
+#include "config.h"
 #include "ha_discovery.h"
 #include "light_sensor.h"
 #include "iss_state.h"
 #include "jupiter_state.h"
+#include "launch_state.h"
 #include "constellation_state.h"
 #include "moon_state.h"
 #include "prefs.h"
@@ -60,6 +62,7 @@ constexpr const char* kTopicTime    = "observatory/time";    // FR-9.5
 constexpr const char* kTopicMoon    = "observatory/moon";    // phase 7.2 follow-up
 constexpr const char* kTopicIss     = "observatory/iss";     // phase 7.1+ iss data path
 constexpr const char* kTopicJupiter = "observatory/jupiter"; // phase 7.3 jupiter data path
+constexpr const char* kTopicLaunch  = "observatory/launch";  // phase L     next-launch T-minus data path
 constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
 constexpr const char* kTopicTheme   = "observatory/theme";   // FR-15.2 (phase T.4)
 constexpr const char* kTopicPrefsReset = "observatory/prefs/reset"; // FR-18.8 (phase P.5)
@@ -86,6 +89,16 @@ constexpr size_t kStatusJsonCapacity = 512;
 // PubSubClient buffer when added to topic + framing below.
 constexpr size_t kSceneJsonCapacity = 384;
 
+// observatory/launch (FR-14.6) is the only inbound topic that breaks
+// the 384 B mould — the optional `description` field adds up to ~240
+// chars of mission prose on top of the small numeric/string body, so
+// the full payload runs ~500 B on a verbose launch (e.g. Starship).
+// PubSubClient's receive buffer must be ≥ the largest expected
+// payload + topic + ~5 B framing or it silently drops the message
+// (no callback fires, no error), which masks as "device ignored
+// the publish" even though the broker accepted it cleanly.
+constexpr size_t kLaunchJsonCapacity = 640;
+
 // IR-learning capture dump (phase IR.2): up to ~9 buttons × ~55 B
 // each + envelope ≈ 550 B. 768 leaves ~25 % headroom for future
 // fields without crowding NFR-2.1.
@@ -94,9 +107,12 @@ constexpr size_t kDebugPayloadCapacity = 768;
 // PubSubClient inbound/outbound share a single buffer. Must be ≥ the
 // largest payload + topic + a few bytes of MQTT framing. Sized to the
 // largest publish/subscribe payload across the whole topic surface.
-constexpr size_t kPubSubBufferSize =
-    (kSceneJsonCapacity > kDebugPayloadCapacity ? kSceneJsonCapacity
-                                                : kDebugPayloadCapacity) + 64;
+constexpr size_t kPubSubBufferSize = []{
+  size_t m = kSceneJsonCapacity;
+  if (kLaunchJsonCapacity   > m) m = kLaunchJsonCapacity;
+  if (kDebugPayloadCapacity > m) m = kDebugPayloadCapacity;
+  return m + 64;
+}();
 
 WiFiClient   s_tcp;
 PubSubClient s_client(s_tcp);
@@ -125,6 +141,8 @@ uint32_t s_moon_rejects      = 0;
 uint32_t s_iss_msgs          = 0;
 uint32_t s_iss_rejects       = 0;
 uint32_t s_jupiter_msgs      = 0;
+uint32_t s_launch_msgs       = 0;
+uint32_t s_launch_rejects    = 0;
 uint32_t s_jupiter_rejects   = 0;
 uint32_t s_constellation_msgs    = 0;
 uint32_t s_constellation_rejects = 0;
@@ -630,6 +648,235 @@ void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
   Serial.println();
 }
 
+// observatory/launch handler — phase L next-scheduled-rocket-launch
+// T-minus data path (FR-14.6).
+//
+// Wire payload (see docs/MQTT_TOPICS.md and FR-14.6):
+//   {
+//     "t0_local_epoch": 1739481600,            // required, HA-local epoch
+//     "t0_estimate": false,                    // required bool
+//     "t0_window_close_local_epoch": 0,        // optional, 0 = none
+//     "provider": "SX",                        // required ≤ kProviderCap-1
+//     "vehicle":  "FALCON 9",                  // required ≤ kVehicleCap-1
+//     "mission":  "STARLINK 17-42",            // required ≤ kMissionCap-1
+//     "pad_code": "VSF",                       // required ≤ kPadCodeCap-1
+//     "result":   -1                           // optional, -1..2 (default -1)
+//   }
+//
+// Time frame: all epoch fields are HA-local wall seconds since 1970
+// (NOT UTC). HA's pyscript publisher does the UTC→local conversion
+// once at the producer so the firmware needs zero tz state for the
+// countdown — it's a pure subtraction against tod::now().local_epoch.
+//
+// Range / consistency rules (FR-1.3 / FR-1.4 — drop the whole
+// payload on any failure, previous fresh snapshot keeps rendering):
+//   • t0_local_epoch     in [now_local-3600, now_local+8640000]
+//                         (1 h slip .. 100 d ahead). If the RTC is
+//                         not yet trusted, we skip the time-of-day
+//                         bound (only structural validation runs).
+//   • t0_window_close_local_epoch
+//                         in [t0, t0+86400] when present (windows
+//                         beyond 24 h are almost certainly a
+//                         producer bug).
+//   • provider / vehicle / mission / pad_code must be non-empty
+//     and fit the snapshot field with room for a NUL.
+//   • result              must be in [-1, 2] when present.
+void handle_launch(char* buf, unsigned int length, uint32_t now_ms) {
+  ++s_launch_msgs;
+
+  // Buffer sized to comfortably fit the maximum legal payload:
+  // the small numeric fields + four short strings + the ~240-char
+  // description (kDescriptionCap-1). ArduinoJson v7 needs ~1.5x the
+  // serialized size for the DOM; 1024 gives ~640 bytes payload
+  // headroom, well above the worst-case ~480 bytes.
+  ParsedJson<1024> p(buf, length, "launch", s_launch_rejects);
+  if (!p.ok()) {
+    return;
+  }
+  auto& doc = p.doc();
+
+  // --- t0_local_epoch (required) ---
+  if (!doc["t0_local_epoch"].is<long>() && !doc["t0_local_epoch"].is<int>()) {
+    ++s_launch_rejects;
+    Serial.print("[mqtt] launch missing t0_local_epoch payload=");
+    Serial.println(buf);
+    return;
+  }
+  const long t0_in = doc["t0_local_epoch"].as<long>();
+
+  // Bounds check against the live local-epoch when the RTC is
+  // trusted; otherwise we let the scene's freshness gate clip
+  // anything that ages out. Same frame as the wire — no tz math.
+  const tod::Reading r = tod::now(now_ms);
+  if (r.valid) {
+    const long now_local = static_cast<long>(r.local_epoch);
+    if (t0_in < now_local - 3600L || t0_in > now_local + 8640000L) {
+      ++s_launch_rejects;
+      Serial.print("[mqtt] launch t0_local_epoch out-of-range=");
+      Serial.print(t0_in);
+      Serial.print(" now_local=");
+      Serial.println(now_local);
+      return;
+    }
+  }
+  const int32_t t0_local_epoch = static_cast<int32_t>(t0_in);
+
+  // --- t0_estimate (required bool) ---
+  if (!doc["t0_estimate"].is<bool>()) {
+    ++s_launch_rejects;
+    Serial.print("[mqtt] launch missing t0_estimate payload=");
+    Serial.println(buf);
+    return;
+  }
+  const bool t0_estimate = doc["t0_estimate"].as<bool>();
+
+  // --- t0_window_close_local_epoch (optional, default 0) ---
+  int32_t t0_window_close_local_epoch = 0;
+  if (doc["t0_window_close_local_epoch"].is<long>() ||
+      doc["t0_window_close_local_epoch"].is<int>()) {
+    const long w = doc["t0_window_close_local_epoch"].as<long>();
+    if (w != 0) {
+      if (w < t0_in || w > t0_in + 86400L) {
+        ++s_launch_rejects;
+        Serial.print("[mqtt] launch t0_window_close_local_epoch out-of-range=");
+        Serial.print(w);
+        Serial.print(" t0=");
+        Serial.println(t0_in);
+        return;
+      }
+      t0_window_close_local_epoch = static_cast<int32_t>(w);
+    }
+  }
+
+  // --- result (optional, default -1) ---
+  int8_t result = -1;
+  if (doc["result"].is<int>()) {
+    const long rs = doc["result"].as<long>();
+    if (rs < -1 || rs > 2) {
+      ++s_launch_rejects;
+      Serial.print("[mqtt] launch result out-of-range=");
+      Serial.println(rs);
+      return;
+    }
+    result = static_cast<int8_t>(rs);
+  }
+
+  // --- strings (required) ---
+  // Use the `|` default-fallback operator that the scene_id /
+  // theme handlers also use — ArduinoJson v7's `is<const char*>`
+  // probe is finicky against strings backed by the document's
+  // internal pool (it returns false for strings that DID parse
+  // successfully but happen to have been deduped/owned), so the
+  // safer idiom is to pipe through nullptr and check the result.
+  auto fetch_string = [&](const char* key, uint8_t cap,
+                          const char** out_ptr) -> bool {
+    const char* s = doc[key] | static_cast<const char*>(nullptr);
+    if (s == nullptr || s[0] == '\0') {
+      ++s_launch_rejects;
+      Serial.print("[mqtt] launch missing ");
+      Serial.print(key);
+      Serial.print(" payload=");
+      Serial.println(buf);
+      return false;
+    }
+    if (strlen(s) > static_cast<size_t>(cap - 1)) {
+      ++s_launch_rejects;
+      Serial.print("[mqtt] launch ");
+      Serial.print(key);
+      Serial.print(" too long (>");
+      Serial.print(cap - 1);
+      Serial.print(") value=");
+      Serial.println(s);
+      return false;
+    }
+    *out_ptr = s;
+    return true;
+  };
+  const char* provider = nullptr;
+  const char* vehicle  = nullptr;
+  const char* mission  = nullptr;
+  const char* pad_code = nullptr;
+  if (!fetch_string("provider", launch_state::kProviderCap, &provider)) return;
+  if (!fetch_string("vehicle",  launch_state::kVehicleCap,  &vehicle))  return;
+  if (!fetch_string("mission",  launch_state::kMissionCap,  &mission))  return;
+  if (!fetch_string("pad_code", launch_state::kPadCodeCap,  &pad_code)) return;
+
+  // --- description (optional) ---
+  // Cosmetic mission blurb scrolled in the bottom marquee. Optional
+  // and length-checked like the other strings, but absence is fine
+  // (the scene falls back to the provider/vehicle/mission tag line).
+  // HA's pyscript is expected to ASCII-fold + clip to kDescriptionCap-1
+  // before publishing, so anything longer means upstream contract
+  // breach and we reject the whole payload to surface it.
+  const char* description = doc["description"]
+      | static_cast<const char*>(nullptr);
+  if (description != nullptr) {
+    if (strlen(description) > launch_state::kDescriptionCap - 1u) {
+      ++s_launch_rejects;
+      Serial.print("[mqtt] launch description too long (>");
+      Serial.print(launch_state::kDescriptionCap - 1);
+      Serial.print(") len=");
+      Serial.println(strlen(description));
+      return;
+    }
+  } else {
+    description = "";  // copy_clamped() treats this as "clear field"
+  }
+
+  // --- org / pad_country (optional friendlier-name fields) ---
+  // Used by the launch_countdown scene's typewriter info row to
+  // surface the full provider name ("SPACEX") and a country-level
+  // location ("FL, USA" / "NEW ZEALAND") in place of the compact
+  // `provider` / `pad_code` tags. Both are optional — absence is
+  // fine; the scene falls back gracefully on empty strings.
+  auto fetch_optional = [&](const char* key, uint8_t cap,
+                            const char** out_ptr) -> bool {
+    const char* s = doc[key] | static_cast<const char*>(nullptr);
+    if (s == nullptr) {
+      *out_ptr = "";
+      return true;
+    }
+    if (strlen(s) > static_cast<size_t>(cap - 1)) {
+      ++s_launch_rejects;
+      Serial.print("[mqtt] launch ");
+      Serial.print(key);
+      Serial.print(" too long (>");
+      Serial.print(cap - 1);
+      Serial.print(") len=");
+      Serial.println(strlen(s));
+      return false;
+    }
+    *out_ptr = s;
+    return true;
+  };
+  const char* org         = "";
+  const char* pad_country = "";
+  if (!fetch_optional("org",         launch_state::kOrgCap,        &org))         return;
+  if (!fetch_optional("pad_country", launch_state::kPadCountryCap, &pad_country)) return;
+
+  launch_state::set_from_mqtt(t0_local_epoch, t0_estimate,
+                              t0_window_close_local_epoch,
+                              result, provider, vehicle, mission, pad_code,
+                              org, pad_country, description, now_ms);
+  Serial.print("[mqtt] launch applied t0_local=");
+  Serial.print(t0_in);
+  Serial.print(t0_estimate ? " (NET)" : " (CONF)");
+  if (t0_window_close_local_epoch != 0) {
+    Serial.print(" win_close=");
+    Serial.print(t0_window_close_local_epoch);
+  }
+  Serial.print(" ");
+  Serial.print(provider);
+  Serial.print(" ");
+  Serial.print(vehicle);
+  Serial.print(" \"");
+  Serial.print(mission);
+  Serial.print("\" pad=");
+  Serial.print(pad_code);
+  Serial.print(" result=");
+  Serial.println(result);
+}
+
 // observatory/constellation handler — phase 7.4 selector for the
 // constellation_now scene.
 //
@@ -852,6 +1099,10 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
   }
   if (strcmp(topic, kTopicJupiter) == 0) {
     handle_jupiter(buf, length, millis());
+    return;
+  }
+  if (strcmp(topic, kTopicLaunch) == 0) {
+    handle_launch(buf, length, millis());
     return;
   }
   if (strcmp(topic, kTopicConstellation) == 0) {
@@ -1239,7 +1490,7 @@ void poll(uint32_t now_ms) {
         // does not support qos:2; qos:1 is the strongest option here
         // and the right one — duplicates are harmless because every
         // payload handler is idempotent (replace-state semantics).
-        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicConstellation, kTopicTheme, kTopicPrefsReset
+        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicLaunch, kTopicConstellation, kTopicTheme, kTopicPrefsReset
 #ifdef CLOCK_ANIM_TEST
             , kTopicClockAnimTest
 #endif

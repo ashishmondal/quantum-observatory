@@ -36,7 +36,7 @@ Two pieces of HA setup, both one-time:
      --url http://homeassistant.local:8123 \
      --token "$HA_TOKEN"
    ```
-   This installs `homeassistant/packages/quantum_observatory.yaml` (theme + image-tint controls, ISS REST sensor, evening rotation, time-correction automation) and the `homeassistant/pyscript/observatory_publisher.py` ephemeris publisher (Jupiter / Moon / constellation / ISS-pass prediction via `skyfield`).
+   This installs `homeassistant/packages/quantum_observatory.yaml` (theme + image-tint controls, ISS REST sensor, 24 h scene rotation, time-correction automation) and the `homeassistant/pyscript/observatory_publisher.py` ephemeris publisher (Jupiter / Moon / constellation / ISS-pass prediction / next-launch via `skyfield` + Launch Library 2).
 2. **Wait ~10 seconds after the first MQTT connect.** The firmware self-registers as a Home Assistant device via MQTT-Discovery — no manual sensor configuration. You'll see a new **Quantum Observatory** device card under Settings → Devices with 14 entities ([§8 Home Assistant integration](#8-home-assistant-integration)).
 
 ### 2.4 Time
@@ -75,8 +75,9 @@ Scenes are picked by Home Assistant, by the IR remote ▲/▼, or by the firmwar
 | `jupiter_visibility` | Bearing + elevation (`VIS 090x45`), magnitude, distance; `BELOW` when below the horizon; `IN <IAU>` (host constellation) in daylight | HA pyscript every 15 min using `skyfield` + DE421 |
 | `constellation_now` | Real (RA, Dec) star projection of the constellation overhead at your latitude, with brightest stars sized + named; pulsing red `+` cross marks a highlighted star | HA pyscript hourly; falls back to local 30 s rotation if HA is silent |
 | `iss_pass` | When the ISS is visible: `VIS <bearing>x<elevation>` look-angle + `CREW N`. Otherwise a countdown: `VIS IN 3D` / `VIS IN 5H` / `VIS IN 12M` / `VIS SOON` | HA pyscript every 30 s; visibility is the three-way AND of (ISS sunlit) AND (sun ≤ −6° at observer) AND (ISS above horizon) |
+| `launch_countdown` | Bracketed `LNCH` header, six-cell `T-HH:MM:SS` odometer (flips to `T+` for ~30 min after liftoff), typewriter info row cycling mission / org / vehicle / country / liftoff time / NET-or-CONFIRMED / window / outcome, bottom marquee with the mission description | HA pyscript every 10 min from Launch Library 2; auto-switches in (priority 5 sticky) during the final 5 min before T-0 and plays a `C6→E6→G6→C7` fanfare, then per-second ticks T-10…T-1 and a 3-note ignition sting at T-0. Suppressed entirely while night mode is active. |
 
-The evening rotation automation walks `clock → moon_phase → jupiter_visibility → iss_pass → constellation_now` every 5 minutes from sunset until 22:30 local, then steps back so the LDR-driven night mode can take over.
+The day rotation automation walks `clock → moon_phase → jupiter_visibility → iss_pass → constellation_now → launch_countdown` every 5 minutes from 07:00 until 22:30 local, then steps back so the LDR-driven night mode can take over. The LDR override is the authoritative dark-room gate (a covered sensor at noon still suppresses everything); the 07:00 / 22:30 window is belt + braces for the case where the room stays lit past bedtime.
 
 ### 4.2 Safety / status scenes (firmware-driven)
 
@@ -138,7 +139,7 @@ mosquitto_pub -t observatory/scene -m '{"scene_id":"ir_test"}'
 
 | Button | When menu is **closed** | When menu is **open** |
 |---|---|---|
-| **▲ / ▼** | cycle through the operator scene list: `CLOCK → MOON_PHASE → JUPITER_VISIBILITY → CONSTELLATION_NOW → ISS_PASS` | move row up / down |
+| **▲ / ▼** | cycle through the operator scene list: `CLOCK → MOON_PHASE → JUPITER_VISIBILITY → CONSTELLATION_NOW → ISS_PASS → LAUNCH_COUNTDOWN` | move row up / down |
 | **◄ / ►** | cycle themes (wraps); in `font_demo` picks fonts instead | adjust value (toggle, cycle, or tint step) |
 | **OK** | (no global action) | commit / enter category |
 | **Back** | clear any sticky scene and return to `CLOCK` | leave category → ROOT → close menu |

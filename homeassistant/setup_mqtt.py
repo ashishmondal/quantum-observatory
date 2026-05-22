@@ -244,6 +244,11 @@ PYSCRIPT_PUBLISHERS = [
     # value once skyfield + the TLE fetch complete (~5-15 s warm,
     # up to 90 s cold while DE421 downloads).
     ("publish_iss",           "observatory/iss"),
+    # Next-launch publisher (FR-14.6 / phase L). Hourly poll of
+    # RocketLaunch.Live next/5 endpoint with table-driven
+    # provider/pad abbreviation. No skyfield — pure HTTP + dict
+    # shaping. Firmware kFreshMs = 4 h gives 4× headroom.
+    ("publish_launch",        "observatory/launch"),
 ]
 
 

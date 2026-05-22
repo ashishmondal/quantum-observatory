@@ -34,6 +34,9 @@ struct Reading {
   uint8_t  minute;       // 0..59
   uint8_t  second;       // 0..59
   int32_t  local_epoch;  // RTC epoch + millis-smoothing, seconds (debug)
+  int16_t  tz_offset_min;// minutes east of UTC, signed. Set by
+                         // tod::set_from_mqtt(); zero (== UTC) until
+                         // HA's first observatory/time push lands.
 };
 
 // Initialise the mutex. Call once from setup() before any reader spins.

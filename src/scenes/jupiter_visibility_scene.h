@@ -99,7 +99,7 @@ public:
         const tod::Reading r = tod::now(now_ms);
         if (r.valid) {
           const int32_t utc_epoch = r.local_epoch
-              - static_cast<int32_t>(LOCAL_TZ_OFFSET_MIN) * 60;
+              - static_cast<int32_t>(r.tz_offset_min) * 60;
           const sun::Position sp =
               sun::compute(utc_epoch, LATITUDE_DEG, LONGITUDE_DEG);
           if (sp.altitude_deg <= -6.0f) {

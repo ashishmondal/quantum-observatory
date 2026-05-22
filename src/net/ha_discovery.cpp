@@ -37,12 +37,17 @@ struct EntityDecl {
   const char* component;        // "sensor" or "binary_sensor"
   const char* object_id;        // unique within the device (no slashes)
   const char* name;             // human-readable, prefixed by device name in UI
-  const char* value_template;   // Jinja against observatory/status JSON
+  const char* value_template;   // Jinja against `state_topic` JSON
   const char* unit;             // unit_of_measurement; nullptr to omit
   const char* device_class;     // HA device_class; nullptr to omit
   const char* state_class;      // measurement / total_increasing / nullptr
   const char* entity_category;  // "diagnostic" or nullptr
   const char* icon;             // mdi:foo or nullptr
+  const char* state_topic;      // nullptr → defaults to "observatory/status"
+                                // (heartbeat). Set to e.g.
+                                // "observatory/launch" to bind the
+                                // entity to a dedicated topic that
+                                // some other publisher owns.
   // binary_sensor only — payload values for ON/OFF. value_template
   // already emits "ON"/"OFF" strings for our binary sensors, so these
   // can be nullptr to use HA's defaults of "ON"/"OFF".
@@ -57,35 +62,35 @@ constexpr EntityDecl kEntities[] = {
   { "sensor",        "scene",
     "Scene",
     "{{ value_json.scene_id }}",
-    nullptr, nullptr, nullptr, nullptr, "mdi:movie-open" },
+    nullptr, nullptr, nullptr, nullptr, "mdi:movie-open", nullptr },
   { "binary_sensor", "prefs_dirty",
     "Prefs dirty",
     "{{ 'ON' if value_json.prefs_dirty else 'OFF' }}",
-    nullptr, "problem", nullptr, "diagnostic", nullptr },
+    nullptr, "problem", nullptr, "diagnostic", nullptr, nullptr },
 
   // ── render diagnostics ───────────────────────────────────────────
   { "sensor",        "fps",
     "Render FPS",
     "{{ value_json.fps }}",
-    "fps", nullptr, "measurement", "diagnostic", "mdi:speedometer" },
+    "fps", nullptr, "measurement", "diagnostic", "mdi:speedometer", nullptr },
   { "sensor",        "render_slack",
     "Render slack",
     "{{ value_json.render_slack_ms }}",
-    "ms", nullptr, "measurement", "diagnostic", "mdi:timer-sand" },
+    "ms", nullptr, "measurement", "diagnostic", "mdi:timer-sand", nullptr },
 
   // ── system diagnostics ───────────────────────────────────────────
   { "sensor",        "uptime",
     "Uptime",
     "{{ value_json.uptime_s }}",
-    "s", "duration", "total_increasing", "diagnostic", nullptr },
+    "s", "duration", "total_increasing", "diagnostic", nullptr, nullptr },
   { "sensor",        "free_heap",
     "Free heap",
     "{{ value_json.free_heap }}",
-    "B", "data_size", "measurement", "diagnostic", "mdi:memory" },
+    "B", "data_size", "measurement", "diagnostic", "mdi:memory", nullptr },
   { "sensor",        "rssi",
     "Wi-Fi RSSI",
     "{{ value_json.rssi }}",
-    "dBm", "signal_strength", "measurement", "diagnostic", nullptr },
+    "dBm", "signal_strength", "measurement", "diagnostic", nullptr, nullptr },
 
   // ── sensor surface (FR-7) ────────────────────────────────────────
   { "sensor",        "temperature",
@@ -94,33 +99,45 @@ constexpr EntityDecl kEntities[] = {
     // succeeds; the `is none` guard keeps HA from logging template
     // errors during that boot window.
     "{{ value_json.temp_c if value_json.temp_c is not none else 'unknown' }}",
-    "\u00b0C", "temperature", "measurement", nullptr, nullptr },
+    "\u00b0C", "temperature", "measurement", nullptr, nullptr, nullptr },
   { "sensor",        "light_raw",
     "Ambient light (raw)",
     "{{ value_json.light_raw }}",
-    nullptr, nullptr, "measurement", "diagnostic", "mdi:brightness-5" },
+    nullptr, nullptr, "measurement", "diagnostic", "mdi:brightness-5", nullptr },
   { "binary_sensor", "night",
     "Night mode",
     "{{ 'ON' if value_json.night else 'OFF' }}",
-    nullptr, "light", nullptr, nullptr, nullptr },
+    nullptr, "light", nullptr, nullptr, nullptr, nullptr },
   { "binary_sensor", "thermal_hot",
     "Thermal-safe active",
     "{{ 'ON' if value_json.hot else 'OFF' }}",
-    nullptr, "heat", nullptr, "diagnostic", nullptr },
+    nullptr, "heat", nullptr, "diagnostic", nullptr, nullptr },
 
   // ── MQTT link diagnostics ────────────────────────────────────────
   { "sensor",        "mqtt_state",
     "MQTT state",
     "{{ value_json.mqtt_state }}",
-    nullptr, nullptr, nullptr, "diagnostic", "mdi:lan-connect" },
+    nullptr, nullptr, nullptr, "diagnostic", "mdi:lan-connect", nullptr },
   { "sensor",        "mqtt_rc",
     "MQTT last rc",
     "{{ value_json.mqtt_rc }}",
-    nullptr, nullptr, nullptr, "diagnostic", nullptr },
+    nullptr, nullptr, nullptr, "diagnostic", nullptr, nullptr },
   { "sensor",        "mqtt_backoff",
     "MQTT backoff",
     "{{ value_json.mqtt_backoff_s }}",
-    "s", "duration", "measurement", "diagnostic", "mdi:timer-outline" },
+    "s", "duration", "measurement", "diagnostic", "mdi:timer-outline", nullptr },
+
+  // ── next-launch (phase L / FR-14.6) ────────────────────────────
+  // Bound to observatory/launch (not /status) because that payload
+  // is owned by the HA pyscript publisher — the firmware never
+  // re-emits the launch fields. The mission string IS the state;
+  // the rest of the payload sits in entity attributes for use in
+  // dashboards (T-minus templates, etc.).
+  { "sensor",        "next_launch",
+    "Next launch",
+    "{{ value_json.mission | default('') }}",
+    nullptr, nullptr, nullptr, nullptr, "mdi:rocket-launch",
+    "observatory/launch" },
 };
 constexpr size_t kEntityCount = sizeof(kEntities) / sizeof(kEntities[0]);
 
@@ -174,10 +191,13 @@ void publish_all(PubSubClient& client) {
     // for the required core so the format string is auditable in
     // one place; append optionals through append_kv_str.
     char payload[kPayloadCapacity];
+    const char* const state_topic = e.state_topic != nullptr
+                                      ? e.state_topic
+                                      : "observatory/status";
     int written = snprintf(payload, sizeof(payload),
         "{\"name\":\"%s\","
          "\"unique_id\":\"%s_%s\","
-         "\"state_topic\":\"observatory/status\","
+         "\"state_topic\":\"%s\","
          "\"value_template\":\"%s\","
          "\"availability_topic\":\"observatory/availability\","
          "\"payload_available\":\"online\","
@@ -192,6 +212,7 @@ void publish_all(PubSubClient& client) {
          "}",
         e.name,
         MQTT_CLIENT_ID, e.object_id,
+        state_topic,
         e.value_template,
         MQTT_CLIENT_ID,
         FW_VERSION,
