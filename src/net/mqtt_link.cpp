@@ -76,43 +76,43 @@ constexpr const char* kTopicDebug   = "observatory/debug";   // phase IR.2 one-s
 constexpr const char* kTopicClockAnimTest = "observatory/test/clock_anim";
 #endif
 
-// §5.4 example payload is ~85 bytes serialised originally; phase HA.3
-// added seven sensor/diagnostic fields (light_raw, night, temp_c, hot,
-// mqtt_state, mqtt_rc, mqtt_backoff_s) that take the worst-case
-// payload to ~360 B. NFR-2.3 → max + 25% headroom, bumped to 512.
-constexpr size_t kStatusJsonCapacity = 512;
-
-// §5.1 example payload is ~150 bytes. The `overrides.text` field is
-// the largest variable contributor — Director-side truncation caps it
-// at ~14 chars (FR-4.4), so payloads stay well under 256 B in practice.
-// 384 = max documented + ~150% headroom (NFR-2.3) and rounds to a tidy
-// PubSubClient buffer when added to topic + framing below.
-constexpr size_t kSceneJsonCapacity = 384;
-
-// observatory/launch (FR-14.6) is the only inbound topic that breaks
-// the 384 B mould — the optional `description` field adds up to ~240
-// chars of mission prose on top of the small numeric/string body, so
-// the full payload runs ~500 B on a verbose launch (e.g. Starship).
-// PubSubClient's receive buffer must be ≥ the largest expected
-// payload + topic + ~5 B framing or it silently drops the message
-// (no callback fires, no error), which masks as "device ignored
-// the publish" even though the broker accepted it cleanly.
-constexpr size_t kLaunchJsonCapacity = 640;
+// ── Inbound payload caps ──────────────────────────────────────────
+// PRE-REFACTOR FAILURE MODE THAT MOTIVATED THIS BLOCK: the dispatcher
+// used to hold ONE shared buffer sized to kSceneJsonCapacity = 384 B
+// — but observatory/launch is ~570 B (the ~240-char description
+// field dominates). PubSubClient delivered the payload cleanly; the
+// dispatcher's oversize gate truncated it before handle_launch() ever
+// ran; no counter was bumped; the panel sat on a stale snapshot for
+// hours with no signal that anything was wrong. (See git log for the
+// fix commit + the post-mortem entry in docs/CODING_PRACTICES.md
+// "MQTT topic onboarding".)
+//
+// The fix is in three parts:
+//  1. Per-topic max_payload is declared in the Route table (see
+//     kRoutes[] below), colocated with the handler that owns the
+//     wire contract — NOT in a top-level constants block where it
+//     can drift from the handler.
+//  2. The dispatcher buffer is sized to max(kRoutes[*].max_payload)
+//     via a constexpr fold (see kInboundJsonCapacity below). Adding
+//     a topic with a bigger payload automatically grows the buffer
+//     at compile time.
+//  3. Oversize-at-dispatch increments the route's own reject counter
+//     (was previously a silent drop with only a Serial.print).
+//
+// The PubSubClient socket buffer must also be ≥ any payload we
+// expect to receive. kPubSubBufferSize folds the dispatcher cap +
+// the outbound debug-publish cap + framing slack.
+//
+// §5.4 status example is ~85 B originally; phase HA.3 added sensor /
+// diagnostic fields that take the worst-case payload to ~360 B. The
+// route-table additions in this commit (`<topic>_msgs/_rejects` for
+// every topic) added another ~200 B. NFR-2.3 → max + headroom, kept
+// at 768 to leave room for future heartbeat growth.
+constexpr size_t kStatusJsonCapacity = 768;
 
 // IR-learning capture dump (phase IR.2): up to ~9 buttons × ~55 B
-// each + envelope ≈ 550 B. 768 leaves ~25 % headroom for future
-// fields without crowding NFR-2.1.
+// each + envelope ≈ 550 B. 768 leaves ~25 % headroom.
 constexpr size_t kDebugPayloadCapacity = 768;
-
-// PubSubClient inbound/outbound share a single buffer. Must be ≥ the
-// largest payload + topic + a few bytes of MQTT framing. Sized to the
-// largest publish/subscribe payload across the whole topic surface.
-constexpr size_t kPubSubBufferSize = []{
-  size_t m = kSceneJsonCapacity;
-  if (kLaunchJsonCapacity   > m) m = kLaunchJsonCapacity;
-  if (kDebugPayloadCapacity > m) m = kDebugPayloadCapacity;
-  return m + 64;
-}();
 
 WiFiClient   s_tcp;
 PubSubClient s_client(s_tcp);
@@ -130,25 +130,30 @@ uint32_t s_backoff_ms       = kBackoffStartMs;
 volatile int8_t s_last_rc   = 0;
 uint32_t s_last_status_ms   = 0;
 uint32_t s_status_publishes = 0;
-uint32_t s_scene_msgs       = 0;
-uint32_t s_scene_rejects    = 0;
-uint32_t s_threshold_msgs    = 0;  // night + thermal combined
-uint32_t s_threshold_rejects = 0;
-uint32_t s_time_msgs         = 0;
-uint32_t s_time_rejects      = 0;
-uint32_t s_moon_msgs         = 0;
-uint32_t s_moon_rejects      = 0;
-uint32_t s_iss_msgs          = 0;
-uint32_t s_iss_rejects       = 0;
-uint32_t s_jupiter_msgs      = 0;
-uint32_t s_launch_msgs       = 0;
-uint32_t s_launch_rejects    = 0;
-uint32_t s_jupiter_rejects   = 0;
-uint32_t s_constellation_msgs    = 0;
-uint32_t s_constellation_rejects = 0;
-uint32_t s_theme_msgs        = 0;
-uint32_t s_theme_rejects     = 0;
-uint32_t s_clear_msgs        = 0;
+// Per-route inbound counters. The Route table (see kRoutes[] below)
+// holds pointers to these — the dispatcher bumps `*rx` once per
+// delivered payload (incl. oversize), and the handler bumps `*rej`
+// on parse / bounds / cap rejection. Both are emitted on the
+// observatory/status heartbeat as `<short>_msgs` / `<short>_rejects`
+// so a "broker delivered but device dropped" failure is one heartbeat
+// away from being obvious (this is the bug that bit us on phase L —
+// the dispatch buffer was 384 B and observatory/launch is ~570 B,
+// silently truncated with no counter ever moving).
+uint32_t s_scene_msgs           = 0; uint32_t s_scene_rejects         = 0;
+uint32_t s_clear_msgs           = 0; uint32_t s_clear_rejects         = 0;
+uint32_t s_night_msgs           = 0; uint32_t s_night_rejects         = 0;
+uint32_t s_thermal_msgs         = 0; uint32_t s_thermal_rejects       = 0;
+uint32_t s_time_msgs            = 0; uint32_t s_time_rejects          = 0;
+uint32_t s_moon_msgs            = 0; uint32_t s_moon_rejects          = 0;
+uint32_t s_iss_msgs             = 0; uint32_t s_iss_rejects           = 0;
+uint32_t s_jupiter_msgs         = 0; uint32_t s_jupiter_rejects       = 0;
+uint32_t s_launch_msgs          = 0; uint32_t s_launch_rejects        = 0;
+uint32_t s_constellation_msgs   = 0; uint32_t s_constellation_rejects = 0;
+uint32_t s_theme_msgs           = 0; uint32_t s_theme_rejects         = 0;
+uint32_t s_prefs_reset_msgs     = 0; uint32_t s_prefs_reset_rejects   = 0;
+#ifdef CLOCK_ANIM_TEST
+uint32_t s_clock_anim_msgs      = 0; uint32_t s_clock_anim_rejects    = 0;
+#endif
 
 // Cross-core one-shot debug publish buffer (phase IR.2). Single
 // producer (Core 1, e.g. IrTestScene), single consumer (Core 0's
@@ -215,11 +220,15 @@ enum class ThresholdKind : uint8_t { NIGHT, THERMAL };
 // → drop, never crash. Range checks are tighter than the JSON types
 // permit — we'd rather reject `{"threshold":-1}` than feed it to a
 // uint16_t setter. (added in phase 5.5.3)
-void handle_thresholds(ThresholdKind kind, char* buf, unsigned int length) {
-  ++s_threshold_msgs;
+// `reject_counter` is bound by the per-topic route wrappers below
+// so each topic accrues its own reject tally on the wire heartbeat
+// (separate `night_rejects` / `thermal_rejects` rather than a
+// combined `threshold_rejects` blob).
+void handle_thresholds(ThresholdKind kind, char* buf, unsigned int length,
+                       uint32_t& reject_counter) {
   const char* tag = (kind == ThresholdKind::NIGHT) ? "night" : "thermal";
 
-  ParsedJson<128> p(buf, length, tag, s_threshold_rejects);
+  ParsedJson<128> p(buf, length, tag, reject_counter);
   if (!p.ok()) return;
   auto& doc = p.doc();
 
@@ -228,7 +237,7 @@ void handle_thresholds(ThresholdKind kind, char* buf, unsigned int length) {
   // distinguish "missing" from "zero" (zero is a legal, if useless,
   // hysteresis).
   if (!doc["threshold"].is<int>() || !doc["hysteresis"].is<int>()) {
-    ++s_threshold_rejects;
+    ++reject_counter;
     Serial.print("[mqtt] ");
     Serial.print(tag);
     Serial.print(" missing fields payload=");
@@ -244,7 +253,7 @@ void handle_thresholds(ThresholdKind kind, char* buf, unsigned int length) {
     // and chatters at the boundary.
     if (threshold < 0 || threshold > 4095
      || hysteresis <= 0 || hysteresis > 4095) {
-      ++s_threshold_rejects;
+      ++reject_counter;
       Serial.print("[mqtt] night out-of-range threshold=");
       Serial.print(threshold);
       Serial.print(" hysteresis=");
@@ -259,7 +268,7 @@ void handle_thresholds(ThresholdKind kind, char* buf, unsigned int length) {
     // bounds and require positive hysteresis (same reason as above).
     if (threshold < -40 || threshold > 125
      || hysteresis <= 0 || hysteresis > 50) {
-      ++s_threshold_rejects;
+      ++reject_counter;
       Serial.print("[mqtt] thermal out-of-range threshold=");
       Serial.print(threshold);
       Serial.print(" hysteresis=");
@@ -282,7 +291,6 @@ void handle_thresholds(ThresholdKind kind, char* buf, unsigned int length) {
 // chip's two-digit year happy), tz must be in the valid IANA range
 // of −12:00..+14:00.
 void handle_time(char* buf, unsigned int length, uint32_t now_ms) {
-  ++s_time_msgs;
 
   ParsedJson<128> p(buf, length, "time", s_time_rejects);
   if (!p.ok()) return;
@@ -347,8 +355,6 @@ void handle_time(char* buf, unsigned int length, uint32_t now_ms) {
 // derives one if missing). Same FR-1.3 / FR-1.4 discipline as the
 // other inbound handlers: malformed → log + drop, never crash.
 void handle_moon(char* buf, unsigned int length, uint32_t now_ms) {
-  ++s_moon_msgs;
-
   ParsedJson<192> p(buf, length, "moon", s_moon_rejects);
   if (!p.ok()) return;
   auto& doc = p.doc();
@@ -414,8 +420,6 @@ void handle_moon(char* buf, unsigned int length, uint32_t now_ms) {
 // LATITUDE_DEG/LONGITUDE_DEG + sun::compute(). Per FR-1.3 / FR-1.4
 // any malformed/out-of-range payload is logged and dropped.
 void handle_iss(char* buf, unsigned int length, uint32_t now_ms) {
-  ++s_iss_msgs;
-
   ParsedJson<256> p(buf, length, "iss", s_iss_rejects);
   if (!p.ok()) return;
   auto& doc = p.doc();
@@ -529,8 +533,6 @@ void handle_iss(char* buf, unsigned int length, uint32_t now_ms) {
 // Per FR-1.3 / FR-1.4 any malformed/out-of-range payload is logged
 // and dropped; the previous fresh snapshot keeps rendering.
 void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
-  ++s_jupiter_msgs;
-
   ParsedJson<256> p(buf, length, "jupiter", s_jupiter_rejects);
   if (!p.ok()) return;
   auto& doc = p.doc();
@@ -682,8 +684,6 @@ void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
 //     and fit the snapshot field with room for a NUL.
 //   • result              must be in [-1, 2] when present.
 void handle_launch(char* buf, unsigned int length, uint32_t now_ms) {
-  ++s_launch_msgs;
-
   // Buffer sized to comfortably fit the maximum legal payload:
   // the small numeric fields + four short strings + the ~240-char
   // description (kDescriptionCap-1). ArduinoJson v7 needs ~1.5x the
@@ -898,8 +898,6 @@ void handle_launch(char* buf, unsigned int length, uint32_t now_ms) {
 // the scene keeps using the previous fresh selector or rotates
 // locally if none.
 void handle_constellation(char* buf, unsigned int length, uint32_t now_ms) {
-  ++s_constellation_msgs;
-
   ParsedJson<128> p(buf, length, "constellation", s_constellation_rejects);
   if (!p.ok()) return;
   auto& doc = p.doc();
@@ -962,9 +960,7 @@ void handle_constellation(char* buf, unsigned int length, uint32_t now_ms) {
 // mark the prefs cache dirty. Per FR-15.4 the swap is next-frame,
 // no scene re-init. Per FR-18.3 / FR-15.2 each change is persisted
 // via the wear-protected writeback so it survives a power cycle.
-void handle_theme(char* buf, unsigned int length) {
-  ++s_theme_msgs;
-
+void handle_theme(char* buf, unsigned int length, uint32_t /*now_ms*/) {
   ParsedJson<96> p(buf, length, "theme", s_theme_rejects);
   if (!p.ok()) return;
   auto& doc = p.doc();
@@ -1025,7 +1021,7 @@ void handle_theme(char* buf, unsigned int length) {
 // the next frame and resets the byte. Out-of-range / unknown kinds
 // are dropped silently — same discipline as the production
 // handlers, no crash on garbage payload.
-void handle_clock_anim_test(char* buf, unsigned int length) {
+void handle_clock_anim_test(char* buf, unsigned int length, uint32_t /*now_ms*/) {
   ParsedJson<96> p(buf, length, "clock_anim_test", s_theme_rejects);
   if (!p.ok()) return;
   auto& doc = p.doc();
@@ -1051,110 +1047,57 @@ void handle_clock_anim_test(char* buf, unsigned int length) {
 }
 #endif
 
-// PubSubClient inbound callback. Runs on Core 0 from inside
-// PubSubClient::loop() (called from poll()) — same thread as the rest
-// of mqtt_link, so no locking needed against our own static state.
-// Validation rules (FR-1.3, FR-1.4): malformed JSON or missing
-// scene_id is logged and dropped; we never crash and never propagate
-// to the renderer. Phase 5.4 wires scene_id → scene_state::request();
-// 5.5.3 added the night/thermal threshold dispatch.
-void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
-  // Common buffer-copy step: every topic we handle is JSON, every
-  // handler wants a NUL-terminated C-string ≤ kSceneJsonCapacity.
-  // Done once here so the per-topic handlers stay focused on
-  // validation/dispatch.
-  if (length >= kSceneJsonCapacity) {
-    Serial.print("[mqtt] oversize topic=");
-    Serial.print(topic);
-    Serial.print(" len=");
-    Serial.println(length);
-    return;
-  }
-  char buf[kSceneJsonCapacity];
-  memcpy(buf, payload, length);
-  buf[length] = '\0';
+// ── Extracted handlers (uniform signature for the Route table) ────
+//
+// `scene`, `clear`, `prefs/reset`, and the night/thermal threshold
+// wrappers used to live inline at the bottom of on_mqtt_message().
+// Pulling them out so every topic dispatches through one mechanism
+// — the kRoutes[] table below — keeps the dispatcher tiny and
+// guarantees the per-topic counters / capacity caps stay in lock-step
+// with the handler they describe. Same return contract as the rest:
+// log + drop on any validation failure, never crash, never propagate
+// to the renderer.
 
-  if (strcmp(topic, kTopicNight) == 0) {
-    handle_thresholds(ThresholdKind::NIGHT, buf, length);
-    return;
-  }
-  if (strcmp(topic, kTopicThermal) == 0) {
-    handle_thresholds(ThresholdKind::THERMAL, buf, length);
-    return;
-  }
-  if (strcmp(topic, kTopicTime) == 0) {
-    // millis() inside the callback is fine — the callback runs from
-    // PubSubClient::loop() on Core 0, the same thread that owns tod's
-    // smoothing baseline.
-    handle_time(buf, length, millis());
-    return;
-  }
-  if (strcmp(topic, kTopicMoon) == 0) {
-    handle_moon(buf, length, millis());
-    return;
-  }
-  if (strcmp(topic, kTopicIss) == 0) {
-    handle_iss(buf, length, millis());
-    return;
-  }
-  if (strcmp(topic, kTopicJupiter) == 0) {
-    handle_jupiter(buf, length, millis());
-    return;
-  }
-  if (strcmp(topic, kTopicLaunch) == 0) {
-    handle_launch(buf, length, millis());
-    return;
-  }
-  if (strcmp(topic, kTopicConstellation) == 0) {
-    handle_constellation(buf, length, millis());
-    return;
-  }
-  if (strcmp(topic, kTopicTheme) == 0) {
-    handle_theme(buf, length);
-    return;
-  }
-  if (strcmp(topic, kTopicPrefsReset) == 0) {
-    // FR-18.8 — destructive escape hatch. Payload is empty by spec
-    // (mirrors clear_sticky); we accept any payload as the trigger
-    // because the topic itself is the gate — anyone publishing here
-    // is intentionally asking for a wipe. prefs::reset() deletes
-    // /prefs.json and disarms the writeback pipeline, then we hand
-    // off to rp2040.reboot() so FR-18.5 boot-restore re-applies
-    // stock defaults. Logged before the reboot so the operator can
-    // tell from serial that the trigger landed.
-    Serial.println("[mqtt] prefs/reset received — wiping and rebooting");
-    prefs::reset();
-    Serial.flush();
-    rp2040.reboot();
-    return;  // unreachable
-  }
-#ifdef CLOCK_ANIM_TEST
-  if (strcmp(topic, kTopicClockAnimTest) == 0) {
-    handle_clock_anim_test(buf, length);
-    return;
-  }
-#endif
-  if (strcmp(topic, kTopicClear) == 0) {
-    // §5.3: payload is empty by spec. Don't validate it — a non-empty
-    // payload is harmless noise and rejecting it would just give the
-    // Director a footgun. clear_sticky() is itself a no-op when no
-    // sticky scene is active (FR-2.2).
-    ++s_clear_msgs;
-    scene_state::clear_sticky();
-    Serial.println("[mqtt] clear_sticky");
-    return;
-  }
-  if (strcmp(topic, kTopicScene) != 0) {
-    return;  // defensive; we only subscribed to the topics above
-  }
-  ++s_scene_msgs;
+void handle_night(char* buf, unsigned int length, uint32_t /*now_ms*/) {
+  handle_thresholds(ThresholdKind::NIGHT, buf, length, s_night_rejects);
+}
 
-  // ParsedJson<kSceneJsonCapacity> bundles the v7 deprecation pragma
-  // (StaticJsonDocument is exactly the static-buffer behaviour we
-  // want — JsonDocument's default allocator uses malloc/free which
-  // violates NFR-2.2 on this hot path) plus the parse-or-reject
-  // boilerplate.
-  ParsedJson<kSceneJsonCapacity> p(buf, length, "scene", s_scene_rejects);
+void handle_thermal(char* buf, unsigned int length, uint32_t /*now_ms*/) {
+  handle_thresholds(ThresholdKind::THERMAL, buf, length, s_thermal_rejects);
+}
+
+void handle_clear(char* /*buf*/, unsigned int /*length*/, uint32_t /*now_ms*/) {
+  // §5.3: payload is empty by spec. Don't validate it — a non-empty
+  // payload is harmless noise and rejecting it would just give the
+  // Director a footgun. clear_sticky() is itself a no-op when no
+  // sticky scene is active (FR-2.2).
+  scene_state::clear_sticky();
+  Serial.println("[mqtt] clear_sticky");
+}
+
+void handle_prefs_reset(char* /*buf*/, unsigned int /*length*/, uint32_t /*now_ms*/) {
+  // FR-18.8 — destructive escape hatch. Payload is empty by spec
+  // (mirrors clear_sticky); we accept any payload as the trigger
+  // because the topic itself is the gate — anyone publishing here
+  // is intentionally asking for a wipe. prefs::reset() deletes
+  // /prefs.json and disarms the writeback pipeline, then we hand
+  // off to rp2040.reboot() so FR-18.5 boot-restore re-applies
+  // stock defaults. Logged before the reboot so the operator can
+  // tell from serial that the trigger landed.
+  Serial.println("[mqtt] prefs/reset received — wiping and rebooting");
+  prefs::reset();
+  Serial.flush();
+  rp2040.reboot();
+  // unreachable
+}
+
+void handle_scene(char* buf, unsigned int length, uint32_t /*now_ms*/) {
+  // ParsedJson<384> bundles the v7 deprecation pragma (StaticJsonDocument
+  // is exactly the static-buffer behaviour we want — JsonDocument's
+  // default allocator uses malloc/free which violates NFR-2.2 on this
+  // hot path) plus the parse-or-reject boilerplate. The 384 DOM size
+  // mirrors the route's max_payload cap (see kRoutes[]).
+  ParsedJson<384> p(buf, length, "scene", s_scene_rejects);
   if (!p.ok()) return;  // FR-1.4: malformed JSON does not interrupt active scene
   auto& doc = p.doc();
 
@@ -1174,8 +1117,7 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
 
   // Phase 5.4: resolve to a SceneId and hand to the cross-core
   // dispatcher. Unknown ids are logged and dropped (FR-1.3) — the
-  // active scene keeps rendering. Phase 6.1 enforces FR-2.1 priority
-  // preemption; Phase 6.2 wires duration/sticky into the lifecycle.
+  // active scene keeps rendering.
   scene_state::SceneId id;
   if (!scene_state::id_from_string(scene_id, &id)) {
     ++s_scene_rejects;
@@ -1223,6 +1165,130 @@ void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
   Serial.print(dur_u16);
   Serial.print(" sticky=");
   Serial.println(sticky ? 1 : 0);
+}
+
+// ── Route table — the single source of truth for inbound topics ───
+//
+// Each row binds one MQTT topic to its handler + its per-topic
+// payload cap + its rx/reject counters. Adding a topic = adding a
+// row; the dispatcher, the subscribe loop, the status heartbeat,
+// and the dispatch-buffer sizing all read from this same table.
+//
+// max_payload notes (NFR-2.3 — max documented + headroom):
+//   * scene        — §5.1, ~150 B body, FR-4.4 caps overrides.text at
+//                    ~14 chars → 384 with 150 % headroom
+//   * launch       — FR-14.6, ~570 B (~240-char description dominates)
+//                    → 768 (THE bug from phase L: was being truncated
+//                    by a 384 B shared buffer, silent drop, no counter)
+//   * moon / iss / jupiter / constellation / time / theme / clear /
+//     prefs/reset  — small numeric / short-string bodies, < 256 B
+//   * night / thermal — 2 ints, < 96 B
+//   * clock_anim_test — dev only, < 96 B
+struct Route {
+  const char* topic;
+  size_t      max_payload;  // upper bound on the JSON payload in bytes;
+                            // dispatcher rejects oversized payloads
+  void (*handler)(char* buf, unsigned int length, uint32_t now_ms);
+  uint32_t*   rx_counter;       // bumped by the dispatcher on every delivery
+  uint32_t*   reject_counter;   // bumped by handler on validation failure
+                                // AND by the dispatcher on oversize
+  const char* short_name;       // emitted in heartbeat as `<short>_msgs/_rejects`
+};
+
+constexpr Route kRoutes[] = {
+  { kTopicScene,         384, handle_scene,         &s_scene_msgs,         &s_scene_rejects,         "scene"        },
+  { kTopicClear,          32, handle_clear,         &s_clear_msgs,         &s_clear_rejects,         "clear"        },
+  { kTopicNight,          96, handle_night,         &s_night_msgs,         &s_night_rejects,         "night"        },
+  { kTopicThermal,        96, handle_thermal,       &s_thermal_msgs,       &s_thermal_rejects,       "thermal"      },
+  { kTopicTime,          128, handle_time,          &s_time_msgs,          &s_time_rejects,          "time"         },
+  { kTopicMoon,          256, handle_moon,          &s_moon_msgs,          &s_moon_rejects,          "moon"         },
+  { kTopicIss,           256, handle_iss,           &s_iss_msgs,           &s_iss_rejects,           "iss"          },
+  { kTopicJupiter,       256, handle_jupiter,       &s_jupiter_msgs,       &s_jupiter_rejects,       "jupiter"      },
+  { kTopicLaunch,        768, handle_launch,        &s_launch_msgs,        &s_launch_rejects,        "launch"       },
+  { kTopicConstellation, 128, handle_constellation, &s_constellation_msgs, &s_constellation_rejects, "constellation"},
+  { kTopicTheme,         128, handle_theme,         &s_theme_msgs,         &s_theme_rejects,         "theme"        },
+  { kTopicPrefsReset,     32, handle_prefs_reset,   &s_prefs_reset_msgs,   &s_prefs_reset_rejects,   "prefs_reset"  },
+#ifdef CLOCK_ANIM_TEST
+  { kTopicClockAnimTest,  96, handle_clock_anim_test, &s_clock_anim_msgs,  &s_clock_anim_rejects,    "clock_anim"   },
+#endif
+};
+
+// Dispatcher buffer size = the largest payload across the whole
+// route table. Constexpr fold so the buffer auto-grows the moment a
+// new (or expanded) route declares a bigger max_payload. This is the
+// invariant that the pre-refactor code violated (shared buffer was
+// hard-coded to scene's cap, not max-over-routes).
+constexpr size_t fold_max_payload() {
+  size_t m = 0;
+  for (const auto& r : kRoutes) if (r.max_payload > m) m = r.max_payload;
+  return m;
+}
+constexpr size_t kInboundJsonCapacity = fold_max_payload();
+
+// PubSubClient inbound/outbound share a single socket buffer; it must
+// be ≥ the largest payload we receive OR publish, plus topic name +
+// ~5 B MQTT framing. +64 covers the worst-case topic length comfortably.
+constexpr size_t kPubSubBufferSize =
+    ((kInboundJsonCapacity > kDebugPayloadCapacity)
+         ? kInboundJsonCapacity : kDebugPayloadCapacity) + 64;
+
+// Belt-and-braces guard: if a future heartbeat addition pushes
+// kStatusJsonCapacity past the socket buffer, the publish would
+// fail silently inside PubSubClient. Trip the build instead.
+static_assert(kStatusJsonCapacity + 64 <= kPubSubBufferSize,
+              "status payload exceeds PubSubClient buffer");
+
+// PubSubClient inbound callback. Runs on Core 0 from inside
+// PubSubClient::loop() (called from poll()) — same thread as the rest
+// of mqtt_link, so no locking needed against our own static state.
+// Validation rules (FR-1.3, FR-1.4): malformed JSON or unknown topic
+// is logged and dropped; we never crash and never propagate to the
+// renderer.
+void on_mqtt_message(char* topic, uint8_t* payload, unsigned int length) {
+  // Find the route for this topic. O(n) over a tiny table — same
+  // cost as the previous strcmp chain.
+  const Route* route = nullptr;
+  for (const auto& r : kRoutes) {
+    if (strcmp(topic, r.topic) == 0) { route = &r; break; }
+  }
+  if (route == nullptr) {
+    return;  // defensive; we only subscribed to topics in kRoutes
+  }
+
+  // Per-route delivery counter — bumped BEFORE the size gate so an
+  // operator watching the heartbeat sees the rx tick even when the
+  // payload turns out to be unusable. Reject counter then captures
+  // the unusable subset.
+  ++*route->rx_counter;
+
+  // Per-route oversize gate. Previously this was a single shared cap
+  // sized to scene only (384 B), which silently truncated launch
+  // (~570 B) — no counter moved, no on-panel signal. Now each topic
+  // declares its own cap (see kRoutes[].max_payload) and an oversize
+  // counts as a reject so the next observatory/status heartbeat
+  // surfaces it.
+  if (length > route->max_payload) {
+    ++*route->reject_counter;
+    Serial.print("[mqtt] oversize topic=");
+    Serial.print(topic);
+    Serial.print(" len=");
+    Serial.print(length);
+    Serial.print(" cap=");
+    Serial.println(route->max_payload);
+    return;
+  }
+
+  // Common buffer-copy step: every topic we handle is JSON, every
+  // handler wants a NUL-terminated C-string. Shared dispatch buffer
+  // is sized to fold_max_payload() over kRoutes so any single payload
+  // that fits its own route's cap fits here too.
+  char buf[kInboundJsonCapacity];
+  memcpy(buf, payload, length);
+  buf[length] = '\0';
+
+  // millis() is fine here — the callback runs from PubSubClient::loop()
+  // on Core 0, the same thread that owns tod's smoothing baseline.
+  route->handler(buf, length, millis());
 }
 
 void log_session_info(const char* event) {
@@ -1359,6 +1425,48 @@ bool publish_status(uint32_t now_ms) {
     doc["mqtt_backoff_s"] = static_cast<uint32_t>(s_backoff_ms / 1000u);
   }
 
+  // Per-topic inbound rx + reject counters — one pair per row in
+  // kRoutes. Renders as `scene_msgs` / `scene_rejects` / `launch_msgs`
+  // / `launch_rejects` / …. Lets an operator without serial-console
+  // access tell `broker delivered, device dropped` (msgs up, rejects
+  // up) from `broker never delivered` (both flat) without uploading
+  // a debug build — the failure mode that hid the phase-L 384 B
+  // dispatch-buffer bug for hours.
+  {
+    char key[40];  // `<short_name>_rejects` ≤ ~24 B; 40 = comfy
+    for (const auto& r : kRoutes) {
+      snprintf(key, sizeof(key), "%s_msgs", r.short_name);
+      doc[key] = *r.rx_counter;
+      snprintf(key, sizeof(key), "%s_rejects", r.short_name);
+      doc[key] = *r.reject_counter;
+    }
+  }
+
+  // Phase L launch context — the live applied snapshot's t0 and the
+  // signed t_minus against the RTC. These are NOT counters (those
+  // are above); they exist so an operator can verify "the device
+  // accepted the new launch and is computing the right T-minus"
+  // without paging through serial. `launch_t0=0` means no snapshot
+  // is held (or it's aged past kFreshMs). `launch_t_minus_s=null`
+  // means we have a snapshot but no RTC reading yet.
+  {
+    launch_state::Snapshot ls;
+    if (launch_state::get(now_ms, &ls) && ls.valid) {
+      doc["launch_t0"] = static_cast<int32_t>(ls.t0_local_epoch);
+      const tod::Reading r = tod::now(now_ms);
+      if (r.valid) {
+        doc["launch_t_minus_s"] =
+            static_cast<int32_t>(ls.t0_local_epoch -
+                                 static_cast<int32_t>(r.local_epoch));
+      } else {
+        doc["launch_t_minus_s"] = nullptr;
+      }
+    } else {
+      doc["launch_t0"]        = 0;
+      doc["launch_t_minus_s"] = nullptr;
+    }
+  }
+
   char payload[kStatusJsonCapacity];
   const size_t n = serializeJson(doc, payload, sizeof(payload));
   if (n == 0 || n >= sizeof(payload)) {
@@ -1490,18 +1598,16 @@ void poll(uint32_t now_ms) {
         // does not support qos:2; qos:1 is the strongest option here
         // and the right one — duplicates are harmless because every
         // payload handler is idempotent (replace-state semantics).
-        const char* const topics[] = { kTopicScene, kTopicClear, kTopicNight, kTopicThermal, kTopicTime, kTopicMoon, kTopicIss, kTopicJupiter, kTopicLaunch, kTopicConstellation, kTopicTheme, kTopicPrefsReset
-#ifdef CLOCK_ANIM_TEST
-            , kTopicClockAnimTest
-#endif
-        };
-        for (const char* t : topics) {
-          if (s_client.subscribe(t, 1)) {
+        // Subscribe to every topic in the route table. Single source
+        // of truth — adding a new route auto-extends the subscribe
+        // set without a parallel edit here.
+        for (const auto& r : kRoutes) {
+          if (s_client.subscribe(r.topic, 1)) {
             Serial.print("[mqtt] sub ");
-            Serial.println(t);
+            Serial.println(r.topic);
           } else {
             Serial.print("[mqtt] sub FAILED ");
-            Serial.println(t);
+            Serial.println(r.topic);
           }
         }
         log_session_info("connected");
@@ -1568,6 +1674,9 @@ uint32_t backoff_ms() {
 }
 
 int8_t last_rc() { return s_last_rc; }
+
+uint32_t launch_rx_count()     { return s_launch_msgs; }
+uint32_t launch_reject_count() { return s_launch_rejects; }
 
 void queue_debug(const char* payload) {
   if (payload == nullptr) return;

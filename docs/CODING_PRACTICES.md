@@ -160,6 +160,38 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md) and [PLAN.md](PLAN.md). These ru
 - One logical change per commit.
 - `secrets.h`, `.pio/`, build artifacts: gitignored.
 
+## 13. MQTT Topic Onboarding
+
+**When adding a new inbound `observatory/*` topic, edit ONLY the
+route table** in `src/net/mqtt_link.cpp` (the `kRoutes[]` array near
+the bottom of the anonymous namespace). One row → handler +
+per-topic payload cap + rx/reject counters + heartbeat short name.
+The dispatcher, the subscribe loop, the heartbeat counters, and the
+shared inbound buffer size all derive from this table — adding a row
+extends every one of them automatically.
+
+**Never** size the dispatch buffer per-topic-by-hand. The hard-learned
+phase-L bug: dispatch buffer was hardcoded to scene's cap (384 B),
+launch payloads were ~570 B, silently truncated before the handler
+ran, no counter ever moved, panel sat on a stale snapshot for hours
+with no signal anything was wrong. Now the buffer is
+`constexpr fold_max_payload()` over the route table; oversize at
+dispatch increments the route's own `reject_counter` so the next
+`observatory/status` heartbeat surfaces it (`<short>_msgs` /
+`<short>_rejects`).
+
+Handler signature is `void(char* buf, unsigned int len, uint32_t now_ms)`
+— uniform across every topic so the table can hold a function-pointer
+column. Handlers that don't need `now_ms` mark it `/*unused*/`. Handlers
+must NOT bump their own `rx_counter`; the dispatcher does that before
+the handler runs (so even an oversize / parse-fail still ticks the rx
+count, which is the right signal to expose on the wire).
+
+When in doubt: the bug class to avoid is "chain of independent size
+decisions with no compile-time linkage and no runtime observability
+on the silent-drop path." Capacity, handler, and counters live
+together in one row, or someone gets bitten.
+
 ---
 
 ## When in doubt

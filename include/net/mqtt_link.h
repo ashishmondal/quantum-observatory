@@ -97,4 +97,15 @@ void queue_debug(const char* payload);
 // onboard_buttons.cpp call sites.
 void publish_button_event(const char* name);
 
+// Inbound-counter accessors for the §5.4 status heartbeat. Phase L
+// debugging — observatory/launch is the largest payload (~480 B) and
+// the easiest one to lose silently (oversize buffer, JSON parse,
+// out-of-range bounds). Surfacing the rx + reject counts on the
+// heartbeat lets an operator without serial-console access tell
+// "publisher fired but device dropped it" (msgs steady, rejects up)
+// from "broker never delivered" (both steady) without uploading a
+// debug build.
+uint32_t launch_rx_count();
+uint32_t launch_reject_count();
+
 }  // namespace mqtt_link
