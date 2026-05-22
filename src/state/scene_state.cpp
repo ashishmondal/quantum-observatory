@@ -314,6 +314,7 @@ constexpr IdMapping kIdMap[] = {
   { "ir_test",            SceneId::IR_TEST            },
   { "font_demo",          SceneId::FONT_DEMO          },
   { "launch_countdown",   SceneId::LAUNCH_COUNTDOWN   },
+  { "spectrum_demo",      SceneId::SPECTRUM_DEMO      },
 };
 }  // namespace
 

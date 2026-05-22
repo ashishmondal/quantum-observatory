@@ -323,6 +323,7 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 - [x] **7.3** `jupiter_visibility` — direction + time
 - [x] **7.4** `constellation_now` — overhead constellation art + name (sticky); HA picks current overhead constellation by date + observer lat/lon. See [FUTURE_SCENES.md](FUTURE_SCENES.md) for the long-tail scene backlog.
 - [x] **7.5** Home Assistant automations & sensors that publish them
+- [ ] **7.6** `spectrum_demo` — visible-spectrum bar + sweeping marker over famous absorption lines; fully offline, procedural `constexpr` gradient (promoted from [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 2)
 
 ---
 

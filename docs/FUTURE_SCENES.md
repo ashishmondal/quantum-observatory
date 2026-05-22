@@ -89,11 +89,12 @@ different object each minute: `PROXIMA / 4Y 3M`,
 `ANDROMEDA / 2.5MY`, `M87 / 53MY`, `CMB / 13.8GY`. Builds intuition
 for cosmic distance.
 
-### `spectrum_demo`
-A 64-pixel-wide spectrum bar (palette LUT system can render this
-beautifully, 380→700 nm gradient) with a moving marker labelled by
-the element causing that absorption line: `HYDROGEN-α 656nm`,
-`SODIUM-D 589nm`, etc. Rotates through a few. Astronomy 101 visual.
+### ~~`spectrum_demo`~~ — **promoted to PLAN.md Phase 7.6**
+A 64-pixel-wide spectrum bar (compile-time `constexpr` gradient,
+380→700 nm) with a marker that sweeps and settles on famous
+absorption lines: `H ALPHA 656NM`, `NA D 589NM`, `CA K 393NM`, etc.
+Fully offline — no MQTT topic, no asset pipeline. Astronomy 101
+visual.
 
 ### `hr_diagram`
 Static `hr.bmp` of the Hertzsprung–Russell scatter, with a single

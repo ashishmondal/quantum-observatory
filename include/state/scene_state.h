@@ -60,6 +60,7 @@ enum class SceneId : uint8_t {
   IR_TEST            = 19,  // IR receiver POC readout (phase IR.1)
   FONT_DEMO          = 20,  // diagnostic: cycle Adafruit_GFX builtin fonts
   LAUNCH_COUNTDOWN   = 21,  // next-scheduled rocket launch T-minus (phase L)
+  SPECTRUM_DEMO      = 22,  // visible-spectrum bar + sweeping absorption-line marker (phase 7.6, offline)
 };
 
 // One-time mutex init. Call from setup() before either core spins.

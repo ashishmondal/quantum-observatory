@@ -759,6 +759,7 @@ diagnostic in `IrTestScene`.
 | `jupiter_visibility` | nebula | direction + magnitude/distance + visibility (or host constellation when above-horizon-but-daylight) | example in §5.1; on-device daylight derivation per FR-14 |
 | `constellation_now` | starfield | constellation art + name | sticky; HA picks current overhead constellation by date + observer lat/lon — see [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 1 |
 | `launch_countdown` | nebula | LNCH header + 6-cell `T-HH:MM:SS` odometer + typewriter info row + description marquee | priority-5 auto-switch in final 5 min before T-0 (suppressed at night); on-device T-minus per FR-14.6; HA polls Launch Library 2 every 10 min (`observatory/launch`) |
+| `spectrum_demo` | (none, scene-local gradient) | [STRM] header + 64-wide 380→700 nm gradient bar + sweeping marker + element name + wavelength | educational Tier-2 backlog scene (FUTURE_SCENES.md); **fully offline** — no MQTT topic, no asset pipeline; gradient is a compile-time `constexpr` PROGMEM table (~128 B flash); rotates an 8-line absorption-line table (Ca-K … O₂-B) with 1.5 s sweep + 5 s settle per line; standard FR-9.2 top-right HH:MM chrome opt-in |
 
 All scenes above (except possibly `boot` during the splash window) carry the standard small clock readout per FR-9.2. All `bg_type` values in this table are subject to FR-15.6 — the actual palette used at render time is whatever `theme::bg_palette_for()` returns for the active theme.
 
