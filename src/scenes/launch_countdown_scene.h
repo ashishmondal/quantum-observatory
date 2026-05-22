@@ -329,24 +329,26 @@ public:
     //
     // Marquee text:
     //   * fresh + description present → mission description (HA-
-    //     normalised + clipped to kDescriptionCap-1 chars) with a
-    //     trailing spacer so the read-out has a clear gap between
-    //     loops.
+    //     normalised + clipped to kDescriptionCap-1 chars).
     //   * fresh + description empty   → "PROV VEHICLE  MISSION @ PAD"
-    //     tag line as the fallback identity, same spacer.
+    //     tag line as the fallback identity.
     //   * stale snapshot              → "AWAITING SCHEDULE" so the
     //     freshness gate is explicit on the panel.
+    //
+    // No trailing pad — paint_marquee() bakes a full PANEL_WIDTH of
+    // off-screen travel into the cycle, which gives a natural blank
+    // gap between loops regardless of text length.
     char marquee[launch_state::kDescriptionCap + 16];
     if (fresh) {
       if (ls.description[0] != '\0') {
-        snprintf(marquee, sizeof(marquee), "%s     ", ls.description);
+        snprintf(marquee, sizeof(marquee), "%s", ls.description);
       } else {
         snprintf(marquee, sizeof(marquee),
-                 "%s %s  %s @ %s     ",
+                 "%s %s  %s @ %s",
                  ls.provider, ls.vehicle, ls.mission, ls.pad_code);
       }
     } else {
-      snprintf(marquee, sizeof(marquee), "AWAITING SCHEDULE     ");
+      snprintf(marquee, sizeof(marquee), "AWAITING SCHEDULE");
     }
     paint_marquee(matrix, marquee, kMarqueeBaseline);
   }
@@ -608,6 +610,19 @@ private:
   // is prose, not data, so it stays visually subordinate to the
   // odometer regardless of which theme is active.
   //
+  // Scroll model: the text enters from the right edge (x = PANEL_WIDTH),
+  // scrolls left exactly one pixel per render call, and is considered
+  // "out" once its tail has crossed the left edge (x + text_w <= 0).
+  // The cycle then restarts from the right with no dead frame between
+  // loops. Cycle length = PANEL_WIDTH + text_w, so:
+  //   * short text (text_w < PANEL_WIDTH) gets a full right-to-left
+  //     sweep rather than "snapping" in place;
+  //   * long text (text_w > PANEL_WIDTH) clears the panel completely
+  //     before re-entering — there is never a stale partial frame on
+  //     screen during the wrap;
+  //   * empty text wipes the band and bails (no spinning counter, no
+  //     phantom cursor advance).
+  //
   // Step cadence note: motion is driven by a per-frame counter
   // (`m_marquee_px`) rather than `now_ms / step`. Wall-clock-divided
   // stepping causes beat-frequency stutter whenever the divisor is
@@ -623,26 +638,28 @@ private:
     // panel bottom so cursor-y at y_baseline=31 sits the glyphs
     // flush with the bottom edge.
     matrix.fillRect(0, kMarqueeBandTop, PANEL_WIDTH, kMarqueeBandH, 0x0000);
-    const int len = static_cast<int>(strlen(msg));
-    if (len == 0) return;
+    const int len = msg ? static_cast<int>(strlen(msg)) : 0;
+    if (len == 0) {
+      // Reset counter so a non-empty message later starts cleanly
+      // from the right edge rather than mid-cycle.
+      m_marquee_px = 0;
+      return;
+    }
     // Swap to TomThumb for this row only. Caller restores nothing
     // because there's nothing painted after the marquee.
     matrix.setFont(&fonts::TomThumbShifted);
     matrix.setTextSize(1);
     const int16_t text_w = static_cast<int16_t>(len * kTomThumbAdvance);
-    // One full scroll cycle = text_w pixels of travel.
-    const int16_t cycle = text_w;  // tail gap is baked into msg (trailing spaces)
+    // Full cycle: enter from x=PANEL_WIDTH, exit at x=-text_w.
+    const int32_t cycle = static_cast<int32_t>(PANEL_WIDTH) + text_w;
     // Advance the persistent scroll counter exactly once per render
     // call. This is the linchpin of smooth motion — see the function
     // header for why time-division stepping stutters.
     m_marquee_px += 1;
-    if (cycle > 0 && m_marquee_px >= cycle) m_marquee_px -= cycle;
-    const int16_t x0 = static_cast<int16_t>(-m_marquee_px);
+    if (m_marquee_px >= cycle) m_marquee_px -= cycle;
+    const int16_t x = static_cast<int16_t>(PANEL_WIDTH - m_marquee_px);
     matrix.setTextColor(theme::ink(theme::Ink::BODY));
-    matrix.setCursor(x0, y_baseline);
-    matrix.print(msg);
-    // Second copy to cover the right edge as the first scrolls off.
-    matrix.setCursor(static_cast<int16_t>(x0 + cycle), y_baseline);
+    matrix.setCursor(x, y_baseline);
     matrix.print(msg);
     // Restore the built-in font so subsequent frames — which paint
     // the header / digits first — don't inherit our font swap.
