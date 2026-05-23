@@ -142,6 +142,19 @@ struct Params {
   // Limb effects (one or the other)
   uint8_t    limb_darken        = 0;      // 0..255 strength (Mars/Mercury)
   uint8_t    limb_brighten      = 0;      // 0..255 (sun corona)
+
+  // Extra orientation knob, kept at the END of the struct so the
+  // positional aggregate-initialisers in kSolarPresets[] (which
+  // pre-date this field and don't name it) stay aligned. New presets
+  // that need a non-zero roll can either append the value as a final
+  // initialiser slot or use designated-init.
+  int8_t     axis_roll_deg      = 0;      // -90..+90; in-screen rotation of
+                                          //   the spin axis (CW positive).
+                                          //   0 = poles at top/bottom of
+                                          //   screen; 90 = poles at right/left.
+                                          //   Rolls bands + spots + caps as
+                                          //   one rigid body; Lambert light
+                                          //   stays fixed in viewer frame.
 };
 
 class ProceduralPlanet {
@@ -248,6 +261,26 @@ inline uint16_t hsv_to_rgb565(uint8_t h, uint8_t s, uint8_t v) {
                                 (b8 >> 3));
 }
 
+// RGB565 blend with 3-bit alpha (a4 in 0..4, 4 = full fg). Used by
+// the LARGE-LOD silhouette antialiasing path — for partial-coverage
+// edge pixels we sample the framebuffer (background already painted
+// by earlier compositor layers) and blend in the planet color by
+// sub-pixel coverage, so the disc edge stops staircasing against
+// the sky / starfield instead of just clipping to the bounding box.
+inline uint16_t blend565_4(uint16_t fg, uint16_t bg, uint8_t a4) {
+  const uint16_t fr = (fg >> 11) & 0x1F;
+  const uint16_t fg6 = (fg >>  5) & 0x3F;
+  const uint16_t fb =  fg        & 0x1F;
+  const uint16_t br = (bg >> 11) & 0x1F;
+  const uint16_t bg6 = (bg >>  5) & 0x3F;
+  const uint16_t bb =  bg        & 0x1F;
+  const uint16_t b4 = static_cast<uint16_t>(4 - a4);
+  const uint16_t rr = (fr  * a4 + br  * b4) >> 2;
+  const uint16_t rg = (fg6 * a4 + bg6 * b4) >> 2;
+  const uint16_t rb = (fb  * a4 + bb  * b4) >> 2;
+  return static_cast<uint16_t>((rr << 11) | (rg << 5) | rb);
+}
+
 // Integer sqrt (inputs ≤ ~900 for r=30).
 inline uint8_t isqrt_u16(uint16_t n) {
   uint16_t r = 0, b = 1u << 14;
@@ -351,10 +384,13 @@ inline constexpr PresetEntry kSolarPresets[] = {
   // caps. The renderer's OCEAN archetype branch reads noise_amp as the
   // continent fraction threshold (255 = no land, 0 = all land) and
   // uses noise_scale as the cell size for chunky continent shapes;
-  // ocean pixels paint from palette[0..3] (blue ramp) and land pixels
-  // from palette[4..7] (green via highlight_hue_shift=-40).
+  // ocean pixels paint from palette[0..3] (blue, base_hue=160 with
+  // V shading) and land pixels from palette[4..7] (green, hue jumps
+  // to base_hue+highlight_hue_shift=80 — the bimodal palette split
+  // in build_palette() keeps land entries fully in the green sextant
+  // rather than letting them ramp through cyan).
   {"earth", {
-    Archetype::OCEAN, 160, 230, 15, 230, -40,  // blue → green ramp
+    Archetype::OCEAN, 160, 230, 15, 230, -80,  // blue ocean → green land
     /*band_freq*/        0,
     /*band_phase*/       0,
     /*band_contrast*/    0,
@@ -371,6 +407,39 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*rotation_speed*/   16,
     /*storm_drift_rate*/ 0,
     /*limb_darken*/      40,
+    /*limb_brighten*/    0,
+  }},
+  // KEPLER-22B — artist-render reference: green ocean world with
+  // warm cream / tan cloud swirls + faint polar caps. Treated as an
+  // OCEAN archetype (same bimodal palette trick as Earth) but with
+  // a green base hue (90) instead of blue, and the "land" half hue-
+  // shifted into the warm cream sextant (90 + (-60) = 30) to read as
+  // cloud bands rather than continents. Sat held moderate (160) so
+  // the cream half doesn't go vivid orange while the ocean half
+  // still reads as saturated green. noise_scale=2 + a higher
+  // threshold (175) gives smaller, sparser cream patches consistent
+  // with the cloud-streak look of the artist render rather than the
+  // chunky continent silhouettes Earth uses. Matched case-insensitively
+  // via planet_strcasecmp so "Kepler-22b", "kepler-22b", and
+  // "KEPLER-22B" all resolve to this preset.
+  {"kepler-22b", {
+    Archetype::OCEAN, 90, 160, 30, 220, -60,  // green ocean → cream clouds
+    /*band_freq*/        0,
+    /*band_phase*/       0,
+    /*band_contrast*/    0,
+    /*noise_scale*/      2,
+    /*noise_amp*/        175,
+    /*polar_cap_extent*/ 25,
+    /*polar_cap_value*/  235,
+    /*spot_count*/       0,
+    {0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},
+    /*ring_count*/       0,
+    {0,0,0},{0,0,0},{0,0,0},
+    /*ring_squash*/      4,
+    /*axial_tilt_deg*/   15,
+    /*rotation_speed*/   12,
+    /*storm_drift_rate*/ 0,
+    /*limb_darken*/      60,
     /*limb_brighten*/    0,
   }},
   // MARS — rust red, prominent N+S white polar caps, mild tilt.
@@ -395,19 +464,28 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*limb_brighten*/    0,
   }},
   // JUPITER — cream/tan bands at correct frequency + anchored GRS.
+  // Wide V envelope (20→250) + strong hue ramp (red-brown belts →
+  // cream-yellow zones via highlight_shift=20) so the bands read as
+  // ALTERNATING WARM STRIPES, not a tan disc with shading. Bands
+  // pushed to 8/hemisphere with max band_contrast so the modulation
+  // dominates the disc visually.
   {"jupiter", {
-    Archetype::GAS_STORMY, 22, 200, 40, 230, 6,
-    /*band_freq*/        6,     // many narrow bands
+    Archetype::GAS_STORMY, 14, 220, 20, 250, 20,  // hue 14→34 across palette
+    /*band_freq*/        8,     // many narrow bands
     /*band_phase*/       0,
-    /*band_contrast*/    220,
-    /*noise_scale*/      0,     // no cratering; gas giant
-    /*noise_amp*/        0,
+    /*band_contrast*/    255,
+    /*noise_scale*/      0,     // no in-band noise — would read as
+    /*noise_amp*/        0,     // discrete drifting blobs competing
+                                // with the GRS, not as turbulence.
     /*polar_cap_extent*/ 0,
     /*polar_cap_value*/  0,
     /*spot_count*/       1,
-    /*spot_lat*/         {-22, 0, 0},  // GRS lat ≈ −22°
+    /*spot_lat*/         {22, 0, 0},   // GRS at +22° in screen-y
+                                       // (renderer convention: +lat
+                                       // = bottom of screen, so this
+                                       // reads as southern hemisphere)
     /*spot_lon*/         {128, 0, 0},
-    /*spot_size*/        {14, 0, 0},
+    /*spot_size*/        {7, 0, 0},    // ~half-angle 13° (true GRS ≈ 15°)
     /*spot_hue*/         {4, 0, 0},    // red
     /*spot_value*/       {180, 0, 0},
     /*ring_count*/       0,
@@ -693,11 +771,29 @@ inline void ProceduralPlanet::seed(const char* name) {
 }
 
 inline void ProceduralPlanet::build_palette() {
+  // OCEAN is bimodal in render(): entries 0..3 paint ocean pixels,
+  // entries 4..7 paint land/cap pixels. A linear hue ramp from
+  // base_hue → base_hue+highlight_hue_shift across all 8 steps drags
+  // the dark-land entries (indices 4..5) only partway toward the
+  // target hue — for Earth that means "land" lands in the cyan/blue-
+  // green region rather than green. Split the ramp instead: hold
+  // base_hue for the ocean half and jump to (base_hue + shift) for
+  // the entire land half, varying only V within each half so the
+  // 2-bit Lambert shade keeps shading both halves.
+  const bool bimodal = (m_params.archetype == Archetype::OCEAN);
   for (int i = 0; i < 8; ++i) {
     const uint8_t v = static_cast<uint8_t>(
         m_params.vmin + (uint16_t(m_params.vmax - m_params.vmin) * i) / 7);
-    const uint8_t h = static_cast<uint8_t>(
-        int(m_params.base_hue) + (int(m_params.highlight_hue_shift) * i) / 7);
+    uint8_t h;
+    if (bimodal) {
+      h = static_cast<uint8_t>(
+          int(m_params.base_hue)
+          + (i >= 4 ? int(m_params.highlight_hue_shift) : 0));
+    } else {
+      h = static_cast<uint8_t>(
+          int(m_params.base_hue)
+          + (int(m_params.highlight_hue_shift) * i) / 7);
+    }
     m_palette[i] = hsv_to_rgb565(h, m_params.sat, v);
   }
 }
@@ -949,6 +1045,16 @@ inline void ProceduralPlanet::render_large(Adafruit_Protomatter& matrix,
   const int16_t st = fp::sin_q8(tilt_a);  // ±256
   const int16_t ct = fp::cos_q8(tilt_a);  // ±256
 
+  // Axis roll sin/cos (Q8.8) — rotates the spin axis in the screen
+  // plane. Applied as a pre-rotation of the per-pixel sampling
+  // coordinate (dx,dy) → (dxr,dyr) so bands / spots / caps roll with
+  // the body. Lambert shading deliberately uses the un-rolled
+  // (dx,dy) so the light stays fixed in viewer frame (the sphere
+  // tilts, not the sun).
+  const uint8_t roll_a = deg_to_byte_angle(m_params.axis_roll_deg);
+  const int16_t sr = fp::sin_q8(roll_a);
+  const int16_t cr = fp::cos_q8(roll_a);
+
   // Spin phase (byte-angle). rotation_speed is Q4 (16 = 1.0×).
   const uint8_t spin_a = static_cast<uint8_t>(
       (uint16_t(time_phase) * m_params.rotation_speed) >> 4);
@@ -1040,12 +1146,53 @@ inline void ProceduralPlanet::render_large(Adafruit_Protomatter& matrix,
   }
 
   // Sphere body.
-  for (int16_t dy = -r_i; dy <= r_i; ++dy) {
+  //
+  // Edge antialiasing: walk a bounding box one pixel wider than the
+  // disc and, for any pixel within ~1 px of the silhouette, count
+  // how many of 4 sub-pixel samples at (dx±¼, dy±¼) land inside the
+  // disc (all arithmetic done in a 4× integer grid so no float).
+  // Fully-inside pixels (d² ≤ (r-1)²) skip the supersample and draw
+  // direct. Edge pixels with partial coverage blend the planet
+  // color into matrix.getPixel(), which holds whatever the earlier
+  // compositor layers (starfield / nebula / etc.) painted under
+  // the planet — so the silhouette softens into the background
+  // instead of staircasing.
+  const int16_t r_outer = static_cast<int16_t>(r_i + 1);
+  const int32_t r_sq_inner = (r_i >= 2)
+      ? int32_t(r_i - 1) * int32_t(r_i - 1)
+      : int32_t(0);
+  const int32_t r4 = int32_t(r_i) << 2;
+  const int32_t r4_sq = r4 * r4;
+  for (int16_t dy = -r_outer; dy <= r_outer; ++dy) {
     const int32_t dy2 = int32_t(dy) * int32_t(dy);
-    for (int16_t dx = -r_i; dx <= r_i; ++dx) {
+    for (int16_t dx = -r_outer; dx <= r_outer; ++dx) {
       const int32_t d2 = int32_t(dx) * int32_t(dx) + dy2;
-      if (d2 > r_sq) continue;
-      const uint8_t z = isqrt_u16(static_cast<uint16_t>(r_sq - d2));
+
+      // Sub-pixel coverage (0..4).
+      uint8_t cov;
+      if (d2 <= r_sq_inner) {
+        cov = 4;
+      } else {
+        const int32_t dx4 = int32_t(dx) << 2;
+        const int32_t dy4 = int32_t(dy) << 2;
+        const int32_t ax = (dx4 - 1) * (dx4 - 1);
+        const int32_t bx = (dx4 + 1) * (dx4 + 1);
+        const int32_t ay = (dy4 - 1) * (dy4 - 1);
+        const int32_t by = (dy4 + 1) * (dy4 + 1);
+        cov = 0;
+        if (ax + ay <= r4_sq) ++cov;
+        if (bx + ay <= r4_sq) ++cov;
+        if (ax + by <= r4_sq) ++cov;
+        if (bx + by <= r4_sq) ++cov;
+        if (cov == 0) continue;
+      }
+
+      // For "outside the disc center but partially covered" pixels,
+      // clamp d² to r² so z (= sqrt(r²-d²)) is exactly 0 — i.e. we
+      // evaluate the body color at the silhouette and let the blend
+      // tail it off.
+      const int32_t d2_eff = (d2 > r_sq) ? r_sq : d2;
+      const uint8_t z = isqrt_u16(static_cast<uint16_t>(r_sq - d2_eff));
 
       // Lambert in viewer frame (light dir baked at (-1,-1,+1)/√3).
       int32_t raw = int32_t(z) - int32_t(dx) - int32_t(dy);
@@ -1053,6 +1200,15 @@ inline void ProceduralPlanet::render_large(Adafruit_Protomatter& matrix,
       uint8_t shade = denom > 0
           ? static_cast<uint8_t>((raw * 255) / denom)
           : 128;
+
+      // Apply axis roll: rotate (dx, dy) by -roll into body sampling
+      // frame. All feature sampling + spot tests below use (dxr,dyr)
+      // so bands / caps / GRS roll rigidly with the spin axis, while
+      // Lambert above keeps the sun fixed in viewer frame.
+      const int16_t dxr = static_cast<int16_t>(
+          (int32_t(dx) * cr + int32_t(dy) * sr) >> 8);
+      const int16_t dyr = static_cast<int16_t>(
+          (-int32_t(dx) * sr + int32_t(dy) * cr) >> 8);
 
       // Limb darkening / brightening: factor by z/r.
       if (m_params.limb_darken > 0) {
@@ -1069,21 +1225,24 @@ inline void ProceduralPlanet::render_large(Adafruit_Protomatter& matrix,
         shade = s > 255 ? 255 : static_cast<uint8_t>(s);
       }
 
-      // Viewer→body rotation around screen-x axis by axial tilt:
-      //   y' = dy*ct - z*st   (de-tilted body y; proxy for sin(lat))
-      //   z' = dy*st + z*ct   (de-tilted body z; needed for body-frame x)
-      const int32_t yp = (int32_t(dy) * ct - int32_t(z) * st) >> 8;
-      const int32_t zp = (int32_t(dy) * st + int32_t(z) * ct) >> 8;
+      // Viewer→body rotation around screen-x axis by axial tilt.
+      // Uses (dxr, dyr) so axis roll carries through to lat/lon
+      // sampling; the result rolls bands + caps + GRS rigidly with
+      // the spin axis while Lambert above stays in viewer frame.
+      //   y' = dyr*ct - z*st   (de-tilted body y; proxy for sin(lat))
+      //   z' = dyr*st + z*ct   (de-tilted body z; needed for body-frame x)
+      const int32_t yp = (int32_t(dyr) * ct - int32_t(z) * st) >> 8;
+      const int32_t zp = (int32_t(dyr) * st + int32_t(z) * ct) >> 8;
 
-      // Spin: rotate (dx, zp) around body Y axis by spin_a. This gives
+      // Spin: rotate (dxr, zp) around body Y axis by spin_a. This gives
       // a body-frame "longitude index" that's anchored to the planet,
       // so continents stay put on the body and sweep through the view
       // as the planet rotates (rather than crawling sideways across).
-      //   xs = dx*cos(spin) + zp*sin(spin)
+      //   xs = dxr*cos(spin) + zp*sin(spin)
       // (zs not used — we hash on (yp, xs).)
       const int16_t cs = fp::cos_q8(spin_a);
       const int16_t ss = fp::sin_q8(spin_a);
-      const int32_t xs = (int32_t(dx) * cs + zp * ss) >> 8;
+      const int32_t xs = (int32_t(dxr) * cs + zp * ss) >> 8;
 
       uint8_t feature = 128;
       bool    is_land = false;   // OCEAN continent flag
@@ -1155,30 +1314,54 @@ inline void ProceduralPlanet::render_large(Adafruit_Protomatter& matrix,
             ? static_cast<uint8_t>(4u + shade2)
             : shade2;
       } else {
-        const uint16_t combined = (uint16_t(shade) * 3 + uint16_t(feature)) >> 2;
+        // Albedo modulation: treat `feature` (band tri-wave + noise
+        // blend, 0..255) as a physical albedo multiplier on the
+        // Lambert shade rather than a co-equal averand. A dark mare
+        // or dark band stays dark even where the light hits it
+        // square-on, which is what gives the Moon visible craters
+        // and Jupiter readable stripes. Floor at 64 keeps the
+        // darkest patch from collapsing to pure black (any lit
+        // pixel is at least ~1/4 of Lambert).
+        const uint16_t albedo =
+            64u + ((uint16_t(feature) * 191u) >> 8);          // 64..255
+        const uint16_t combined = (uint16_t(shade) * albedo) >> 8;
         pal_idx = static_cast<uint8_t>(combined >> 5) & 0x7;
       }
       uint16_t col = m_palette[pal_idx & 0x7];
 
       // Spot test — dot product against precomputed viewer-frame
       // unit vector × r². Visible iff spot on front face AND angle
-      // within size threshold.
+      // within size threshold. Uses (dxr, dyr) so spots roll with
+      // the body (axis_roll_deg).
       for (int i = 0; i < m_params.spot_count; ++i) {
         if (!spots[i].visible) continue;
-        // Pixel viewer-frame unit vector × r = (dx, dy, z).
+        // Pixel viewer-frame unit vector × r = (dxr, dyr, z).
         // Spot vector × 256 = (sx, sy, sz). Dot / (r * 256) ≈ cos(angle).
-        const int32_t dot = (int32_t(dx) * spots[i].sx
-                           + int32_t(dy) * spots[i].sy
-                           + int32_t(z)  * spots[i].sz);
+        const int32_t dot = (int32_t(dxr) * spots[i].sx
+                           + int32_t(dyr) * spots[i].sy
+                           + int32_t(z)   * spots[i].sz);
         // Threshold: cos(angle) > (1 - size/64). dot > r*256*(1-size/64).
         const int32_t cos_thresh =
             int32_t(r_i) * 256 - (int32_t(r_i) * 256 * spots[i].size) / 64;
         if (dot > cos_thresh) {
-          col = hsv_to_rgb565(spots[i].hue, m_params.sat, spots[i].value);
+          // Shade the spot by the same Lambert term as the body so
+          // it integrates as a feature on the sphere instead of a
+          // flat colored sticker (the "Death Star superlaser dish"
+          // failure mode). Same albedo-multiplier floor as the body
+          // path: dark spots stay dark on the lit side.
+          const uint16_t spot_lit =
+              (uint16_t(shade) * uint16_t(spots[i].value)) >> 8;
+          col = hsv_to_rgb565(spots[i].hue, m_params.sat,
+                              static_cast<uint8_t>(spot_lit));
         }
       }
 
-      matrix.drawPixel(cx + dx, cy + dy, col);
+      if (cov == 4) {
+        matrix.drawPixel(cx + dx, cy + dy, col);
+      } else {
+        const uint16_t bg = matrix.getPixel(cx + dx, cy + dy);
+        matrix.drawPixel(cx + dx, cy + dy, blend565_4(col, bg, cov));
+      }
     }
   }
 
