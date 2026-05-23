@@ -340,10 +340,12 @@ class PlanetsScene : public Scene {
   //
   // Standard math angle convention (CCW from east, uint8_t units
   // 0..255 = full turn).
-  // Rx widened 1.5× (30 → 45) so the front-pass sweep crosses more
-  // of the panel before parking; cx pulled left to keep the eastern
-  // park spot at ≈ (50, 16) (cx + Rx → 5 + 45).
-  static constexpr int16_t kOrbitCx =  5;
+  // Rx widened 1.5× (30 → 45) so the front-pass sweep crosses most
+  // of the panel before parking. cx tuned so the eastern park spot
+  // (cx + Rx) sits at x = 46 — with kParkedRadius=15 the right edge
+  // of the parked disc lands at x = 61, leaving a 2 px margin from
+  // the 64-wide panel so the body doesn't clip on the right.
+  static constexpr int16_t kOrbitCx =  1;
   static constexpr int16_t kOrbitCy = 16;
   static constexpr int16_t kOrbitRx = 45;
   static constexpr int16_t kOrbitRy = 14;

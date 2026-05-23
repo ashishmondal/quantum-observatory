@@ -408,6 +408,7 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*storm_drift_rate*/ 0,
     /*limb_darken*/      40,
     /*limb_brighten*/    0,
+    /*axis_roll_deg*/    23,    // polar caps tilt with axis (real 23.4°)
   }},
   // KEPLER-22B — artist-render reference: green ocean world with
   // warm cream / tan cloud swirls + faint polar caps. Treated as an
@@ -441,6 +442,7 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*storm_drift_rate*/ 0,
     /*limb_darken*/      60,
     /*limb_brighten*/    0,
+    /*axis_roll_deg*/    15,    // polar caps + cloud streaks tilt with axis
   }},
   // MARS — rust red, prominent N+S white polar caps, mild tilt.
   {"mars", {
@@ -462,6 +464,7 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*storm_drift_rate*/ 0,
     /*limb_darken*/      80,
     /*limb_brighten*/    0,
+    /*axis_roll_deg*/    25,    // polar caps tilt with axis (real 25.2°)
   }},
   // JUPITER — cream/tan bands at correct frequency + anchored GRS.
   // Wide V envelope (20→250) + strong hue ramp (red-brown belts →
@@ -496,6 +499,7 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*storm_drift_rate*/ 3,     // GRS drifts vs bands
     /*limb_darken*/      30,
     /*limb_brighten*/    0,
+    /*axis_roll_deg*/    3,     // bands + GRS lean with axis (real 3.1°)
   }},
   // SATURN — pale tan bands, 3-ring system with Cassini gap, tilt 27°.
   {"saturn", {
@@ -520,6 +524,7 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*storm_drift_rate*/ 0,
     /*limb_darken*/      30,
     /*limb_brighten*/    0,
+    /*axis_roll_deg*/    27,    // iconic Saturn: rings + bands rotate with axis
   }},
   // URANUS — pale cyan, faint bands, dramatic 98° axial tilt, thin ring.
   {"uranus", {
@@ -538,11 +543,19 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*ring_outer*/       {30, 0, 0},
     /*ring_brightness*/  {3, 0, 0},
     /*ring_squash*/      14,    // nearly edge-on from rotated view
-    /*axial_tilt_deg*/   82,    // 98° wraps; we encode as 82 toward viewer
+    /*axial_tilt_deg*/   82,    // 97.8° obliquity → pole 82° from orbit
+                                // normal; the renderer's int8_t range
+                                // tops out at 90 so we encode it as
+                                // tipped 82° (sign is visually moot:
+                                // the body is featureless and the
+                                // lit-hemisphere shading is symmetric).
     /*rotation_speed*/   16,
     /*storm_drift_rate*/ 0,
     /*limb_darken*/      40,
     /*limb_brighten*/    0,
+    /*axis_roll_deg*/    82,    // rings sit nearly VERTICAL on the panel
+                                // — the famous "Uranus is lying on its
+                                // side" silhouette.
   }},
   // NEPTUNE — deep cobalt-blue banded gas giant + 1 dark storm spot.
   {"neptune", {
@@ -568,8 +581,11 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*storm_drift_rate*/ 5,
     /*limb_darken*/      40,
     /*limb_brighten*/    0,
+    /*axis_roll_deg*/    28,    // bands + GDS lean with axis (real 28.3°)
   }},
-  // PLUTO — small mottled tan-grey rocky dwarf.
+  // PLUTO — small mottled tan-grey rocky dwarf, retrograde and tipped
+  // over (real obliquity 122.5°). Encoded as 58 = 180 − 122 so the
+  // "tipped-away" convention puts the visible pole nearly on the limb.
   {"pluto", {
     Archetype::ROCKY, 20, 100, 30, 210, 0,
     /*band_freq*/        0, 0, 0,
@@ -582,11 +598,13 @@ inline constexpr PresetEntry kSolarPresets[] = {
     /*ring_count*/       0,
     {0,0,0},{0,0,0},{0,0,0},
     /*ring_squash*/      4,
-    /*axial_tilt_deg*/   0,
+    /*axial_tilt_deg*/   58,    // 122.5° obliquity, encoded as 180-122
     /*rotation_speed*/   8,
     /*storm_drift_rate*/ 0,
     /*limb_darken*/      80,
     /*limb_brighten*/    0,
+    /*axis_roll_deg*/    58,    // polar caps appear near the limb,
+                                // not at the top/bottom of the disc.
   }},
   // SUN — bright yellow-orange granulation, anti-limb-darken (corona-ish).
   {"sun", {
@@ -1109,6 +1127,16 @@ inline void ProceduralPlanet::render_large(Adafruit_Protomatter& matrix,
   // Rings — first pass: back half (behind body). Render multi-ring
   // outline by walking each ring's x extent and finding the ellipse
   // y. Brightness modulated per-frame by cell_noise for shimmer.
+  //
+  // After computing the (x_flat, y_flat) point on the un-rotated
+  // ring ellipse we rotate it into screen space by axis_roll_deg
+  // (the sr/ct — actually sr/cr — sin/cos pair precomputed above).
+  // This is what makes Saturn's rings actually look TILTED rather
+  // than always sitting as a perfectly horizontal band; the polar
+  // axis is in the screen plane at angle axis_roll_deg, the ring
+  // plane is perpendicular to it, so its visible major axis rotates
+  // by the same angle. Depth ordering (back vs front half) is
+  // unchanged — screen-plane rotation doesn't move pixels in z.
   for (int i = 0; i < m_params.ring_count; ++i) {
     if (m_params.ring_outer[i] <= 16) continue;  // ring fits inside body
     const int16_t rx_outer = (int16_t(r) * m_params.ring_outer[i]) >> 4;
@@ -1137,10 +1165,16 @@ inline void ProceduralPlanet::render_large(Adafruit_Protomatter& matrix,
       if (shim > 200 && pal_idx < 7) pal_idx++;
       else if (shim < 50 && pal_idx > 0) pal_idx--;
       const uint16_t col = m_palette[pal_idx & 0x7];
-      // Back-half = upper arc (y < 0 in screen). Two pixels per x:
-      // the outer ring edge and (if inside the ring band) interior.
+      // Back-half = upper arc (y < 0 in unrotated ring frame). Two
+      // pixels per x: the outer ring edge and (if inside the ring
+      // band) interior. Rotate each (x, y_flat) into screen space
+      // by axis_roll_deg before plotting.
       for (int16_t y = -yo; y <= -yi; ++y) {
-        matrix.drawPixel(cx + x, cy + y, col);
+        const int16_t sx = static_cast<int16_t>(
+            (int32_t(x) * cr - int32_t(y) * sr) >> 8);
+        const int16_t sy = static_cast<int16_t>(
+            (int32_t(x) * sr + int32_t(y) * cr) >> 8);
+        matrix.drawPixel(cx + sx, cy + sy, col);
       }
     }
   }
@@ -1365,7 +1399,8 @@ inline void ProceduralPlanet::render_large(Adafruit_Protomatter& matrix,
     }
   }
 
-  // Rings — second pass: front half (in front of body).
+  // Rings — second pass: front half (in front of body). Same screen-
+  // plane axis_roll_deg rotation as the back pass.
   for (int i = 0; i < m_params.ring_count; ++i) {
     if (m_params.ring_outer[i] <= 16) continue;
     const int16_t rx_outer = (int16_t(r) * m_params.ring_outer[i]) >> 4;
@@ -1392,7 +1427,11 @@ inline void ProceduralPlanet::render_large(Adafruit_Protomatter& matrix,
       else if (shim < 50 && pal_idx > 0) pal_idx--;
       const uint16_t col = m_palette[pal_idx & 0x7];
       for (int16_t y = yi; y <= yo; ++y) {
-        matrix.drawPixel(cx + x, cy + y, col);
+        const int16_t sx = static_cast<int16_t>(
+            (int32_t(x) * cr - int32_t(y) * sr) >> 8);
+        const int16_t sy = static_cast<int16_t>(
+            (int32_t(x) * sr + int32_t(y) * cr) >> 8);
+        matrix.drawPixel(cx + sx, cy + sy, col);
       }
     }
   }
