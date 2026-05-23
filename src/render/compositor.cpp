@@ -12,6 +12,7 @@
 #include "scenes/safety_overlay_layer.h"
 #include "scenes/scene.h"
 #include "scenes/settings_overlay_layer.h"
+#include "input/ir_actions.h"
 
 // ─── Cross-core render telemetry definitions ────────────────────────
 volatile uint32_t g_render_fps             = 0;
@@ -224,6 +225,24 @@ void tick(Adafruit_Protomatter& matrix, uint32_t now_ms) {
   }
 
   if (g_current_scene == nullptr) return;
+
+  // Scene-focus key dispatch (cross-core from ir_actions.cpp on Core 0).
+  // Edge-detect by counter change so a key that arrives exactly once is
+  // delivered exactly once, and a stale event value (e.g. the boot 0
+  // sentinel) is never dispatched. Placed AFTER the swap branch so a
+  // press in the same frame as a swap is delivered to the NEW scene
+  // (acceptable — the user pressed OK to focus a scene, and any
+  // navigation key should hit the now-visible scene). Cheap when idle:
+  // one volatile read + compare.
+  {
+    static uint32_t s_last_key_event = 0;
+    const uint32_t cur = g_scene_key_event;
+    if (cur != 0u && cur != s_last_key_event) {
+      s_last_key_event = cur;
+      const SceneKey key = static_cast<SceneKey>(cur & 0xFFu);
+      g_current_scene->on_key(key, now_ms);
+    }
+  }
 
   // Frame cap: skip this iteration if we're ahead of schedule.
   // Wrap-safe (NFR §2 time math).

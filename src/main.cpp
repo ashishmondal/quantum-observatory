@@ -312,6 +312,12 @@ void loop() {
   // pending; counters surface in the 1 Hz [ir] log line below.
   ir_remote::poll();
 
+  // Scene-focus reconciler (FR-19+/intra-scene nav). Releases focus
+  // if an external party (MQTT Director, ISS auto-switch, sticky
+  // expiry) swapped the focused scene out from under us. One read +
+  // one compare when no focus is held — effectively free.
+  ir_actions::tick(now_ms);
+
   // FR-11.1 — on-board MENU button debounce + edge dispatch. Cheap
   // (one digitalRead) when no transition is pending.
   onboard_buttons::tick(now_ms);

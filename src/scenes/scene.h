@@ -18,6 +18,22 @@
 
 class Adafruit_Protomatter;
 
+// Intra-scene navigation key, delivered to the focused scene via
+// Scene::on_key() (see below). The IR remote's BACK / HOME keys are
+// NEVER forwarded — they always exit focus + return to CLOCK at the
+// global dispatch layer (src/input/ir_actions.cpp). LEFT / RIGHT lose
+// their theme-cycle meaning while a scene is focused; UP / DOWN lose
+// their scene-cycle meaning. OK enters focus the first time; subsequent
+// presses are forwarded as SceneKey::OK so a scene can step through
+// info panels etc.
+enum class SceneKey : uint8_t {
+  OK    = 0,
+  UP    = 1,
+  DOWN  = 2,
+  LEFT  = 3,
+  RIGHT = 4,
+};
+
 class Scene {
 public:
   virtual ~Scene() = default;
@@ -70,4 +86,24 @@ public:
   //   - Default = no-op. Scenes that have nothing to amortize leave
   //     it alone; the compositor still calls it harmlessly.
   virtual void prepare(uint32_t /*now_ms*/) {}
+
+  // Intra-scene input hook. Called on Core 1 by the compositor when
+  // the IR remote dispatch layer has put this scene in "focused" mode
+  // (operator pressed OK on this scene) and a navigation key arrives.
+  //
+  // Contract:
+  //   - Runs on Core 1. Must not block, allocate, or call
+  //     matrix.show() — same discipline as render().
+  //   - now_ms is the millis() snapshot captured at frame start; use
+  //     deltas (wrap-safe), never absolute compares (CODING_PRACTICES §2).
+  //   - May safely mutate the scene's own state; the next render()
+  //     will pick the change up.
+  //   - Default = no-op. Scenes opt in by overriding. Even unhandled
+  //     keys are intentionally swallowed (the scene is focused, so the
+  //     global UP/DOWN scene cycle / LEFT/RIGHT theme cycle must NOT
+  //     run — that's the whole point of focus mode).
+  //   - BACK / HOME are NEVER delivered here; the dispatch layer
+  //     exits focus on those keys and they fall through to the
+  //     existing clear_sticky + return-to-CLOCK path.
+  virtual void on_key(SceneKey /*key*/, uint32_t /*now_ms*/) {}
 };
