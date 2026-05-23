@@ -17,6 +17,7 @@
 #include "scenes/moon_phase_scene.h"
 #include "scenes/night_scene.h"
 #include "scenes/offline_scene.h"
+#include "scenes/planet_zoo_demo_scene.h"
 #include "scenes/spectrum_demo_scene.h"
 #include "scenes/splash_scene.h"
 #include "scenes/text_demo_scene.h"
@@ -59,6 +60,7 @@ FontDemoScene          s_font_demo_scene;          // diagnostic: cycle Adafruit
 LaunchCountdownScene   s_launch_countdown_scene;   // phase L     — next-scheduled rocket launch T-minus
 SpectrumDemoScene      s_spectrum_demo_scene;      // phase 7.6   — visible-spectrum bar + sweeping absorption-line marker (offline)
 ExoplanetCountScene    s_exoplanet_count_scene;    // phase 7.7   — animated procedural planet + NASA Exoplanet Archive stats
+PlanetZooDemoScene     s_planet_zoo_demo_scene;    // phase 7.7b  — diagnostic: walk every planet_renderer preset across LOD tiers
 
 }  // namespace
 
@@ -89,6 +91,7 @@ Scene* scene_for(scene_state::SceneId id) {
     case SI::LAUNCH_COUNTDOWN:   return &s_launch_countdown_scene;
     case SI::SPECTRUM_DEMO:      return &s_spectrum_demo_scene;
     case SI::EXOPLANET_COUNT:    return &s_exoplanet_count_scene;
+    case SI::PLANET_ZOO_DEMO:    return &s_planet_zoo_demo_scene;
     case SI::FONT_DEMO:          return &s_font_demo_scene;
   }
   return nullptr;

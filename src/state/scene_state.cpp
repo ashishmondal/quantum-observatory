@@ -316,6 +316,7 @@ constexpr IdMapping kIdMap[] = {
   { "launch_countdown",   SceneId::LAUNCH_COUNTDOWN   },
   { "spectrum_demo",      SceneId::SPECTRUM_DEMO      },
   { "exoplanet_count",    SceneId::EXOPLANET_COUNT    },
+  { "planet_zoo_demo",    SceneId::PLANET_ZOO_DEMO    },
 };
 }  // namespace
 

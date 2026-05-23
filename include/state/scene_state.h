@@ -62,6 +62,7 @@ enum class SceneId : uint8_t {
   LAUNCH_COUNTDOWN   = 21,  // next-scheduled rocket launch T-minus (phase L)
   SPECTRUM_DEMO      = 22,  // visible-spectrum bar + sweeping absorption-line marker (phase 7.6, offline)
   EXOPLANET_COUNT    = 23,  // animated procedural planet + NASA Exoplanet Archive stats (phase 7.7)
+  PLANET_ZOO_DEMO    = 24,  // diagnostic: walk every planet_renderer preset @ TINY/SMALL/LARGE LOD (phase 7.7b)
 };
 
 // One-time mutex init. Call from setup() before either core spins.
