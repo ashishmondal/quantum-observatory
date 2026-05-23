@@ -21,7 +21,7 @@ void tick(uint32_t now_ms) {
     static uint32_t s_stress_iters       = 0;
     static uint32_t s_stress_last_log_ms = 0;
     static const char kPayload[] =
-        "{\"scene_id\":\"jupiter_visibility\",\"priority\":3,"
+        "{\"scene_id\":\"planets\",\"priority\":3,"
         "\"duration\":30,\"sticky\":false,"
         "\"overrides\":{\"text\":\"Visible: East @ 9PM\",\"val\":\"78\"}}";
     constexpr size_t kPayloadLen = sizeof(kPayload) - 1;

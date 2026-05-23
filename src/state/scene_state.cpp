@@ -309,7 +309,9 @@ constexpr IdMapping kIdMap[] = {
   { "gfx_test",      SceneId::GFX_TEST      },
   { "iss_pass",      SceneId::ISS_PASS      },
   { "moon_phase",    SceneId::MOON_PHASE    },
-  { "jupiter_visibility", SceneId::JUPITER_VISIBILITY },
+  // "jupiter_visibility" was retired when the scene was generalised
+  // into "planets" — drop the wire id so a stray HA payload fails
+  // the resolver loudly rather than mapping to a dead enum slot.
   { "constellation_now",  SceneId::CONSTELLATION_NOW  },
   { "ir_test",            SceneId::IR_TEST            },
   { "font_demo",          SceneId::FONT_DEMO          },
@@ -317,6 +319,7 @@ constexpr IdMapping kIdMap[] = {
   { "spectrum_demo",      SceneId::SPECTRUM_DEMO      },
   { "exoplanet_count",    SceneId::EXOPLANET_COUNT    },
   { "planet_zoo_demo",    SceneId::PLANET_ZOO_DEMO    },
+  { "planets",            SceneId::PLANETS            },
 };
 }  // namespace
 

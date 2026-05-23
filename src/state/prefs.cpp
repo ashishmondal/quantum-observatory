@@ -11,6 +11,8 @@
 
 #include <string.h>
 
+#include "planet_catalog.h"
+
 namespace prefs {
 
 namespace {
@@ -28,6 +30,7 @@ constexpr Prefs kDefaults = {
     .theme_sound     = true,
     .button_sound    = true,
     .tick_sound_mode = TickSoundMode::MIN,
+    .planet_index    = 0,  // MERCURY — first row of planet_catalog::kBodies[]
 };
 
 // In-RAM cache. Read-mostly: only mutated by Core 0 setters (none
@@ -91,7 +94,8 @@ bool is_known_key(const char* k) {
          strcmp(k, "image_tint_pct") == 0 ||
          strcmp(k, "theme_sound") == 0 ||
          strcmp(k, "button_sound") == 0 ||
-         strcmp(k, "tick_sound_mode") == 0;
+         strcmp(k, "tick_sound_mode") == 0 ||
+         strcmp(k, "planet_index") == 0;
 }
 
 // Parse /prefs.json into the cache + passthrough buffer. Called once
@@ -230,6 +234,24 @@ void load() {
     }
   }
 
+  // v4 — planet_index. Range gate against the catalog upper bound
+  // so a future firmware that shrank the body list doesn't index
+  // past the end. We include planet_catalog.h locally rather than
+  // at file scope to keep the header churn small — this is the
+  // only consumer of kBodyCount in this TU.
+  if (doc.containsKey("planet_index")) {
+    const int v_idx = doc["planet_index"] | -1;
+    if (v_idx >= 0 && v_idx < planet_catalog::kBodyCount) {
+      s_cache.planet_index = static_cast<uint8_t>(v_idx);
+      Serial.print("[prefs] restored planet_index=");
+      Serial.println(v_idx);
+    } else {
+      Serial.print("[prefs] planet_index out of range=");
+      Serial.print(v_idx);
+      Serial.println(" — keeping default 0");
+    }
+  }
+
   // Mirror what we just learned about the on-disk state so the P.3
   // writeback gate can recognise a no-op set (FR-18.4 step 2). We
   // copy s_cache (rather than re-reading individual keys) because
@@ -312,13 +334,15 @@ bool write_atomic(const Prefs& snapshot) {
                          "\"image_tint_pct\":%u,"
                          "\"theme_sound\":%s,"
                          "\"button_sound\":%s,"
-                         "\"tick_sound_mode\":%u%s}",
+                         "\"tick_sound_mode\":%u,"
+                         "\"planet_index\":%u%s}",
                          static_cast<unsigned>(kSchemaVersion),
                          theme_id,
                          static_cast<unsigned>(snapshot.image_tint_pct),
                          snapshot.theme_sound  ? "true" : "false",
                          snapshot.button_sound ? "true" : "false",
                          static_cast<unsigned>(snapshot.tick_sound_mode),
+                         static_cast<unsigned>(snapshot.planet_index),
                          s_passthrough);
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(buf)) {
     Serial.print("[prefs] write FAILED — payload would be ");
@@ -474,6 +498,22 @@ void set_tick_sound_mode(TickSoundMode mode) {
     s_cache.tick_sound_mode = mode;
     s_dirty                 = true;
     s_last_setter_ms        = millis();
+  }
+  mutex_exit(&s_mutex);
+}
+
+void set_planet_index(uint8_t idx) {
+  // Defensive wrap — the scene's init() already does this, but
+  // re-applying here keeps the on-disk value sane in the face of a
+  // future caller (settings overlay, MQTT) that forgets.
+  if (idx >= planet_catalog::kBodyCount) {
+    idx = idx % planet_catalog::kBodyCount;
+  }
+  mutex_enter_blocking(&s_mutex);
+  if (s_cache.planet_index != idx) {
+    s_cache.planet_index = idx;
+    s_dirty              = true;
+    s_last_setter_ms     = millis();
   }
   mutex_exit(&s_mutex);
 }

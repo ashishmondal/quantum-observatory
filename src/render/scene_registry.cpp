@@ -12,12 +12,12 @@
 #include "scenes/giant_clock_scene.h"
 #include "scenes/ir_test_scene.h"
 #include "scenes/iss_pass_scene.h"
-#include "scenes/jupiter_visibility_scene.h"
 #include "scenes/launch_countdown_scene.h"
 #include "scenes/moon_phase_scene.h"
 #include "scenes/night_scene.h"
 #include "scenes/offline_scene.h"
 #include "scenes/planet_zoo_demo_scene.h"
+#include "scenes/planets_scene.h"
 #include "scenes/spectrum_demo_scene.h"
 #include "scenes/splash_scene.h"
 #include "scenes/text_demo_scene.h"
@@ -53,7 +53,7 @@ ThermalSafeScene s_thermal_safe_scene;         // phase 5.5.2 — DS3231-trigger
 GfxTestScene     s_gfx_test_scene;             // graphics smoke-test (FPS, palette cycle)
 IssPassScene     s_iss_pass_scene;             // phase 7.1 — "ISS NOW" callout
 MoonPhaseScene   s_moon_phase_scene;           // phase 7.2 — sticky moon disc + phase
-JupiterVisibilityScene s_jupiter_visibility_scene; // phase 7.3 — Jupiter look-angles
+// JupiterVisibilityScene retired — generalised into PlanetsScene below.
 ConstellationNowScene  s_constellation_now_scene;  // phase 7.4 — dynamic constellation art
 IrTestScene            s_ir_test_scene;            // phase IR.1 — IR receiver POC readout
 FontDemoScene          s_font_demo_scene;          // diagnostic: cycle Adafruit_GFX builtin fonts
@@ -61,6 +61,7 @@ LaunchCountdownScene   s_launch_countdown_scene;   // phase L     — next-sched
 SpectrumDemoScene      s_spectrum_demo_scene;      // phase 7.6   — visible-spectrum bar + sweeping absorption-line marker (offline)
 ExoplanetCountScene    s_exoplanet_count_scene;    // phase 7.7   — animated procedural planet + NASA Exoplanet Archive stats
 PlanetZooDemoScene     s_planet_zoo_demo_scene;    // phase 7.7b  — diagnostic: walk every planet_renderer preset across LOD tiers
+PlanetsScene           s_planets_scene;            // generic procedural-planet scene (replaces JUPITER_VISIBILITY)
 
 }  // namespace
 
@@ -85,13 +86,13 @@ Scene* scene_for(scene_state::SceneId id) {
     case SI::GFX_TEST:           return &s_gfx_test_scene;
     case SI::ISS_PASS:           return &s_iss_pass_scene;
     case SI::MOON_PHASE:         return &s_moon_phase_scene;
-    case SI::JUPITER_VISIBILITY: return &s_jupiter_visibility_scene;
     case SI::CONSTELLATION_NOW:  return &s_constellation_now_scene;
     case SI::IR_TEST:            return &s_ir_test_scene;
     case SI::LAUNCH_COUNTDOWN:   return &s_launch_countdown_scene;
     case SI::SPECTRUM_DEMO:      return &s_spectrum_demo_scene;
     case SI::EXOPLANET_COUNT:    return &s_exoplanet_count_scene;
     case SI::PLANET_ZOO_DEMO:    return &s_planet_zoo_demo_scene;
+    case SI::PLANETS:            return &s_planets_scene;
     case SI::FONT_DEMO:          return &s_font_demo_scene;
   }
   return nullptr;

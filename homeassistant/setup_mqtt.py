@@ -49,7 +49,7 @@ Pipeline switches (all default off; any combination is fine):
                            key in authorized_keys.
   --install-publisher      SCP pyscript/observatory_publisher.py +
                            requirements.txt to /config/pyscript/.
-                           Provides real Jupiter / moon /
+                           Provides real planet / moon /
                            constellation data via skyfield. Also
                            greps configuration.yaml for the needed
                            pyscript: block (paste it if missing).
@@ -61,14 +61,14 @@ Pipeline switches (all default off; any combination is fine):
                            by their `id:` (HA derives the actual
                            entity_id from the slugified alias).
                            (Was 6 entities before phase 7.5.1; the
-                           moon/jupiter/constellation YAML stubs
+                           moon/planet/constellation YAML stubs
                            moved to the pyscript publisher.)
   --trigger-all            Force-fire every Observatory automation
                            now (skip_condition=true).
   --verify-published       Read each automation's last_triggered
                            and assert it ran ≤ 60 s ago.
   --verify-publisher       Force-call each pyscript publisher
-                           (jupiter / moon / constellation) and
+                           (planet / moon / constellation) and
                            verify each one actually published by
                            reading the witness state entity
                            `pyscript.observatory_publisher_*` and
@@ -194,7 +194,7 @@ MIN_HA_OS   = (17, 1)        # Home Assistant OS (host); skipped on Container/Co
 # `id` attribute on every automation.* state. Keep this list in sync
 # with the YAML.
 #
-# observatory_jupiter / observatory_moon / observatory_constellation
+# observatory_planet / observatory_moon / observatory_constellation
 # used to live here too; they were superseded by the pyscript
 # publisher (see ../pyscript/observatory_publisher.py) and commented
 # out in the YAML. Re-add them here if you re-enable the YAML stubs.
@@ -215,7 +215,7 @@ HA_PACKAGE_DEST = "/config/packages/quantum_observatory.yaml"
 # Local path to the YAML this script ships with.
 HA_PACKAGE_SRC  = Path(__file__).parent / "packages" / "quantum_observatory.yaml"
 
-# Pyscript publisher (replaces the moon / jupiter / constellation YAML
+# Pyscript publisher (replaces the moon / planet / constellation YAML
 # stubs with real skyfield ephemeris). Both files are SCP'd as a unit
 # to /config/pyscript/ when --install-publisher (or --all) is set.
 HA_PYSCRIPT_DIR_DEST  = "/config/pyscript"
@@ -232,7 +232,7 @@ HA_PYSCRIPT_FILES_SRC = [
 # we grep for is emitted by `_publish()` as:
 #   observatory_publisher: <topic> → <payload>
 PYSCRIPT_PUBLISHERS = [
-    ("publish_jupiter",       "observatory/jupiter"),
+    ("publish_planet",        "observatory/planet"),
     ("publish_moon",          "observatory/moon"),
     ("publish_constellation", "observatory/constellation"),
     # ISS publisher (replaces the YAML observatory_iss automation).
@@ -632,7 +632,7 @@ def check_pyscript(ha: HA) -> bool | None:
 
     Returns True if loaded, False if missing, None if we couldn't
     tell. The publisher (../pyscript/observatory_publisher.py) needs
-    pyscript to run; without it the moon/jupiter/constellation topics
+    pyscript to run; without it the moon/planet/constellation topics
     silently never publish (the YAML stubs that used to cover those
     topics are commented out in the package YAML).
     """
@@ -662,10 +662,10 @@ def check_pyscript(ha: HA) -> bool | None:
     print("         │   hass_is_global: true      # needed for hass.config")
     print("         └──────────────────────────────────────────────────")
     print()
-    print("    Without pyscript the observatory/jupiter, /moon and")
+    print("    Without pyscript the observatory/planet, /moon and")
     print("    /constellation topics will never publish, and those three")
     print("    firmware scenes will fall back to their on-device defaults")
-    print("    (or `WAIT` for jupiter, which has no on-device fallback).")
+    print("    (or `WAIT` for planet, which has no on-device fallback).")
     return False
 
 
@@ -934,7 +934,7 @@ def verify_publisher(ha: HA) -> bool:
     """Force-call each pyscript publisher and confirm it actually published.
 
     Pyscript auto-exposes every top-level `def` as a service in the
-    `pyscript` domain, so we can fire publish_jupiter / _moon /
+    `pyscript` domain, so we can fire publish_planet / _moon /
     _constellation directly — same trick as `automation.trigger` for
     the YAML side.
 
@@ -956,7 +956,7 @@ def verify_publisher(ha: HA) -> bool:
     # snapshot as None — any timestamp counts as progress.
     def _entity_for(topic: str) -> str:
         # Mirror the slug rule in pyscript/observatory_publisher.py
-        # _publish(): "observatory/jupiter" → pyscript.observatory_publisher_jupiter
+        # _publish(): "observatory/planet" → pyscript.observatory_publisher_planet
         return "pyscript.observatory_publisher_" + topic.split("/", 1)[1]
 
     def _last_changed(entity_id: str) -> datetime | None:
@@ -1134,7 +1134,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--install-publisher", action="store_true",
-        help="SCP the pyscript ephemeris publisher (real Jupiter/moon/"
+        help="SCP the pyscript ephemeris publisher (real planet/moon/"
              "constellation data) to /config/pyscript/. Also greps"
              " configuration.yaml for `pyscript:` + allow_all_imports"
              " + hass_is_global and prints the paste block if missing.",
@@ -1157,7 +1157,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--verify-publisher", action="store_true",
-        help="Force-call each pyscript publisher (jupiter/moon/constellation)"
+        help="Force-call each pyscript publisher (planet/moon/constellation)"
              " and read the witness state entity to confirm each published.",
     )
     ap.add_argument(

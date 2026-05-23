@@ -21,7 +21,7 @@
 #include "ha_discovery.h"
 #include "light_sensor.h"
 #include "iss_state.h"
-#include "jupiter_state.h"
+#include "planet_state.h"
 #include "exoplanet_state.h"
 #include "launch_state.h"
 #include "constellation_state.h"
@@ -62,7 +62,7 @@ constexpr const char* kTopicThermal = "observatory/thermal"; // FR-7.4
 constexpr const char* kTopicTime    = "observatory/time";    // FR-9.5
 constexpr const char* kTopicMoon    = "observatory/moon";    // phase 7.2 follow-up
 constexpr const char* kTopicIss     = "observatory/iss";     // phase 7.1+ iss data path
-constexpr const char* kTopicJupiter = "observatory/jupiter"; // phase 7.3 jupiter data path
+constexpr const char* kTopicPlanet = "observatory/planet"; // generic per-body data path (replaces observatory/jupiter)
 constexpr const char* kTopicExoplanet = "observatory/exoplanet"; // phase 7.7 NASA Exoplanet Archive stats
 constexpr const char* kTopicLaunch  = "observatory/launch";  // phase L     next-launch T-minus data path
 constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
@@ -148,7 +148,7 @@ uint32_t s_thermal_msgs         = 0; uint32_t s_thermal_rejects       = 0;
 uint32_t s_time_msgs            = 0; uint32_t s_time_rejects          = 0;
 uint32_t s_moon_msgs            = 0; uint32_t s_moon_rejects          = 0;
 uint32_t s_iss_msgs             = 0; uint32_t s_iss_rejects           = 0;
-uint32_t s_jupiter_msgs         = 0; uint32_t s_jupiter_rejects       = 0;
+uint32_t s_planet_msgs          = 0; uint32_t s_planet_rejects        = 0;
 uint32_t s_exoplanet_msgs       = 0; uint32_t s_exoplanet_rejects     = 0;
 uint32_t s_launch_msgs          = 0; uint32_t s_launch_rejects        = 0;
 uint32_t s_constellation_msgs   = 0; uint32_t s_constellation_rejects = 0;
@@ -514,59 +514,93 @@ void handle_iss(char* buf, unsigned int length, uint32_t now_ms) {
   Serial.println();
 }
 
-// observatory/jupiter handler — phase 7.3 raw HA pass-through.
+// observatory/planet handler — generic per-body live-overlay data
+// path. Replaces the body-specific observatory/jupiter handler when
+// the jupiter scene was generalised into the `planets` scene.
 //
-// Same Director/Cinematographer split as the ISS handler: HA polls
-// any astronomy integration (e.g. ephemeris/astroweather built on
-// pyephem/skyfield) for Jupiter's `azimuth` + `altitude`, and
-// re-emits them verbatim via a Jinja template. Wire payload:
-//   { "bearing_deg": 90, "elevation_deg": 45,
-//     "magnitude": -2.1, "distance_au": 5.4 }
+// Same Director/Cinematographer split: HA polls an astronomy
+// integration (pyephem / skyfield) for the chosen body's look-
+// angles and re-emits the result verbatim. Wire payload (see
+// docs/MQTT_TOPICS.md):
+//   { "name": "jupiter", "bearing_deg": 90, "elevation_deg": 45,
+//     "constellation_index": 35 }
 //
-// • bearing_deg / elevation_deg are required — without them we
-//   can't render the look-here string or decide BELOW/DAY/VIS.
-// • magnitude / distance_au are optional ornaments; absent fields
-//   render as "?" without rejecting the rest of the payload.
+// • `name` is required and must match one of the
+//   planet_renderer / planet_catalog keys (case-insensitive
+//   ASCII, ≤ kNameCap-1 chars). The scene only paints the live
+//   overlay when the active catalog row's render_name matches.
+// • `bearing_deg` (0..359) and `elevation_deg` (-90..+90) are
+//   required — without them we can’t paint VIS/BELOW.
+// • `constellation_index` (0..87) is required — drives the
+//   daylight `IN <IAU>` fallback. Same encoding as the
+//   observatory/constellation topic.
 //
-// Jupiter is always sunlit (planets shine by reflected light), so
-// there is no `sunlit` field — only the observer-side darkness
-// condition matters. The jupiter_visibility scene ANDs (elevation
-// ≥ 0) with (sun ≤ -6°) every frame on-device.
+// All bodies in our catalog are sunlit by reflected light (or are
+// the Sun itself), so there is no `sunlit` field — only the
+// observer-side darkness condition matters and that's evaluated
+// on-device every frame.
 //
-// Per FR-1.3 / FR-1.4 any malformed/out-of-range payload is logged
-// and dropped; the previous fresh snapshot keeps rendering.
-void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
-  ParsedJson<256> p(buf, length, "jupiter", s_jupiter_rejects);
+// Per FR-1.3 / FR-1.4 any malformed / out-of-range payload is
+// logged and dropped; the previous fresh snapshot keeps rendering.
+void handle_planet(char* buf, unsigned int length, uint32_t now_ms) {
+  ParsedJson<256> p(buf, length, "planet", s_planet_rejects);
   if (!p.ok()) return;
   auto& doc = p.doc();
 
-  // Required fields. ArduinoJson `is<T>` accepts ints for float
-  // slots silently, so we test for numeric presence broadly.
+  // Required `name` — length-bounded so we can't smuggle a
+  // pathological string into the cross-core snapshot.
+  const char* name_in = doc["name"] | static_cast<const char*>(nullptr);
+  if (name_in == nullptr || name_in[0] == '\0') {
+    ++s_planet_rejects;
+    Serial.print("[mqtt] planet missing name payload=");
+    Serial.println(buf);
+    return;
+  }
+  const size_t name_len = strlen(name_in);
+  if (name_len >= planet_state::kNameCap) {
+    ++s_planet_rejects;
+    Serial.print("[mqtt] planet name too long len=");
+    Serial.println(name_len);
+    return;
+  }
+  // ASCII-printable gate — every render_name in the catalog is
+  // plain a..z, and the case-insensitive match in the scene
+  // assumes ASCII. Reject control bytes / multibyte sequences
+  // rather than letting them rot in the snapshot.
+  for (size_t i = 0; i < name_len; ++i) {
+    const unsigned char c = static_cast<unsigned char>(name_in[i]);
+    if (c < 32 || c > 126) {
+      ++s_planet_rejects;
+      Serial.print("[mqtt] planet name non-printable byte at i=");
+      Serial.println(i);
+      return;
+    }
+  }
+
+  // Required numeric fields. ArduinoJson's is<float> accepts ints
+  // silently for float slots, so test for numeric presence broadly.
   if (!(doc["bearing_deg"].is<float>()   || doc["bearing_deg"].is<int>()) ||
       !(doc["elevation_deg"].is<float>() || doc["elevation_deg"].is<int>())) {
-    ++s_jupiter_rejects;
-    Serial.print("[mqtt] jupiter missing required fields payload=");
+    ++s_planet_rejects;
+    Serial.print("[mqtt] planet missing required fields payload=");
     Serial.println(buf);
     return;
   }
   const float bearing_in   = doc["bearing_deg"].as<float>();
   const float elevation_in = doc["elevation_deg"].as<float>();
 
-  // Range checks. bearing 0..359 (we wrap 360 → 0), elevation
-  // -90..+90.
   if (bearing_in < -1.0f || bearing_in > 360.5f) {
-    ++s_jupiter_rejects;
-    Serial.print("[mqtt] jupiter bearing_deg out-of-range=");
+    ++s_planet_rejects;
+    Serial.print("[mqtt] planet bearing_deg out-of-range=");
     Serial.println(bearing_in);
     return;
   }
   if (elevation_in < -90.5f || elevation_in > 90.5f) {
-    ++s_jupiter_rejects;
-    Serial.print("[mqtt] jupiter elevation_deg out-of-range=");
+    ++s_planet_rejects;
+    Serial.print("[mqtt] planet elevation_deg out-of-range=");
     Serial.println(elevation_in);
     return;
   }
-  // Round + wrap bearing into [0,359]; clamp elevation into [-90,90].
   int b = static_cast<int>(bearing_in + 0.5f);
   if (b >= 360) b -= 360;
   if (b <    0) b += 360;
@@ -576,78 +610,34 @@ void handle_jupiter(char* buf, unsigned int length, uint32_t now_ms) {
   if (e >  90) e =  90;
   if (e < -90) e = -90;
 
-  // Optional magnitude. Stored as ×10 fixed-point so the render loop
-  // stays float-free (NFR-1.3). Out-of-range demotes to "absent"
-  // without rejecting the rest.
-  bool    have_magnitude  = false;
-  int16_t magnitude_x10   = 0;
-  if (doc["magnitude"].is<float>() || doc["magnitude"].is<int>()) {
-    const float m = doc["magnitude"].as<float>();
-    if (m >= -30.0f && m <= 30.0f) {
-      have_magnitude = true;
-      magnitude_x10  = static_cast<int16_t>(m >= 0.0f
-                                               ? m * 10.0f + 0.5f
-                                               : m * 10.0f - 0.5f);
-    } else {
-      Serial.print("[mqtt] jupiter magnitude out-of-range=");
-      Serial.println(m);
-    }
-  }
-
-  // Optional distance_au, ×10 fixed-point. Jupiter sits at ~4..6 AU
-  // in practice; cap at 100 AU for sanity (would catch a sign-flip
-  // or a wrong-target template bug).
-  bool     have_distance   = false;
-  uint16_t distance_au_x10 = 0;
-  if (doc["distance_au"].is<float>() || doc["distance_au"].is<int>()) {
-    const float d = doc["distance_au"].as<float>();
-    if (d >= 0.0f && d <= 100.0f) {
-      have_distance   = true;
-      distance_au_x10 = static_cast<uint16_t>(d * 10.0f + 0.5f);
-    } else {
-      Serial.print("[mqtt] jupiter distance_au out-of-range=");
-      Serial.println(d);
-    }
-  }
-
   // Required constellation_index — same encoding as the
-  // observatory/constellation topic (index into the 88-entry IAU
-  // catalog in include/stars.h). Drives the scene's daylight
-  // readout `IN <IAU>` (e.g. `IN TAU`). Missing or out-of-range
-  // rejects the whole payload per FR-1.3 / FR-1.4.
+  // observatory/constellation topic (0..87 IAU catalog index).
   if (!doc["constellation_index"].is<int>()) {
-    ++s_jupiter_rejects;
-    Serial.print("[mqtt] jupiter missing constellation_index payload=");
+    ++s_planet_rejects;
+    Serial.print("[mqtt] planet missing constellation_index payload=");
     Serial.println(buf);
     return;
   }
   const long ci_in = doc["constellation_index"].as<long>();
   if (ci_in < 0 || ci_in > 87) {
-    ++s_jupiter_rejects;
-    Serial.print("[mqtt] jupiter constellation_index out-of-range=");
+    ++s_planet_rejects;
+    Serial.print("[mqtt] planet constellation_index out-of-range=");
     Serial.println(ci_in);
     return;
   }
   const uint8_t constellation_index = static_cast<uint8_t>(ci_in);
 
-  jupiter_state::set_from_mqtt(static_cast<int16_t>(b),
-                               static_cast<int8_t>(e),
-                               have_magnitude, magnitude_x10,
-                               have_distance,  distance_au_x10,
-                               constellation_index,
-                               now_ms);
-  Serial.print("[mqtt] jupiter applied bearing=");
+  planet_state::set_from_mqtt(name_in,
+                              static_cast<int16_t>(b),
+                              static_cast<int8_t>(e),
+                              constellation_index,
+                              now_ms);
+  Serial.print("[mqtt] planet applied name=");
+  Serial.print(name_in);
+  Serial.print(" bearing=");
   Serial.print(b);
   Serial.print(" elev=");
   Serial.print(e);
-  if (have_magnitude) {
-    Serial.print(" mag=");
-    Serial.print(magnitude_x10 / 10.0f);
-  }
-  if (have_distance) {
-    Serial.print(" dist_au=");
-    Serial.print(distance_au_x10 / 10.0f);
-  }
   Serial.print(" con_idx=");
   Serial.print(constellation_index);
   Serial.println();
@@ -1322,7 +1312,7 @@ constexpr Route kRoutes[] = {
   { kTopicTime,          128, handle_time,          &s_time_msgs,          &s_time_rejects,          "time"         },
   { kTopicMoon,          256, handle_moon,          &s_moon_msgs,          &s_moon_rejects,          "moon"         },
   { kTopicIss,           256, handle_iss,           &s_iss_msgs,           &s_iss_rejects,           "iss"          },
-  { kTopicJupiter,       256, handle_jupiter,       &s_jupiter_msgs,       &s_jupiter_rejects,       "jupiter"      },
+  { kTopicPlanet,        256, handle_planet,        &s_planet_msgs,        &s_planet_rejects,        "planet"       },
   { kTopicExoplanet,     256, handle_exoplanet,     &s_exoplanet_msgs,     &s_exoplanet_rejects,     "exoplanet"    },
   { kTopicLaunch,        768, handle_launch,        &s_launch_msgs,        &s_launch_rejects,        "launch"       },
   { kTopicConstellation, 128, handle_constellation, &s_constellation_msgs, &s_constellation_rejects, "constellation"},

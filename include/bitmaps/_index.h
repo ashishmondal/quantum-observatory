@@ -8,7 +8,6 @@
 #include "backgrounds/bitmap_bg.h"
 
 #include "bitmaps/iss.h"
-#include "bitmaps/jupiter.h"
 #include "bitmaps/moon.h"
 #include "bitmaps/observatory.h"
 #include "bitmaps/starfield.h"
@@ -35,10 +34,9 @@ struct ImageEntry {
 
 inline constexpr ImageEntry kImageRegistry[] = {
   { "iss", kIssPalette, kIssPixels, kIssRegions, kIssRegionsCount, true, kIssLum, 0 },
-  { "jupiter", kJupiterPalette, kJupiterPixels, kJupiterRegions, kJupiterRegionsCount, true, kJupiterLum, 1 },
-  { "moon", kMoonPalette, kMoonPixels, kMoonRegions, kMoonRegionsCount, true, kMoonLum, 2 },
-  { "observatory", kObservatoryPalette, kObservatoryPixels, kObservatoryRegions, kObservatoryRegionsCount, true, kObservatoryLum, 3 },
-  { "starfield", kStarfieldPalette, kStarfieldPixels, kStarfieldRegions, kStarfieldRegionsCount, true, kStarfieldLum, 4 },
+  { "moon", kMoonPalette, kMoonPixels, kMoonRegions, kMoonRegionsCount, true, kMoonLum, 1 },
+  { "observatory", kObservatoryPalette, kObservatoryPixels, kObservatoryRegions, kObservatoryRegionsCount, true, kObservatoryLum, 2 },
+  { "starfield", kStarfieldPalette, kStarfieldPixels, kStarfieldRegions, kStarfieldRegionsCount, true, kStarfieldLum, 3 },
 };
 
-inline constexpr int kImageRegistryCount = 5;
+inline constexpr int kImageRegistryCount = 4;

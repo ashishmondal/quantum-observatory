@@ -204,46 +204,43 @@ mosquitto_pub -t observatory/iss -m '{"lat_deg":50.11,"lon_deg":118.07,"altitude
 mosquitto_pub -t observatory/iss -m '{"lat_deg":-12.4,"lon_deg":42.7,"altitude_km":410,"sunlit":false,"seconds_until_next":7200}'
 ```
 
-### `observatory/jupiter` — raw HA pass-through for the `jupiter_visibility` scene
+### `observatory/planet` — raw HA pass-through for the `planets` scene
 
 ```json
-{ "bearing_deg": 90, "elevation_deg": 45, "magnitude": -2.1, "distance_au": 5.4, "constellation_index": 76 }
+{ "name": "jupiter", "bearing_deg": 90, "elevation_deg": 45, "constellation_index": 76 }
 ```
 
 | Field | Type | Required | Range | Notes |
 |---|---|---|---|---|
+| `name` | string | yes | ≤ 15 ASCII printable chars (32..126) | The body the look-angles are for. Matched case-insensitively against the `render_name` keys in `include/state/planet_catalog.h` (and the `kSolarPresets` table in `planet_renderer.h`). The scene only paints the live overlay when this matches the scene's active body — otherwise the static catalog fact line keeps rendering. |
 | `bearing_deg` | float (°) | yes | 0..360 | Compass azimuth (0=N, 90=E). Wrapped + rounded to int [0,359] on-device. |
 | `elevation_deg` | float (°) | yes | -90..90 | Altitude above horizon. Negative = below horizon → `BELOW`. |
-| `magnitude` | float | no | -30..30 | Apparent magnitude (Jupiter ≈ -2.9 to -1.6 in practice). Stored ×10 fixed-point on-device for float-free render (NFR-1.3). Renders `MAG -2.1`, or `MAG ?` when absent. |
-| `distance_au` | float (AU) | no | 0..100 | Earth–Jupiter distance (≈ 4..6 AU in practice). Renders `DIST 5.4AU`, or `DIST ?` when absent. |
-| `constellation_index` | int | yes | 0..87 (= `constellations_iau::kCatalogCount-1`) | Index into the same IAU catalog used by `observatory/constellation` (sorted `And`, `Ant`, ... `Vol`). When Jupiter is above the horizon but the observer isn't dark enough yet, the line-3 readout is `IN <IAU>` (e.g. `IN TAU`). Missing or out-of-range rejects the whole payload. |
+| `constellation_index` | int | yes | 0..87 (= `constellations_iau::kCatalogCount-1`) | Index into the same IAU catalog used by `observatory/constellation` (sorted `And`, `Ant`, ... `Vol`). Drives the daylight `IN <IAU>` fallback (e.g. `IN TAU`). |
 
-If any **required** field is missing, malformed, or out of range,
-the whole payload is dropped per FR-1.3 / FR-1.4. Out-of-range
-optional fields are demoted to "absent" without rejecting the rest
-(same partial-update pattern as `observatory/iss`'s `crew_count`).
+If any required field is missing, malformed, or out of range, the
+whole payload is dropped per FR-1.3 / FR-1.4.
 
 **Where HA gets the data — and why HA does no logic.** Same
-pass-through contract as `observatory/iss`: HA polls any astronomy
-integration that exposes Jupiter's apparent position (e.g.
-ephemeris/astroweather components built on pyephem/skyfield) and
-re-emits the four fields verbatim through a Jinja template. No
-template arithmetic, no observer-frame visibility decisions — the
-ephemeris already gives the look-angles in the observer's frame, so
-the firmware only needs to decide whether the *observer* is in
-darkness.
+pass-through contract as `observatory/iss`: HA polls an astronomy
+integration that exposes a body's apparent position
+(pyephem/skyfield, etc.) and re-emits the four fields verbatim
+through a Jinja template or, in our setup, the
+`publish_planet(name=...)` pyscript service. No template arithmetic,
+no observer-frame visibility decisions — the ephemeris already
+gives the look-angles in the observer's frame, so the firmware
+only needs to decide whether the *observer* is in darkness.
 
-**On-device derivation.** Every render frame the
-`jupiter_visibility` scene computes:
+**On-device derivation.** Every render frame the `planets` scene
+computes (for the matched body only):
 
 1. **Sun elevation** at the observer via `sun::compute()` against
    the live RTC UTC epoch — same call the iss_pass scene uses.
 2. **Visibility** as the two-way AND:
-    - Jupiter is above the observer horizon (`elevation_deg ≥ 0`), AND
+    - the body is above the observer horizon (`elevation_deg ≥ 0`), AND
     - observer is in twilight or darker (sun elevation ≤ −6°).
 
-Unlike the ISS payload there's no `sunlit` field — Jupiter is *always*
-sunlit (planets shine by reflected light), so only the observer's
+All catalog bodies are sunlit by reflected light (or are the Sun
+itself), so there's no `sunlit` field — only the observer's
 darkness condition matters for naked-eye visibility.
 
 The line-3 readout is one of:
@@ -253,18 +250,18 @@ The line-3 readout is one of:
 | Above horizon AND sun ≤ −6° | `VIS BBBxEE` (e.g. `VIS 090x45`) |
 | Below horizon | `BELOW` |
 | Above horizon, sun > −6° | `IN <IAU>` (e.g. `IN TAU`) |
-| No fresh data | `WAIT` |
+| No fresh data / name mismatch | static fact string from the catalog |
 
-Snapshot is treated as fresh for **1 h** (`jupiter_state::kFreshMs`).
-Jupiter's apparent position drifts ~0.5 °/h max so an hour-stale
+Snapshot is treated as fresh for **1 h** (`planet_state::kFreshMs`).
+Planetary apparent positions drift ~0.5 °/h max so an hour-stale
 snapshot still points the kid at roughly the right patch of sky;
-past that the scene falls back to `WAIT` rather than fabricating a
-stale pointing string. Push at any cadence ≤ 1 h that suits the
-Director.
+past that the scene falls back to the static fact line rather than
+fabricating a stale pointing string. Push at any cadence ≤ 1 h
+that suits the Director.
 
 ```bash
-mosquitto_pub -t observatory/jupiter -m '{"bearing_deg":90,"elevation_deg":45,"magnitude":-2.1,"distance_au":5.4,"constellation_index":76}'
-mosquitto_pub -t observatory/jupiter -m '{"bearing_deg":270,"elevation_deg":-12,"constellation_index":58}'
+mosquitto_pub -t observatory/planet -m '{"name":"jupiter","bearing_deg":90,"elevation_deg":45,"constellation_index":76}'
+mosquitto_pub -t observatory/planet -m '{"name":"mars","bearing_deg":270,"elevation_deg":-12,"constellation_index":58}'
 ```
 
 ### `observatory/exoplanet` — raw HA pass-through for the `exoplanet_count` scene
@@ -283,8 +280,7 @@ mosquitto_pub -t observatory/jupiter -m '{"bearing_deg":270,"elevation_deg":-12,
 If any **required** field is missing, malformed, or out of range,
 the whole payload is dropped per FR-1.3 / FR-1.4. Out-of-range
 optional fields are demoted to "absent" without rejecting the rest
-(same partial-update pattern as `observatory/jupiter`'s `magnitude` /
-`distance_au`).
+(same partial-update pattern as `observatory/iss`'s `crew_count`).
 
 **Where HA gets the data — and why HA does no logic.** Same
 pass-through contract as the other Tier-1 scene topics. The HA-side
@@ -459,7 +455,7 @@ whole payload is dropped per FR-1.3 / FR-1.4 — the scene keeps using
 the previous fresh snapshot (or `WAIT` if none).
 
 **Where HA gets the data — and why HA does no observer-frame logic.**
-Same pass-through contract as `observatory/iss` / `observatory/jupiter`.
+Same pass-through contract as `observatory/iss` / `observatory/planet`.
 HA polls a public launch feed and re-emits the resolved fields. The
 v1 reference feed is **The Space Devs' Launch Library 2** (free tier,
 15 req/h anon):

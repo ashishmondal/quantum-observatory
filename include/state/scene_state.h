@@ -55,7 +55,11 @@ enum class SceneId : uint8_t {
   SPLASH        = 13,  // boot splash — firmware override, shown until first MQTT connect
   ISS_PASS      = 15,  // priority-4 "ISS NOW" callout (phase 7.1)
   MOON_PHASE    = 16,  // sticky moon disc + phase readout (phase 7.2)
-  JUPITER_VISIBILITY = 17,  // Jupiter look-angles + magnitude readout (phase 7.3)
+  // 17 was JUPITER_VISIBILITY (phase 7.3) — retired when the scene
+  // was generalised into PLANETS (= 25). The enum slot is left
+  // reserved (NOT renumbered) to preserve the append-only contract
+  // and protect any persisted scene ids logged by older firmware.
+  // Do NOT reuse this slot for an unrelated scene.
   CONSTELLATION_NOW  = 18,  // dynamic constellation art + name (phase 7.4)
   IR_TEST            = 19,  // IR receiver POC readout (phase IR.1)
   FONT_DEMO          = 20,  // diagnostic: cycle Adafruit_GFX builtin fonts
@@ -63,6 +67,7 @@ enum class SceneId : uint8_t {
   SPECTRUM_DEMO      = 22,  // visible-spectrum bar + sweeping absorption-line marker (phase 7.6, offline)
   EXOPLANET_COUNT    = 23,  // animated procedural planet + NASA Exoplanet Archive stats (phase 7.7)
   PLANET_ZOO_DEMO    = 24,  // diagnostic: walk every planet_renderer preset @ TINY/SMALL/LARGE LOD (phase 7.7b)
+  PLANETS            = 25,  // generic procedural-planet scene that rotates through planet_catalog::kBodies[] (replaces JUPITER_VISIBILITY)
 };
 
 // One-time mutex init. Call from setup() before either core spins.

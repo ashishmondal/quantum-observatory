@@ -28,7 +28,7 @@
 #include "iss_visibility.h"
 #include "launch_imminent.h"
 #include "sun_position.h"
-#include "jupiter_state.h"
+#include "planet_state.h"
 #include "exoplanet_state.h"
 #include "launch_state.h"
 #include "constellation_state.h"
@@ -172,10 +172,12 @@ void setup() {
   // no fresh value has been pushed.
   iss_state::init();
 
-  // Jupiter-visibility IPC for the jupiter_visibility scene's MQTT
-  // data path (observatory/jupiter). Falls back to a "WAIT"
-  // placeholder when no fresh value has been pushed.
-  jupiter_state::init();
+  // Per-body IPC for the `planets` scene's MQTT data path
+  // (observatory/planet). Carries name + bearing + elevation +
+  // host constellation for the active body so the scene can paint
+  // a live look-angle overlay; falls back to the static fact line
+  // from planet_catalog when no fresh value has been pushed.
+  planet_state::init();
 
   // Exoplanet stats IPC for the exoplanet_count scene's MQTT data
   // path (observatory/exoplanet). 48 h freshness ceiling; falls

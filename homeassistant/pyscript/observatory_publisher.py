@@ -4,13 +4,13 @@
 # Replaces three of the YAML "stub" automations in
 # packages/quantum_observatory.yaml with real astronomy:
 #
-#   observatory/jupiter        every 15 min
+#   observatory/planet         every 15 min
 #   observatory/moon           every  6 h
 #   observatory/constellation  every  1 h
 #
 # All three are computed with `skyfield` (MIT, bundled DE421
 # ephemeris, sub-arcsecond accuracy). The firmware contracts
-# in include/{jupiter,moon,constellation}_state.h are unchanged
+# in include/{planet,moon,constellation}_state.h are unchanged
 # — pyscript publishes the same JSON shape the YAML stubs did,
 # just with real numbers.
 #
@@ -103,16 +103,44 @@ _IAU_INDEX = {code: i for i, code in enumerate(IAU_CODES)}
 # inside the loader so the second call onward is fast (~1 ms).
 # ---------------------------------------------------------------------
 
-@pyscript_executor
-def _compute_jupiter(lat_deg, lon_deg):
-    """Compute Jupiter's apparent position + magnitude for an observer.
+# Skyfield body key per supported `name`. Earth is intentionally
+# absent — you can't be on Earth and observe Earth. The Moon has
+# its own dedicated observatory/moon topic and isn't routed here.
+# Anything outside this map returns _error and the publish is
+# dropped.
+_SKYFIELD_BODY_BY_NAME = {
+    "sun":     "sun",
+    "mercury": "mercury",
+    "venus":   "venus",
+    "mars":    "mars",
+    "jupiter": "jupiter barycenter",
+    "saturn":  "saturn barycenter",
+    "uranus":  "uranus barycenter",
+    "neptune": "neptune barycenter",
+}
 
-    Returns a dict matching the observatory/jupiter wire schema
-    (docs/MQTT_TOPICS.md), or None on any skyfield error.
+@pyscript_executor
+def _compute_planet(lat_deg, lon_deg, name):
+    """Compute a named body's apparent position for an observer.
+
+    Returns a dict matching the observatory/planet wire schema
+    (docs/MQTT_TOPICS.md), or None / {'_error': ...} on any
+    skyfield error. `name` must be one of the keys in
+    _SKYFIELD_BODY_BY_NAME; everything else short-circuits.
+
+    Magnitude is no longer computed — the firmware scene's line-3
+    overlay only needs look-angles + host constellation. The wire
+    format dropped `magnitude` / `distance_au` when the scene was
+    generalised; those values are still pulled here only for the
+    log line so a human eyeballing the trigger output can sanity-
+    check the ephemeris.
     """
     try:
+        if name not in _SKYFIELD_BODY_BY_NAME:
+            return {"_error": f"unsupported body name: {name!r}"}
+        body_key = _SKYFIELD_BODY_BY_NAME[name]
+
         from skyfield.api import wgs84, Loader, load_constellation_map
-        from skyfield.magnitudelib import planetary_magnitude
 
         loader = Loader(SKYFIELD_CACHE)
         eph = loader('de421.bsp')
@@ -120,13 +148,12 @@ def _compute_jupiter(lat_deg, lon_deg):
         t = ts.now()
 
         earth = eph['earth']
-        jupiter = eph['jupiter barycenter']
+        body  = eph[body_key]
         observer = earth + wgs84.latlon(lat_deg, lon_deg)
-        apparent = observer.at(t).observe(jupiter).apparent()
-        alt, az, dist = apparent.altaz()
-        mag = float(planetary_magnitude(apparent))
+        apparent = observer.at(t).observe(body).apparent()
+        alt, az, _dist = apparent.altaz()
 
-        # Host constellation — the IAU patch Jupiter currently sits
+        # Host constellation — the IAU patch the body currently sits
         # in, used by the firmware's daylight readout ("IN TAU").
         # Required on the wire (firmware rejects the payload without
         # it), so an unknown skyfield code aborts the publish rather
@@ -139,13 +166,10 @@ def _compute_jupiter(lat_deg, lon_deg):
         if con_idx is None:
             return {"_error": f"unknown constellation code from skyfield: {code!r}"}
 
-        # Clamp to wire ranges (docs/MQTT_TOPICS.md). The firmware
-        # also range-checks but a clean publish keeps logs readable.
         return {
+            "name":                name,
             "bearing_deg":         int(round(az.degrees)) % 360,
             "elevation_deg":       max(-90, min(90, int(round(alt.degrees)))),
-            "magnitude":           round(max(-30.0, min(30.0, mag)), 1),
-            "distance_au":         round(max(0.0, min(100.0, dist.au)), 2),
             "constellation_index": con_idx,
         }
     except Exception as exc:  # noqa: BLE001 — log, don't crash the trigger
@@ -375,7 +399,7 @@ def _compute_constellation(lat_deg, lon_deg):
         loader = Loader(SKYFIELD_CACHE)
         # Constellation lookup doesn't actually need the planetary
         # ephemeris, but we load it anyway so a cold start populates
-        # the cache for the next jupiter/moon trigger.
+        # the cache for the next planet/moon trigger.
         loader('de421.bsp')
         ts = loader.timescale()
         t = ts.now()
@@ -1230,7 +1254,7 @@ def _publish(topic, payload_dict):
     log-grepping `/api/error_log` (that endpoint returns 404 in some
     HA configurations) and survives log rotation.
     """
-    # Slug: "observatory/jupiter" → "observatory_publisher_jupiter".
+    # Slug: "observatory/planet" → "observatory_publisher_planet".
     # Keeps every entity under one obvious prefix in Developer Tools →
     # States so they're easy to find.
     slug = "observatory_publisher_" + topic.split("/", 1)[1]
@@ -1251,7 +1275,7 @@ def _publish(topic, payload_dict):
     # qos=1 (at-least-once): qos:0 silently drops on any Wi-Fi blip
     # between HA → broker → firmware, leaving the firmware stuck on
     # the previous payload for up to `kFreshMs` of that topic (e.g.
-    # 24 h for jupiter/moon/constellation). One PUBACK round-trip per
+    # 24 h for planet/moon/constellation). One PUBACK round-trip per
     # ≤hourly publish is a trivial cost for guaranteed delivery.
     # Matches the qos:1 setting on every YAML mqtt.publish in
     # ../packages/quantum_observatory.yaml.
@@ -1280,14 +1304,23 @@ def _publish(topic, payload_dict):
 
 @service
 @time_trigger("startup", "cron(*/15 * * * *)")
-def publish_jupiter(**_):
-    """Jupiter — every 15 min. Firmware kFreshMs = 1 h, so we have
-    4× headroom for missed publishes.
+def publish_planet(name="jupiter", **_):
+    """Active planet — every 15 min. Firmware kFreshMs = 1 h, so we
+    have 4× headroom for missed publishes.
 
-    Also exposed as service `pyscript.publish_jupiter` so
+    `name` selects the body to ephemeris; defaults to 'jupiter' so
+    the cron tick has something to publish without per-tick state.
+    Operators / automations can call this service with a different
+    name (e.g. 'mars', 'saturn') to overlay live look-angles on the
+    `planets` scene's current cursor when it lands on that body.
+    Bodies outside _SKYFIELD_BODY_BY_NAME (e.g. 'titan', 'europa')
+    are not supported here — the catalog's static fact line keeps
+    rendering for those.
+
+    Also exposed as service `pyscript.publish_planet` so
     homeassistant/setup_mqtt.py --verify-publisher can force-call it."""
     lat, lon = _observer_lat_lon()
-    _publish("observatory/jupiter", _compute_jupiter(lat, lon))
+    _publish("observatory/planet", _compute_planet(lat, lon, name))
 
 
 @service

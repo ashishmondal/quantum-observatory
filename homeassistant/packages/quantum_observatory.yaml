@@ -38,7 +38,7 @@
 #
 # Three more topics are published from pyscript (NOT this file):
 #
-#   observatory/jupiter       15 min  — real az/el/mag from skyfield
+#   observatory/planet        15 min  — real az/el for the active body via skyfield
 #   observatory/moon          6 h     — exact phase from skyfield
 #   observatory/constellation 1 h     — what's actually overhead now
 #
@@ -76,7 +76,7 @@
 # Wi-Fi blip on the firmware side or a momentary broker hiccup
 # silently drops the message; the firmware then keeps showing the
 # previous (now-stale) state for up to `kFreshMs` of that topic.
-# In the field this presented as Jupiter's screen showing the same
+# In the field this presented as the planet scene showing the same
 # az/el long after a fresh publish was scheduled, because the 15-min
 # pyscript publish was lost in flight. qos:1 trades one PUBACK
 # round-trip for the broker actually retrying until the firmware
@@ -220,32 +220,22 @@ rest:
 # mapping noted in the comment header above.
 
 # ---------------------------------------------------------------------
-# observatory/jupiter — SUPERSEDED BY PYSCRIPT (see pyscript/observatory_publisher.py)
+# observatory/planet — SUPERSEDED BY PYSCRIPT (see pyscript/observatory_publisher.py)
 # ---------------------------------------------------------------------
 #
-# Was: a stub that published "BELOW horizon" every 15 min because HA
-# ships no planetary ephemeris. Pyscript + skyfield gives real az/el/
-# mag/distance, so the stub is gone. To re-enable for an HA-only
-# install, uncomment the block below AND delete the `publish_jupiter`
-# function in observatory_publisher.py.
+# Was: a body-specific stub (`observatory/jupiter`) that published a
+# fixed "BELOW horizon" payload every 15 min because HA ships no
+# planetary ephemeris. When the jupiter scene was generalised into
+# the `planets` scene, the wire moved to `observatory/planet` carrying
+# `{name, bearing_deg, elevation_deg, constellation_index}` so HA can
+# pick any supported body. Pyscript + skyfield gives the real numbers
+# (see publish_planet() in observatory_publisher.py).
 #
-# automation observatory_jupiter:
-#   - id: observatory_jupiter
-#     alias: "Observatory — push Jupiter state every 15 min (STUB)"
-#     triggers:
-#       - trigger: homeassistant
-#         event: start
-#       - trigger: time_pattern
-#         minutes: "/15"
-#     actions:
-#       - action: mqtt.publish
-#         data:
-#           topic: observatory/jupiter
-#           payload: >-
-#             {{ {
-#               "bearing_deg": 90,
-#               "elevation_deg": -30
-#             } | tojson }}
+# To re-enable for an HA-only install, define an automation that
+# publishes a `{"name":"jupiter","bearing_deg":...,"elevation_deg":
+# ...,"constellation_index":...}` payload to `observatory/planet`
+# on a 15 min cadence — the firmware will only paint the live
+# overlay when the scene's active body matches `name`.
 
 # ---------------------------------------------------------------------
 # observatory/constellation — SUPERSEDED BY PYSCRIPT (see pyscript/observatory_publisher.py)
@@ -345,7 +335,7 @@ automation observatory_evening_rotation:
       scenes:
         - clock
         - moon_phase
-        - jupiter_visibility
+        - planets
         - iss_pass
         - constellation_now
         - launch_countdown

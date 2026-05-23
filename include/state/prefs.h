@@ -38,7 +38,10 @@ namespace prefs {
 //   (FR-18.2 v3 / FR-19 settings overlay). Older files on disk load
 //   cleanly via the existing P.2 forward-compat passthrough — every
 //   missing key falls through to the default in kDefaults.
-constexpr uint8_t kSchemaVersion = 3;
+// v3 -> v4 (planets scene): added planet_index — the active body
+//   pointer the `planets` scene rotates through across re-entries
+//   (FR-14.3). Missing on disk → falls through to default 0.
+constexpr uint8_t kSchemaVersion = 4;
 
 // FR-18.2 v3 / FR-19.4 — gating mode for the giant-clock digit-roll
 // audible "step" cues. NONE silences the cascade; MIN clicks on
@@ -70,6 +73,9 @@ struct Prefs {
                                   // suppressed. Default true.
   TickSoundMode tick_sound_mode;  // FR-18.2 v3 / FR-9.4 — giant-clock
                                   // digit-roll click cadence. Default MIN.
+  uint8_t       planet_index;     // v4 — index into planet_catalog::kBodies[]
+                                  // for the `planets` scene. Default 0
+                                  // (MERCURY). Range-checked on load.
 };
 
 // Mount the filesystem and initialise the in-RAM cache to defaults.
@@ -116,6 +122,15 @@ void set_image_tint_pct(uint8_t pct);
 void set_theme_sound(bool on);
 void set_button_sound(bool on);
 void set_tick_sound_mode(TickSoundMode mode);
+
+// `planets` scene cursor (FR-14.3). Persisted so the scene resumes
+// on the same body across reboots — otherwise the catalog rewinds
+// to MERCURY on every power-up, which is annoying for an operator
+// who left it on EUROPA. Same idempotent-on-no-op + mutex + dirty
+// + FR-18.4 writeback discipline as the other v3 setters. Caller
+// (the scene's init()) is responsible for advancing the value
+// modulo planet_catalog::kBodyCount before passing it in.
+void set_planet_index(uint8_t idx);
 
 // Wear-protected writeback tick (FR-18.4). Call from the Core 0
 // loop() each iteration; cheap when nothing is dirty. Flushes the

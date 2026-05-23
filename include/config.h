@@ -165,7 +165,7 @@
 inline constexpr scene_state::SceneId kRemoteCycle[] = {
     scene_state::SceneId::CLOCK,
     scene_state::SceneId::MOON_PHASE,
-    scene_state::SceneId::JUPITER_VISIBILITY,
+    scene_state::SceneId::PLANETS,
     scene_state::SceneId::CONSTELLATION_NOW,
     scene_state::SceneId::ISS_PASS,
     scene_state::SceneId::LAUNCH_COUNTDOWN,
