@@ -25,6 +25,7 @@
 #include "prefs.h"              // FR-19 / FR-18.2 v3 — theme_sound gate
 #include "themes/apollo_amber_theme.h"
 #include "themes/blade_runner_theme.h"
+#include "themes/hail_mary_theme.h"
 #include "themes/lcars_tos_theme.h"
 #include "themes/nostromo_green_theme.h"
 #include "themes/section_nine_theme.h"
@@ -87,6 +88,7 @@ Theme* const kThemes[static_cast<int>(Id::COUNT)] = {
   &g_blade_runner_theme,    // BLADE_RUNNER
   &g_lcars_tos_theme,       // LCARS_TOS
   &g_section_nine_theme,    // SECTION_NINE
+  &g_hail_mary_theme,       // HAIL_MARY
 };
 
 // Active id. Naturally-aligned uint8_t — atomic on RP2040, no mutex.

@@ -25,6 +25,7 @@
 
 #include <stdint.h>
 
+#include "scene_state.h"
 #include "theme.h"  // theme::Id
 
 namespace prefs {
@@ -41,7 +42,12 @@ namespace prefs {
 // v3 -> v4 (planets scene): added planet_index — the active body
 //   pointer the `planets` scene rotates through across re-entries
 //   (FR-14.3). Missing on disk → falls through to default 0.
-constexpr uint8_t kSchemaVersion = 4;
+// v4 -> v5 (FR-21.9): added per-scene favourite / skip marks, stored
+//   on disk as `scene_fav` / `scene_skip` hex bitmasks keyed by SceneId.
+constexpr uint8_t kSchemaVersion = 5;
+
+// FR-21.9 — viewer's per-scene preference, set from the settings menu.
+enum class SceneMark : uint8_t { NORMAL = 0, FAV = 1, SKIP = 2 };
 
 // FR-18.2 v3 / FR-19.4 — gating mode for the giant-clock digit-roll
 // audible "step" cues. NONE silences the cascade; MIN clicks on
@@ -76,6 +82,9 @@ struct Prefs {
   uint8_t       planet_index;     // v4 — index into planet_catalog::kBodies[]
                                   // for the `planets` scene. Default 0
                                   // (MERCURY). Range-checked on load.
+  uint8_t       reserved0;        // explicit pad so memcmp() sees no indeterminate bytes
+  uint64_t      scene_fav_mask;   // v5 — bit i set ⇒ SceneId(i) is a favourite
+  uint64_t      scene_skip_mask;  // v5 — bit i set ⇒ SceneId(i) is skipped by the rotation
 };
 
 // Mount the filesystem and initialise the in-RAM cache to defaults.
@@ -131,6 +140,11 @@ void set_tick_sound_mode(TickSoundMode mode);
 // (the scene's init()) is responsible for advancing the value
 // modulo planet_catalog::kBodyCount before passing it in.
 void set_planet_index(uint8_t idx);
+
+// FR-21.9 — per-scene favourite / skip mark. Same idempotent + dirty +
+// FR-18.4 writeback discipline as the other setters.
+SceneMark scene_mark(scene_state::SceneId id);
+void      set_scene_mark(scene_state::SceneId id, SceneMark mark);
 
 // Wear-protected writeback tick (FR-18.4). Call from the Core 0
 // loop() each iteration; cheap when nothing is dirty. Flushes the

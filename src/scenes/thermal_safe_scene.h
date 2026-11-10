@@ -40,7 +40,6 @@ public:
   }
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
-    (void)now_ms;
     matrix.fillScreen(0x0000);
 
     matrix.setFont(theme::font(theme::FontRole::HEADER));
@@ -70,6 +69,15 @@ public:
     // pixel of breathing room.
     gfx::draw_text_halo(matrix, gfx::centered_x(matrix, tbuf), 30,
                         tbuf, kInk, kHalo);
+
+    // FR-21.11 — time is on every screen, even this one.
+    uint8_t hh = 0, mm = 0;
+    char clk[6] = "--:--";
+    if (tod::now_hhmm(now_ms, &hh, &mm)) {
+      snprintf(clk, sizeof(clk), "%02u:%02u", static_cast<unsigned>(hh), static_cast<unsigned>(mm));
+    }
+    matrix.setFont(theme::font(theme::FontRole::BODY));
+    gfx::draw_text_halo(matrix, gfx::centered_x(matrix, clk), 20, clk, kInk, kHalo);
     // matrix.show() is called by loop1().
   }
 };

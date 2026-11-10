@@ -68,6 +68,16 @@ enum class SceneId : uint8_t {
   EXOPLANET_COUNT    = 23,  // animated procedural planet + NASA Exoplanet Archive stats (phase 7.7)
   PLANET_ZOO_DEMO    = 24,  // diagnostic: walk every planet_renderer preset @ TINY/SMALL/LARGE LOD (phase 7.7b)
   PLANETS            = 25,  // generic procedural-planet scene that rotates through planet_catalog::kBodies[] (replaces JUPITER_VISIBILITY)
+  WEATHER            = 26,  // today's weather + what to wear (AM) / tonight's stargazing verdict (PM)
+  SKY_NOW            = 27,  // bright objects above the horizon right now, with direction
+  ALERT              = 28,  // "go look now" callout pushed by HA (ISS pass, meteor peak, conjunction, aurora)
+  LIGHT_TRAVEL       = 29,  // offline: how long ago the light left each object
+  RELATIVITY         = 30,  // offline: time-dilation examples with drifting twin clocks
+  BLACK_HOLES        = 31,  // latest LIGO/Virgo/KAGRA gravitational-wave detection
+  DEEP_SKY           = 32,  // offline: procedural pixel-art nebulae / galaxies with captions
+  AURORA             = 33,  // NOAA Kp index + animated aurora curtain
+  ARTEMIS            = 34,  // Artemis Moon-program tracker (last + next mission)
+  HAIL_MARY          = 35,  // Project Hail Mary easter-egg cards (Tau Ceti, Astrophage, Eridani)
 };
 
 // One-time mutex init. Call from setup() before either core spins.

@@ -320,6 +320,16 @@ constexpr IdMapping kIdMap[] = {
   { "exoplanet_count",    SceneId::EXOPLANET_COUNT    },
   { "planet_zoo_demo",    SceneId::PLANET_ZOO_DEMO    },
   { "planets",            SceneId::PLANETS            },
+  { "weather",            SceneId::WEATHER            },
+  { "sky_now",            SceneId::SKY_NOW            },
+  { "alert",              SceneId::ALERT              },
+  { "light_travel",       SceneId::LIGHT_TRAVEL       },
+  { "relativity",         SceneId::RELATIVITY         },
+  { "black_holes",        SceneId::BLACK_HOLES        },
+  { "deep_sky",           SceneId::DEEP_SKY           },
+  { "aurora",             SceneId::AURORA             },
+  { "artemis",            SceneId::ARTEMIS            },
+  { "hail_mary",          SceneId::HAIL_MARY          },
 };
 }  // namespace
 

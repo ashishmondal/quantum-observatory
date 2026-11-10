@@ -246,6 +246,7 @@ private:
       case theme::Id::BLADE_RUNNER:   return "BLR";
       case theme::Id::LCARS_TOS:      return "LCR";
       case theme::Id::SECTION_NINE:   return "S9N";
+      case theme::Id::HAIL_MARY:      return "PHM";
       default:                         return "???";
     }
   }

@@ -74,6 +74,7 @@ enum class Id : uint8_t {
   BLADE_RUNNER   = 3,   // Neo-noir cyan/orange (T.7)
   LCARS_TOS      = 4,   // Star Trek LCARS-precursor (T.7)
   SECTION_NINE   = 5,   // Ghost in the Shell 2017 hot-pink hologram (T.11)
+  HAIL_MARY      = 6,   // Project Hail Mary Petrova crimson (FR-21.8)
   COUNT
 };
 

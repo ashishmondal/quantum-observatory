@@ -203,14 +203,15 @@ rest:
                          # means "is the satellite itself sunlit"
                          # (tri-state: daylight | visible | eclipsed)
 
-  # Current ISS crew count.
-  - resource: http://api.open-notify.org/astros.json
+  # Current ISS crew count. open-notify's astros.json froze in mid-2024
+  # (always reported 9); corquaid's feed is maintained per expedition.
+  - resource: https://corquaid.github.io/international-space-station-APIs/JSON/people-in-space.json
     scan_interval: 3600
     sensor:
       - name: "ISS Crew Count"
         unique_id: observatory_iss_crew_count
         value_template: >-
-          {{ value_json.people | selectattr('craft','eq','ISS') | list | count }}
+          {{ value_json.people | selectattr('iss') | list | count }}
 
 # observatory_iss automation — SUPERSEDED BY PYSCRIPT
 # (see ../pyscript/observatory_publisher.py → publish_iss).
@@ -279,69 +280,70 @@ rest:
 #             {{ {"index": idx, "highlight_star": 0} | tojson }}
 
 # ---------------------------------------------------------------------
-# observatory/scene — evening rotation
+# observatory/scene — schedule-aware rotation (FR-21.12)
 # ---------------------------------------------------------------------
 #
-# Defaults: clock during the day, rotate the four real "observatory"
-# scenes during prime sky-watching hours (sunset to bedtime), then
-# the LDR night scene takes over automatically (FR-7.2) once the
-# room dims.
+# Shaped around the viewer's day (panel lives in her bedroom):
+#   05:00–05:59  MORNING  5-min steps: weather (what to wear) + the
+#                         pre-dawn sky, alternating with the big clock.
+#   06:00–14:59  SCHOOL   nothing pushed → firmware default giant clock.
+#   15:00–20:59  EVENING  5-min steps through every featured scene.
+#   21:00–23:29  CALM     10-min steps through slow, quiet scenes while
+#                         she studies / winds down; the LDR night-light
+#                         (FR-7.2 / FR-21.10) takes over once lights go off.
+#
+# Favourites / skips set from the remote (settings → SCENES, FR-21.9)
+# are echoed by the firmware in observatory/status and surface as the
+# discovered `Favorite scenes` / `Skipped scenes` sensors. Skipped
+# scenes are filtered out here (the firmware also refuses them at
+# priority ≤ 2); favourites are appended a second time so they come
+# up twice per cycle.
 #
 # Priorities (per FR-2.1):
-#   - 1 = passive demo (nothing else asking for attention)
-#   - 2 = scheduled featured scene (evening rotation, this file)
-#   - 3 = sticky featured (e.g. moon_phase override from a button)
-#   - 4 = breaking event (ISS visible, default for `iss_pass`)
-# We push at priority 2 so a real-time `iss_pass` push from
-# `observatory/iss` (priority 4 inside the firmware) still preempts.
-#
-# `duration` matches the rotation cadence so each scene auto-expires
-# back to the firmware default just as the next push arrives — a
-# missed publish therefore degrades gracefully to the giant clock
-# instead of leaving a stale scene up.
+#   - 2 = scheduled featured scene (this file)
+#   - 4 = breaking event (ISS visible / observatory/alert)
+#   - 5 = launch in its final 5 min
+# `duration` matches the step so each scene auto-expires back to the
+# firmware default just as the next push arrives.
 
 automation observatory_evening_rotation:
   - id: observatory_evening_rotation
-    alias: "Observatory — rotate featured scenes (07:00 → 22:30)"
+    alias: "Observatory — schedule-aware scene rotation"
     description: >-
-      Cycles featured scenes every 5 minutes throughout the waking
-      day. Halts before bedtime so the LDR-driven night mode
-      (FR-7.2) takes over cleanly; the LDR override is the real
-      night gate (a covered sensor at noon still suppresses
-      everything) — the 22:30 cutoff is belt + braces for the case
-      where the room stays lit past bedtime.
+      Morning weather + sky (05:00–06:00), clock-only during school,
+      full rotation 15:00–21:00, calm 10-minute rotation 21:00–23:30.
     triggers:
       - trigger: time_pattern
         minutes: "/5"
-    conditions:
-      # Waking-hours window. No `sun.sun` condition any more — the
-      # cycle now runs during the day too so scenes like
-      # launch_countdown (which is meaningful 24/7, not just at
-      # twilight) get airtime. Firmware-side NIGHT override (LDR,
-      # FR-7.2) is the authoritative dark-room gate; this 07:00 /
-      # 22:30 window just prevents a published-but-overridden
-      # scene from sitting in the latch when the room is dark.
-      - condition: template
-        value_template: "{{ now().hour >= 7 and (now().hour < 22 or (now().hour == 22 and now().minute < 30)) }}"
     variables:
-      # 6-step cycle. launch_countdown joins the rotation because it
-      # carries 24/7-relevant data (next scheduled liftoff is
-      # interesting at 10 a.m. as well as 9 p.m.) and the
-      # launch_imminent auto-switch only fires inside the final 5
-      # min anyway — the rest of the day this rotation slot is the
-      # only way the scene gets airtime. `tick` is "minutes since
-      # midnight / 5", giving a stable rotation that doesn't reset
-      # on HA restart.
-      scenes:
-        - clock
-        - moon_phase
-        - planets
-        - iss_pass
-        - constellation_now
-        - launch_countdown
-        - exoplanet_count
-      tick: "{{ ((now().hour * 60 + now().minute) // 5) % (scenes | length) }}"
+      mins: "{{ now().hour * 60 + now().minute }}"
+      mode: >-
+        {{ 'morning' if 300 <= mins < 360 else 'evening' if 900 <= mins < 1260
+           else 'calm' if 1260 <= mins < 1410 else 'off' }}
+      base: >-
+        {{ {'morning': ['weather', 'clock', 'sky_now', 'clock'],
+            'evening': ['weather', 'launch_countdown', 'iss_pass', 'constellation_now',
+                        'spectrum_demo', 'artemis', 'black_holes', 'light_travel',
+                        'sky_now', 'relativity', 'deep_sky', 'moon_phase', 'aurora',
+                        'hail_mary'],
+            'calm':    ['constellation_now', 'deep_sky', 'moon_phase', 'sky_now',
+                        'light_travel', 'hail_mary']}.get(mode, ['clock']) }}
+      # Matched by suffix so a renamed device (entity_id prefix) still works.
+      skip: >-
+        {{ (states.sensor | selectattr('entity_id', 'search', 'observatory_skipped_scenes$')
+            | map(attribute='state') | first | default('none')).split(',') }}
+      fav: >-
+        {{ (states.sensor | selectattr('entity_id', 'search', 'observatory_favorite_scenes$')
+            | map(attribute='state') | first | default('none')).split(',') }}
+      scenes: >-
+        {% set kept = base | reject('in', skip) | list %}{% set kept = kept if kept else ['clock'] %}{{ kept + (kept | select('in', fav) | list) }}
+      step_min: "{{ 10 if mode == 'calm' else 5 }}"
+      start_min: "{{ {'morning': 300, 'evening': 900, 'calm': 1260}.get(mode, 0) }}"
+      tick: "{{ ((mins - start_min) // step_min) % (scenes | length) }}"
       scene_id: "{{ scenes[tick] }}"
+    conditions:
+      - condition: template
+        value_template: "{{ mode != 'off' and (mins - start_min) % step_min == 0 }}"
     actions:
       - action: mqtt.publish
         data:
@@ -351,7 +353,7 @@ automation observatory_evening_rotation:
             {{ {
               "scene_id": scene_id,
               "priority": 2,
-              "duration": 300,
+              "duration": step_min * 60,
               "sticky": false
             } | tojson }}
 
@@ -393,6 +395,7 @@ mqtt:
         - blade_runner
         - lcars_tos
         - section_nine
+        - hail_mary
       icon: mdi:palette
 
   # observatory/theme — image-tint strength (FR-15.6 / phase T.11)

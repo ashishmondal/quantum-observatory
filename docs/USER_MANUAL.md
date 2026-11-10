@@ -36,8 +36,8 @@ Two pieces of HA setup, both one-time:
      --url http://homeassistant.local:8123 \
      --token "$HA_TOKEN"
    ```
-   This installs `homeassistant/packages/quantum_observatory.yaml` (theme + image-tint controls, ISS REST sensor, 24 h scene rotation, time-correction automation) and the `homeassistant/pyscript/observatory_publisher.py` ephemeris publisher (Jupiter / Moon / constellation / ISS-pass prediction / next-launch via `skyfield` + Launch Library 2).
-2. **Wait ~10 seconds after the first MQTT connect.** The firmware self-registers as a Home Assistant device via MQTT-Discovery — no manual sensor configuration. You'll see a new **Quantum Observatory** device card under Settings → Devices with 14 entities ([§8 Home Assistant integration](#8-home-assistant-integration)).
+   This installs `homeassistant/packages/quantum_observatory.yaml` (theme + image-tint controls, ISS REST sensors, the day-shaped scene rotation, time-correction automation) and the `homeassistant/pyscript/observatory_publisher.py` publisher (Moon / constellation / sky-now / ISS-pass prediction + alerts / next launch / Artemis / weather / aurora / gravitational waves / meteor + conjunction alerts via `skyfield`, Launch Library 2, NOAA SWPC and GraceDB).
+2. **Wait ~10 seconds after the first MQTT connect.** The firmware self-registers as a Home Assistant device via MQTT-Discovery — no manual sensor configuration. You'll see a new **Quantum Observatory** device card under Settings → Devices with 18 entities ([§8 Home Assistant integration](#8-home-assistant-integration)).
 
 ### 2.4 Time
 
@@ -71,13 +71,45 @@ Scenes are picked by Home Assistant, by the IR remote ▲/▼, or by the firmwar
 | Wire id | What it shows | Where it comes from |
 |---|---|---|
 | `clock` | Giant LCD-style HH:MM with "18 88" ghost segments, animated minute-roll, 1 Hz colon pulse, themed background motion, date below | default; what you'll see most of the time |
-| `moon_phase` | Phase glyph + bucket name (NEW / WAX CRES / FIRST QTR / WAX GIB / FULL / WAN GIB / LAST QTR / WAN CRES), illumination % | HA pyscript publishes real synodic phase every 6 h |
-| `jupiter_visibility` | Bearing + elevation (`VIS 090x45`), magnitude, distance; `BELOW` when below the horizon; `IN <IAU>` (host constellation) in daylight | HA pyscript every 15 min using `skyfield` + DE421 |
-| `constellation_now` | Real (RA, Dec) star projection of the constellation overhead at your latitude, with brightest stars sized + named; pulsing red `+` cross marks a highlighted star | HA pyscript hourly; falls back to local 30 s rotation if HA is silent |
+| `weather` | Morning: temp + condition, HI/LO, rain chance, then **WEAR:** coat / jacket / layers / hoodie / T-shirt (+ umbrella). Evening: tonight's cloud cover + **STARGAZE: YES / MAYBE / NO**. Small condition icon. | HA pyscript every 15 min from the OpenWeatherMap + met.no weather entities |
+| `sky_now` | Up to five bright things above the horizon right now ("JUPITER E 34"), with a mini horizon dome | HA pyscript + `skyfield` every 10 min |
 | `iss_pass` | When the ISS is visible: `VIS <bearing>x<elevation>` look-angle + `CREW N`. Otherwise a countdown: `VIS IN 3D` / `VIS IN 5H` / `VIS IN 12M` / `VIS SOON` | HA pyscript every 30 s; visibility is the three-way AND of (ISS sunlit) AND (sun ≤ −6° at observer) AND (ISS above horizon) |
+| `constellation_now` | Real (RA, Dec) star projection of the constellation overhead at your latitude, with brightest stars sized + named; pulsing red `+` cross marks a highlighted star | HA pyscript hourly; falls back to local 30 s rotation if HA is silent |
+| `moon_phase` | Phase glyph + bucket name (NEW / WAX CRES / FIRST QTR / WAX GIB / FULL / WAN GIB / LAST QTR / WAN CRES), illumination % | HA pyscript publishes real synodic phase every 6 h |
+| `spectrum_demo` | Rainbow bar with a marker sweeping famous spectral lines, then lessons: **redshift**, **blueshift**, dark lines = a star's recipe, exoplanet air (JWST), and the *Project Hail Mary* **Petrova line** | offline |
 | `launch_countdown` | Bracketed `LNCH` header, six-cell `T-HH:MM:SS` odometer (flips to `T+` for ~30 min after liftoff), typewriter info row cycling mission / org / vehicle / country / liftoff time / NET-or-CONFIRMED / window / outcome, bottom marquee with the mission description | HA pyscript every 10 min from Launch Library 2; auto-switches in (priority 5 sticky) during the final 5 min before T-0 and plays a `C6→E6→G6→C7` fanfare, then per-second ticks T-10…T-1 and a 3-note ignition sting at T-0. Suppressed entirely while night mode is active. |
+| `artemis` | Artemis Moon program: NEXT mission + NET date / days to go, LAST mission + outcome, mission description, SLS facts; Orion dot looping a tiny Moon | HA pyscript every 6 h from Launch Library 2 |
+| `black_holes` | Latest gravitational-wave detection: id, days ago, what merged, how far (and so how long ago the wave left), alert count, plus LIGO facts; inspiral → merge → ringdown animation | HA pyscript every 6 h from GraceDB |
+| `light_travel` | "How long ago did this light leave?" — Moon, Sun, Voyager 1, Proxima, Tau Ceti, Betelgeuse … Andromeda, the CMB, with **LEFT IN <year>** | offline |
+| `relativity` | Real time-dilation: GPS clocks (+38 µs/day), ISS astronauts age slower, Everest, muons, neutron stars, black holes | offline |
+| `deep_sky` | Pixel-art Orion Nebula, Andromeda, Pillars of Creation, Ring, Crab, Pleiades — picture first, then distance + fact | offline |
+| `aurora` | NOAA Kp now + 24 h max, the Kp needed at your latitude, a verdict, and an animated aurora that brightens with Kp | HA pyscript every 30 min from NOAA SWPC |
+| `hail_mary` | *Project Hail Mary* easter eggs: Tau Ceti, 40 Eridani, Astrophage, the Petrova line, Rocky | offline |
 
-The day rotation automation walks `clock → moon_phase → jupiter_visibility → iss_pass → constellation_now → launch_countdown` every 5 minutes from 07:00 until 22:30 local, then steps back so the LDR-driven night mode can take over. The LDR override is the authoritative dark-room gate (a covered sensor at noon still suppresses everything); the 07:00 / 22:30 window is belt + braces for the case where the room stays lit past bedtime.
+`planets` and `exoplanet_count` still exist (MQTT-reachable) but are out of the rotation and the remote cycle.
+
+#### The daily schedule (HA rotation)
+
+| Time | What happens |
+|---|---|
+| 05:00–06:00 | weather → clock → sky now → clock, 5 min each |
+| 06:00–15:00 | nothing pushed — giant clock (school hours) |
+| 15:00–21:00 | every scene above (except `clock`), 5 min each |
+| 21:00–23:30 | calm: constellation, deep sky, moon, sky now, light travel, hail mary — 10 min each |
+| lights off | night-light (see `night` below) |
+
+Scenes marked **SKIP** in Settings → SCENES are left out; **FAV** scenes come up twice per cycle.
+
+#### "Go look now" alerts (`alert`)
+
+A minute or two before something worth stepping outside for, the panel jumps to a pulsing **[LOOK]** screen with a fanfare and three lines — what, which way, how long — plus a time-left bar:
+
+- **ISS** ~2 min before every *visible* pass: `ISS IN 2 MIN` / `LOOK NW>SE` / `6 MIN MAX 54`. When the station rises the panel switches to `iss_pass` with live pointing.
+- **Meteor showers** on peak nights at 20:30, and at 05:05 on the peak morning and the morning after (radiant direction + rate).
+- **Close pairs** — Moon / Venus / Mars / Jupiter / Saturn within 4° of each other, once per night.
+- **Aurora** — when Kp reaches what your latitude needs, after dark.
+
+Alerts only fire 05:00–06:00 and 15:00–22:00, and never switch scenes while the room is dark.
 
 ### 4.2 Safety / status scenes (firmware-driven)
 
@@ -85,8 +117,8 @@ These engage automatically. You don't normally pick them.
 
 | Wire id | When it engages | What it shows |
 |---|---|---|
-| `night` | LDR reading goes dark for ~1 s | very dim HH:MM on black, no chrome |
-| `thermal_safe` | DS3231 die temp exceeds 50 °C | "COOL DOWN" + current temperature, very dim |
+| `night` | LDR reading goes dark for ~1 s | night-light: very dim deep-red HH:MM + date over a slow, barely-there sky (twinkling stars, faint aurora ribbon), no chrome |
+| `thermal_safe` | DS3231 die temp exceeds 50 °C | "COOL" + current temperature + dim HH:MM |
 | `offline` | MQTT broker unreachable for ~5 s | clock + dim starfield + status hint |
 | `splash` | boot, until first MQTT connect | the observatory artwork |
 
@@ -108,7 +140,7 @@ mosquitto_pub -t observatory/scene -m '{"scene_id":"gfx_test"}'
 
 ## 5. Themes
 
-Six retro sci-fi looks. Each bundles inks, fonts, header decorations, and a signature animated background for the giant clock; switches happen in one frame with no scene re-init.
+Seven retro sci-fi looks. Each bundles inks, fonts, header decorations, and a signature animated background for the giant clock; switches happen in one frame with no scene re-init.
 
 | Wire id | Vibe | Header font | Background |
 |---|---|---|---|
@@ -118,6 +150,7 @@ Six retro sci-fi looks. Each bundles inks, fonts, header decorations, and a sign
 | `blade_runner` | cyan/orange + frame border | Pixel Operator | rain + glow |
 | `lcars_tos` | block bars in place of brackets, Trek-era LCARS | Pixel Operator | LCARS sweep |
 | `section_nine` | Ghost in the Shell, blue/orange technical | Pixel Operator | grid |
+| `hail_mary` | *Project Hail Mary* — Petrova crimson + xenonite silver-blue, `<` `>` brackets, Rocky's "amaze" melody | Pixel Operator | the Petrova line arcing from a star, Astrophage specks riding it |
 
 **Pick a theme:** rotate with ◄/► on the remote, or use the **Observatory theme** dropdown that appears in Home Assistant. The choice persists across power cycles (`/prefs.json` on the device's LittleFS partition, with a wear-protected writeback — see [§9 Persistence](#9-persistence)).
 
@@ -139,7 +172,7 @@ mosquitto_pub -t observatory/scene -m '{"scene_id":"ir_test"}'
 
 | Button | When menu is **closed** | When menu is **open** |
 |---|---|---|
-| **▲ / ▼** | cycle through the operator scene list: `CLOCK → MOON_PHASE → JUPITER_VISIBILITY → CONSTELLATION_NOW → ISS_PASS → LAUNCH_COUNTDOWN` | move row up / down |
+| **▲ / ▼** | cycle through the operator scene list: `CLOCK → WEATHER → SKY_NOW → ISS_PASS → CONSTELLATION_NOW → MOON_PHASE → SPECTRUM_DEMO → LAUNCH_COUNTDOWN → ARTEMIS → BLACK_HOLES → LIGHT_TRAVEL → RELATIVITY → DEEP_SKY → AURORA → HAIL_MARY` (scenes marked SKIP are hopped over) | move row up / down |
 | **◄ / ►** | cycle themes (wraps); in `font_demo` picks fonts instead | adjust value (toggle, cycle, or tint step) |
 | **OK** | (no global action) | commit / enter category |
 | **Back** | clear any sticky scene and return to `CLOCK` | leave category → ROOT → close menu |
@@ -170,7 +203,7 @@ Press OK or MENU again to dismiss early.
 
 ### 6.4 Settings menu
 
-Press **\*** (Options) on the remote to open. Two categories:
+Press **\*** (Options) on the remote to open. Three categories:
 
 **DISPLAY**
 - **BG TINT** — 11-step segmented bar (0..100 % in 10 % increments). ◄/► steps; rail clamps at the ends play a low "thunk". A small live-preview swatch shows the underlying image with the candidate tint so you can judge before committing.
@@ -179,6 +212,13 @@ Press **\*** (Options) on the remote to open. Two categories:
 - **THEME** — on/off, gates the FR-10.7 theme melody fired when the look-and-feel changes.
 - **BUTTON** — on/off, gates every IR / on-board button chirp **and** every settings-menu cue (so you can mute the menu itself for night fiddling).
 - **TICK** — `NONE / MIN / 10MIN / HOUR`, gates the giant-clock digit-roll click cascade.
+
+**SCENES** — one row per scene in the ▲/▼ list, scrolling three at a time. ◄/► (or OK) cycles each row:
+- **ON** — normal.
+- **FAV** — shows up twice per evening rotation.
+- **SKIP** — never shown by the rotation and hopped over by ▲/▼. (A deliberate HA command at priority ≥ 3 still works.)
+
+The choices are saved on the device and show up in Home Assistant as **Favorite scenes** / **Skipped scenes**.
 
 Navigation:
 
@@ -206,6 +246,8 @@ The device drives a small piezo buzzer on GP27. All audible cues sit above 8 kHz
 | Cue | When | Gate |
 |---|---|---|
 | Short chirp | every accepted IR remote button press, on-board MENU press | `button_sound = on` |
+| Alert fanfare | a "go look now" alert lands (`alert` scene) | night quiet |
+| ISS "ta-da" | the ISS becomes visible from your location | night quiet |
 | Theme melody (~1–2 s) | whenever the active theme actually changes (idempotent re-sets are silent) | `theme_sound = on` |
 | Tick click | each minute-roll digit step on the giant clock | `tick_sound_mode != NONE` (selects MIN / 10MIN / HOUR) |
 | Settings cues | open/close jingles, knob-pitch clicks during value edits, rail thunks | `button_sound = on` |
@@ -237,6 +279,7 @@ After the first connect, HA shows a single **Quantum Observatory** device with t
 | `binary_sensor.*_night` | light | LDR-driven night-mode flag |
 | `binary_sensor.*_thermal_hot` | heat (diagnostic) | thermal-safe override active |
 | `binary_sensor.*_prefs_dirty` | problem (diagnostic) | a setting hasn't been durably saved yet |
+| `sensor.*_favorite_scenes`, `_skipped_scenes` | — | scenes marked FAV / SKIP from the remote (`none` when empty); the rotation reads these |
 | `sensor.*_fps`, `_render_slack`, `_uptime`, `_free_heap`, `_rssi` | diagnostic | render + system health |
 | `sensor.*_mqtt_state`, `_mqtt_rc`, `_mqtt_backoff` | diagnostic | link-layer state |
 
@@ -248,7 +291,7 @@ If you keep long-running HA history, exclude the diagnostic sensors from the rec
 
 The HA package installs two write-back controls that stay manually configured:
 
-- **`select.observatory_theme`** — dropdown for the six themes.
+- **`select.observatory_theme`** — dropdown for the seven themes.
 - **`number.observatory_image_tint`** — 0..100 slider.
 
 Both publish to `observatory/theme`; the firmware echoes the active values back via `observatory/status` so the HA UI always reflects ground truth.
@@ -258,7 +301,11 @@ Both publish to `observatory/theme`; the firmware echoes the active values back 
 ```sh
 # pick a scene
 mosquitto_pub -t observatory/scene \
-  -m '{"scene_id":"jupiter_visibility","priority":2,"sticky":true}'
+  -m '{"scene_id":"deep_sky","priority":3,"duration":300}'
+
+# test a go-look-now alert
+mosquitto_pub -t observatory/alert \
+  -m '{"kind":"iss","title":"ISS IN 2 MIN","line2":"LOOK NW>SE","line3":"6 MIN MAX 54","duration_s":60}'
 
 # release a sticky scene
 mosquitto_pub -t observatory/clear_sticky -m ''
@@ -285,16 +332,20 @@ Full topic / payload contract: [MQTT_TOPICS.md](MQTT_TOPICS.md).
 
 ## 9. Persistence
 
-The device keeps a small `/prefs.json` on its LittleFS partition. v3 schema:
+The device keeps a small `/prefs.json` on its LittleFS partition. v5 schema:
 
 ```json
-{ "v": 3, "theme": "section_nine", "image_tint_pct": 50,
-  "theme_sound": true, "button_sound": true, "tick_sound_mode": 1 }
+{ "v": 5, "theme": "hail_mary", "image_tint_pct": 50,
+  "theme_sound": true, "button_sound": true, "tick_sound_mode": 1,
+  "planet_index": 0,
+  "scene_fav": "0000000000008000", "scene_skip": "0000000000000000" }
 ```
+
+`scene_fav` / `scene_skip` are hex bitmasks keyed by scene id (Settings → SCENES).
 
 Writes are **wear-protected**: every setting change marks the cache dirty, waits 5 s for further edits to settle, then writes at most once every 30 s. Spamming ◄/► through every theme for 10 seconds produces exactly one flash write. The `prefs_dirty` binary_sensor in HA — and the trailing `*` on the info overlay — show the brief window before the write lands; expect it to clear within 35 s of the last change.
 
-A v1 or v2 file from an older firmware loads cleanly under v3 with defaults for the missing keys (forward-compat passthrough).
+A v1–v4 file from an older firmware loads cleanly under v5 with defaults for the missing keys (forward-compat passthrough).
 
 To reset to factory defaults (`apollo_amber`, tint 50, all sounds on, tick MIN): publish to `observatory/prefs/reset` — the device deletes the file and reboots.
 
@@ -320,6 +371,9 @@ To reset to factory defaults (`apollo_amber`, tint 50, all sounds on, tick MIN):
 | Clock shows `--:--` | DS3231 not yet read, or oscillator-stop flag set (loss of backup power). Check the coin cell. Once a fresh time is written to `observatory/time` (or HA pushes the hourly correction), it resolves. |
 | ISS scene shows `WAIT` | No fresh ISS payload in the last 1 h. HA pyscript publisher down, or `sensor.iss_position` stuck `unavailable`. |
 | Jupiter shows `BELOW` in daylight you expect to see it | Working as intended — visibility AND requires sun ≤ −6° at the observer. The line will read `IN <IAU>` (host constellation) in daylight when Jupiter is above the horizon. |
+| `weather` / `sky_now` / `aurora` show `WAIT` | No fresh feed from HA. Check `pyscript.observatory_publisher_<topic>` in Developer Tools → States — it carries the last payload or the error. |
+| No "go look" alert for an ISS pass | Alerts only fire 05:00–06:00 and 15:00–22:00, only for *visible* passes, and only switch scenes in a lit room. `pyscript.iss_next_pass_unix` shows the next visible pass. |
+| A scene never comes up in rotation | It's probably marked SKIP in Settings → SCENES (also listed in the **Skipped scenes** HA sensor). |
 | Stuck in `night` mode | Light sensor reading is in the dark range. Cover/uncover briefly to test, or tune the threshold via `observatory/night`. |
 | IR remote does nothing | Bright scene + cheap IR receiver = noise. The `ir_test` diagnostic scene shows live decode + parity counters; if `parity` / `unknown` dominate, you've got EMI. Also confirm the remote's NEC address matches `IR_REMOTE_ADDR_EXPECTED` in `config.h`. |
 | Settings menu opens but ▲/▼ cycles scenes instead | Likely a stale firmware build — the IR carve-out is conditional on `settings_ui::is_open()`. Reflash. |

@@ -31,6 +31,9 @@ constexpr Prefs kDefaults = {
     .button_sound    = true,
     .tick_sound_mode = TickSoundMode::MIN,
     .planet_index    = 0,  // MERCURY — first row of planet_catalog::kBodies[]
+    .reserved0       = 0,
+    .scene_fav_mask  = 0,
+    .scene_skip_mask = 0,
 };
 
 // In-RAM cache. Read-mostly: only mutated by Core 0 setters (none
@@ -95,7 +98,25 @@ bool is_known_key(const char* k) {
          strcmp(k, "theme_sound") == 0 ||
          strcmp(k, "button_sound") == 0 ||
          strcmp(k, "tick_sound_mode") == 0 ||
-         strcmp(k, "planet_index") == 0;
+         strcmp(k, "planet_index") == 0 ||
+         strcmp(k, "scene_fav") == 0 ||
+         strcmp(k, "scene_skip") == 0;
+}
+
+bool parse_mask(const char* s, uint64_t* out) {
+  if (s == nullptr || s[0] == '\0') return false;
+  uint64_t v = 0;
+  for (const char* p = s; *p != '\0'; ++p) {
+    const char c = *p;
+    uint8_t d;
+    if      (c >= '0' && c <= '9') d = static_cast<uint8_t>(c - '0');
+    else if (c >= 'a' && c <= 'f') d = static_cast<uint8_t>(c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') d = static_cast<uint8_t>(c - 'A' + 10);
+    else return false;
+    v = (v << 4) | d;
+  }
+  *out = v;
+  return true;
 }
 
 // Parse /prefs.json into the cache + passthrough buffer. Called once
@@ -119,9 +140,9 @@ void load() {
   }
   const size_t sz = f.size();
   // Hard cap matches the parse buffer; a runaway file is a corruption
-  // signal, not something to grow into. 256 B leaves room for the v1
+  // signal, not something to grow into. 384 B leaves room for the v5
   // schema + a healthy chunk of forward-version passthrough.
-  constexpr size_t kFileCap = 256;
+  constexpr size_t kFileCap = 384;
   if (sz == 0 || sz >= kFileCap) {
     Serial.print("[prefs] /prefs.json bad size=");
     Serial.print(sz);
@@ -252,6 +273,17 @@ void load() {
     }
   }
 
+  // v5 — scene favourite / skip masks (hex strings).
+  {
+    uint64_t m;
+    if (parse_mask(doc["scene_fav"] | static_cast<const char*>(nullptr), &m)) {
+      s_cache.scene_fav_mask = m;
+    }
+    if (parse_mask(doc["scene_skip"] | static_cast<const char*>(nullptr), &m)) {
+      s_cache.scene_skip_mask = m;
+    }
+  }
+
   // Mirror what we just learned about the on-disk state so the P.3
   // writeback gate can recognise a no-op set (FR-18.4 step 2). We
   // copy s_cache (rather than re-reading individual keys) because
@@ -319,9 +351,9 @@ constexpr const char* kTmpPath = "/prefs.json.tmp";
 bool write_atomic(const Prefs& snapshot) {
   if (!s_mounted) return false;
 
-  // 256 B fits the v1 schema (~64 B) plus the full passthrough
+  // 384 B fits the v5 schema (~160 B) plus the full passthrough
   // buffer (192 B) + structural overhead. Same hard cap as load().
-  constexpr size_t kFileCap = 256;
+  constexpr size_t kFileCap = 384;
   char buf[kFileCap];
   const char* theme_id = theme::string_from_id(snapshot.theme);
   // Format: {"v":3,"theme":"<id>","image_tint_pct":<n>,
@@ -335,7 +367,9 @@ bool write_atomic(const Prefs& snapshot) {
                          "\"theme_sound\":%s,"
                          "\"button_sound\":%s,"
                          "\"tick_sound_mode\":%u,"
-                         "\"planet_index\":%u%s}",
+                         "\"planet_index\":%u,"
+                         "\"scene_fav\":\"%08lx%08lx\","
+                         "\"scene_skip\":\"%08lx%08lx\"%s}",
                          static_cast<unsigned>(kSchemaVersion),
                          theme_id,
                          static_cast<unsigned>(snapshot.image_tint_pct),
@@ -343,6 +377,10 @@ bool write_atomic(const Prefs& snapshot) {
                          snapshot.button_sound ? "true" : "false",
                          static_cast<unsigned>(snapshot.tick_sound_mode),
                          static_cast<unsigned>(snapshot.planet_index),
+                         static_cast<unsigned long>(snapshot.scene_fav_mask >> 32),
+                         static_cast<unsigned long>(snapshot.scene_fav_mask & 0xFFFFFFFFu),
+                         static_cast<unsigned long>(snapshot.scene_skip_mask >> 32),
+                         static_cast<unsigned long>(snapshot.scene_skip_mask & 0xFFFFFFFFu),
                          s_passthrough);
   if (n <= 0 || static_cast<size_t>(n) >= sizeof(buf)) {
     Serial.print("[prefs] write FAILED — payload would be ");
@@ -514,6 +552,33 @@ void set_planet_index(uint8_t idx) {
     s_cache.planet_index = idx;
     s_dirty              = true;
     s_last_setter_ms     = millis();
+  }
+  mutex_exit(&s_mutex);
+}
+
+SceneMark scene_mark(scene_state::SceneId id) {
+  const uint8_t i = static_cast<uint8_t>(id);
+  if (i >= 64) return SceneMark::NORMAL;
+  const uint64_t bit = 1ull << i;
+  if (s_cache.scene_skip_mask & bit) return SceneMark::SKIP;
+  if (s_cache.scene_fav_mask  & bit) return SceneMark::FAV;
+  return SceneMark::NORMAL;
+}
+
+void set_scene_mark(scene_state::SceneId id, SceneMark mark) {
+  const uint8_t i = static_cast<uint8_t>(id);
+  if (i >= 64) return;
+  const uint64_t bit  = 1ull << i;
+  mutex_enter_blocking(&s_mutex);
+  uint64_t fav  = s_cache.scene_fav_mask  & ~bit;
+  uint64_t skip = s_cache.scene_skip_mask & ~bit;
+  if (mark == SceneMark::FAV)  fav  |= bit;
+  if (mark == SceneMark::SKIP) skip |= bit;
+  if (fav != s_cache.scene_fav_mask || skip != s_cache.scene_skip_mask) {
+    s_cache.scene_fav_mask  = fav;
+    s_cache.scene_skip_mask = skip;
+    s_dirty                 = true;
+    s_last_setter_ms        = millis();
   }
   mutex_exit(&s_mutex);
 }

@@ -43,6 +43,7 @@
 
 #include "config.h"
 #include "gfx_text.h"
+#include "scene_state.h"
 #include "settings_ui.h"
 #include "scenes/bayer_dither.h"
 #include "scenes/layer.h"
@@ -104,9 +105,9 @@ public:
     // ── Title row (no typewriter; render the full string immediately).
     const char* title = (snap.mode == settings_ui::Mode::ROOT)
                           ? "SETTINGS"
-                          : (snap.cat == settings_ui::Cat::DISPLAY
-                              ? "DISPLAY"
-                              : "SOUND");
+                          : (snap.cat == settings_ui::Cat::DISPLAY ? "DISPLAY"
+                             : snap.cat == settings_ui::Cat::SOUND ? "SOUND"
+                                                                    : "SCENES");
     gfx::draw_text_halo(matrix, /*x=*/2, /*y=*/5, title, accent, halo);
 
     if (snap.mode == settings_ui::Mode::ROOT) {
@@ -150,23 +151,24 @@ private:
     return (now_ms - snap.flash_started_ms) < kFlashMs;
   }
 
-  // ROOT view: two stacked rows -- DISPLAY / SOUND. Selected row has
-  // accent ink + boxed border; unselected is dim ink only.
+  // ROOT view: three stacked rows -- DISPLAY / SOUND / SCENES. Selected
+  // row has accent ink + boxed border; unselected is dim ink only.
   void draw_root(Adafruit_Protomatter& matrix,
                  const settings_ui::Snapshot& snap,
                  uint32_t now_ms,
                  uint16_t ink, uint16_t halo, uint16_t accent) {
     (void)now_ms;
     struct Row { const char* label; int16_t y_baseline; int16_t y_box; };
-    const Row rows[2] = {
-        {"DISPLAY", 18, 12},
-        {"SOUND",   27, 21},
+    const Row rows[3] = {
+        {"DISPLAY", 14, 8},
+        {"SOUND",   21, 15},
+        {"SCENES",  28, 22},
     };
-    for (uint8_t i = 0; i < 2; ++i) {
+    for (uint8_t i = 0; i < 3; ++i) {
       const bool sel = (i == snap.sel_index);
       const uint16_t fg = sel ? accent : ink;
       if (sel) {
-        matrix.drawRect(1, rows[i].y_box, PANEL_WIDTH - 2, 9, accent);
+        matrix.drawRect(1, rows[i].y_box, PANEL_WIDTH - 2, 8, accent);
       }
       gfx::draw_text_halo(matrix, /*x=*/3, rows[i].y_baseline,
                           rows[i].label, fg, halo);
@@ -181,9 +183,65 @@ private:
     const bool flash = flash_active(snap, now_ms);
     if (snap.cat == settings_ui::Cat::DISPLAY) {
       draw_display(matrix, snap, ink, halo, accent, flash);
-    } else {
+    } else if (snap.cat == settings_ui::Cat::SOUND) {
       draw_sound(matrix, snap, ink, halo, accent, flash);
+    } else {
+      draw_scenes(matrix, snap, ink, halo, accent, flash);
     }
+  }
+
+  // SCENES view: 3-row scrolling window over kRemoteCycle with the
+  // viewer's ON / FAV / SKIP mark right-aligned.
+  void draw_scenes(Adafruit_Protomatter& matrix,
+                   const settings_ui::Snapshot& snap,
+                   uint16_t ink, uint16_t halo, uint16_t accent,
+                   bool flash) {
+    if (snap.scene_count == 0) return;
+    const uint8_t sel   = snap.sel_index < snap.scene_count ? snap.sel_index : 0;
+    uint8_t       first = sel > 0 ? static_cast<uint8_t>(sel - 1) : 0;
+    if (first + 3 > snap.scene_count) {
+      first = snap.scene_count > 3 ? static_cast<uint8_t>(snap.scene_count - 3) : 0;
+    }
+    constexpr int16_t kRowH = 6;
+    constexpr int16_t kY0   = 13;
+    for (uint8_t r = 0; r < 3 && first + r < snap.scene_count; ++r) {
+      const uint8_t i  = static_cast<uint8_t>(first + r);
+      const int16_t y  = kY0 + r * kRowH;
+      const bool   is_sel = (i == sel);
+      char label[9];
+      short_scene_label(kRemoteCycle[i], label, sizeof(label));
+      const uint8_t mark = snap.scene_marks[i];
+      const char* val = mark == 1 ? "FAV" : (mark == 2 ? "SKIP" : "ON");
+      const uint16_t fg = is_sel ? accent : ink;
+      if (is_sel) gfx::draw_text_halo(matrix, /*x=*/0, y, ">", accent, halo);
+      gfx::draw_text_halo(matrix, /*x=*/5, y, label, fg, halo);
+      int16_t  vbx, vby;
+      uint16_t vbw, vbh;
+      matrix.getTextBounds(val, 0, 0, &vbx, &vby, &vbw, &vbh);
+      const int16_t vx = static_cast<int16_t>(
+          PANEL_WIDTH - 2 - static_cast<int16_t>(vbw) - vbx);
+      const uint16_t vink = mark == 2 ? theme::ink(theme::Ink::STATUS_DIM)
+                          : mark == 1 ? theme::ink(theme::Ink::STATUS_OK) : fg;
+      if (is_sel && flash) {
+        matrix.fillRect(vx + vbx - 1, y - 5, static_cast<int16_t>(vbw) + 2, kRowH, accent);
+        gfx::draw_text_halo(matrix, vx, y, val, 0x0000, 0x0000);
+      } else {
+        gfx::draw_text_halo(matrix, vx, y, val, vink, halo);
+      }
+    }
+  }
+
+  // "constellation_now" → "CONSTELLAT" — uppercase, '_' → ' ', clipped.
+  static void short_scene_label(scene_state::SceneId id, char* out, size_t cap) {
+    const char* w = scene_state::string_from_id(id);
+    size_t n = 0;
+    for (; *w != '\0' && n + 1 < cap; ++w) {
+      char c = *w;
+      if (c == '_') c = ' ';
+      if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+      out[n++] = c;
+    }
+    out[n] = '\0';
   }
 
   void draw_display(Adafruit_Protomatter& matrix,

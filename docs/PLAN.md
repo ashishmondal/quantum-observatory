@@ -323,7 +323,7 @@ Companion to [REQUIREMENTS.md](REQUIREMENTS.md). Each step is a **small, demoabl
 - [x] **7.3** `jupiter_visibility` — direction + time
 - [x] **7.4** `constellation_now` — overhead constellation art + name (sticky); HA picks current overhead constellation by date + observer lat/lon. See [FUTURE_SCENES.md](FUTURE_SCENES.md) for the long-tail scene backlog.
 - [x] **7.5** Home Assistant automations & sensors that publish them
-- [ ] **7.6** `spectrum_demo` — visible-spectrum bar + sweeping marker over famous absorption lines; fully offline, procedural `constexpr` gradient (promoted from [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 2)
+- [x] **7.6** `spectrum_demo` — visible-spectrum bar + sweeping marker over famous absorption lines; fully offline, procedural `constexpr` gradient (promoted from [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 2); FR-21.4 lesson pass added in Phase V
 - [x] **7.7** `exoplanet_count` — animated procedural planet (FNV-1a-seeded archetype + hue + bands) + NASA Exoplanet Archive stats (`TOT N` / `±N WK` / `NR x.xLY`); HA pyscript daily poll → `observatory/exoplanet`; ships with reusable `planet::ProceduralPlanet` renderer (`include/render/planet_renderer.h`) for future visibility scenes (saturn / mars / venus_phase); intro animation dot→zoom→park-right at ~75 % height, then typewriter overlays planet (promoted from [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 2)
 
 ---
@@ -1114,6 +1114,43 @@ button per FR-11.3.
   - **Exit:** firmware builds; an hour-long observation shows no
     FPS dip, no slack regression, no formatter glitch at the
     regime boundaries.
+
+---
+
+## Phase V — Viewer-Profile Pass (FR-21)
+
+> Driven by the 2026-11 viewer interview (REQUIREMENTS §1 viewer
+> profile). Keep / drop / add decisions are recorded there.
+
+- [x] **V.1 Rotation reshaped** — `planets` / `exoplanet_count` out of
+  the HA rotation + `kRemoteCycle`; HA rotation reshaped to the
+  viewer's day (05–06 weather+sky, school clock-only, 15–21 full,
+  21–23:30 calm 10-min) (FR-21.12).
+- [x] **V.2 `feeds` state module** — one mutex, typed slots for
+  weather / sky / aurora / gw / artemis / alert, per-slot freshness;
+  six new MQTT routes; status capacity 1280 → 1792 B.
+- [x] **V.3 `weather` + `sky_now`** (FR-21.1 / 21.2) — pyscript
+  `publish_weather` (OWM daily + met.no hourly), `publish_sky`
+  (skyfield planets + 15 bright stars).
+- [x] **V.4 Go-look-now alerts** (FR-21.3) — `observatory/alert`,
+  `alert` scene at priority 4 + fanfare; pyscript ISS (pass rise/set
+  azimuth, max alt, duration added to the next-pass compute), meteor
+  peaks, close pairs, aurora; alert window 05–06 / 15–22.
+- [x] **V.5 Physics** (FR-21.4) — `light_travel`, `relativity`,
+  spectrum lesson pass (redshift / blueshift / elements / exoplanet
+  air / Petrova line).
+- [x] **V.6 `black_holes`** (FR-21.6) — GraceDB significant superevents;
+  classification + DISTMEAN parsed from the public GCN notice.
+- [x] **V.7 `aurora`** (FR-21.5) — NOAA SWPC Kp + Kp-scaled curtain.
+- [x] **V.8 `artemis`** (FR-21.7) — LL2 Artemis search, SLS only.
+- [x] **V.9 `deep_sky` + `hail_mary` + HAIL_MARY theme** (FR-21.8).
+- [x] **V.10 Favourite / skip** (FR-21.9) — prefs v5 masks, Settings →
+  SCENES, status + discovered sensors, firmware + HA filtering.
+- [x] **V.11 Night-light** (FR-21.10) and **time on every screen**
+  (FR-21.11).
+- [ ] **V.12 Soak** — an evening of real rotation + at least one real
+  ISS alert observed end-to-end; check `render_slack_ms` stays > 8 ms
+  on `deep_sky` / `aurora`.
 
 ---
 

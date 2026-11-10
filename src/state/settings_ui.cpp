@@ -6,6 +6,7 @@
 #include "settings_ui.h"
 
 #include "buzzer.h"
+#include "config.h"
 #include "prefs.h"
 
 namespace settings_ui {
@@ -81,6 +82,7 @@ uint8_t item_count_for(Cat c) {
   switch (c) {
     case Cat::DISPLAY: return static_cast<uint8_t>(DisplayItem::COUNT);
     case Cat::SOUND:   return static_cast<uint8_t>(SoundItem::COUNT);
+    case Cat::SCENES:  return kRemoteCycleCount;
     default:           return 1;
   }
 }
@@ -239,6 +241,15 @@ bool apply_value_delta(int8_t delta) {
         default: return false;
       }
     }
+    case Cat::SCENES: {
+      // ON → FAV → SKIP → ON (► / OK), reverse on ◄.
+      if (s_sel_index >= kRemoteCycleCount) return false;
+      const scene_state::SceneId id = kRemoteCycle[s_sel_index];
+      const uint8_t before = static_cast<uint8_t>(prefs::scene_mark(id));
+      const uint8_t next   = static_cast<uint8_t>((before + (delta > 0 ? 1 : 2)) % 3);
+      prefs::set_scene_mark(id, static_cast<prefs::SceneMark>(next));
+      return true;
+    }
     default: return false;
   }
 }
@@ -256,8 +267,8 @@ void play_value_change_locked() {
     return;
   }
   // Enum / boolean changes: walk a few semitones with the index so
-  // each step in the SOUND category has a distinct voice.
-  if (s_cat == Cat::SOUND) {
+  // each step in the SOUND / SCENES category has a distinct voice.
+  if (s_cat == Cat::SOUND || s_cat == Cat::SCENES) {
     if (!prefs::current().button_sound) return;
     const uint16_t freq = static_cast<uint16_t>(600 + s_sel_index * 150);
     buzzer::tick_click(freq);
@@ -323,6 +334,14 @@ void commit_ok() {
     // OK on a boolean toggles it (so the operator can use OK or ◄/►
     // interchangeably for the on/off rows). On non-boolean rows OK
     // is a no-op acknowledgement.
+    if (s_cat == Cat::SCENES) {
+      if (apply_value_delta(+1)) {
+        s_flash_started_ms = now_ms;
+        play_value_change_locked();
+      }
+      mutex_exit(&s_mutex);
+      return;
+    }
     if (s_cat == Cat::SOUND) {
       const SoundItem item = static_cast<SoundItem>(s_sel_index);
       if (item == SoundItem::THEME || item == SoundItem::BUTTON) {
@@ -406,6 +425,10 @@ Snapshot snapshot() {
   s.theme_sound     = p.theme_sound;
   s.button_sound    = p.button_sound;
   s.tick_sound_mode = static_cast<uint8_t>(p.tick_sound_mode);
+  s.scene_count     = kRemoteCycleCount < kMaxSceneRows ? kRemoteCycleCount : kMaxSceneRows;
+  for (uint8_t i = 0; i < s.scene_count; ++i) {
+    s.scene_marks[i] = static_cast<uint8_t>(prefs::scene_mark(kRemoteCycle[i]));
+  }
   mutex_exit(&s_mutex);
   return s;
 }

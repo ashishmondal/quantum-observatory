@@ -244,7 +244,8 @@ class ExoplanetCountScene : public Scene {
   // occupies the top-right HH:MM region from t ≥ 1400 ms. Letting
   // the compositor paint chrome on top would either fight the
   // planet's halo or hide it. Same trade-off GiantClockScene makes.
-  bool wants_clock_chrome() const override { return false; }
+  // FR-21.11: time on every screen wins over the parked planet's halo.
+  bool wants_clock_chrome() const override { return true; }
 
  private:
   // Animation milestones — see header docstring for the rhythm.

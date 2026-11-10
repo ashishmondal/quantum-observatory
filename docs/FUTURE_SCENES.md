@@ -20,7 +20,7 @@ does the visibility AND, the look-angle math, the freshness fallback.
 ## Tier 1 — Natural Fits
 
 Same architectural pattern as `iss_pass` / `moon_phase` /
-`jupiter_visibility`: HA pushes raw fields, firmware does derivation,
+`planets`: HA pushes raw fields, firmware does derivation,
 1 h freshness window, opt-in clock chrome where the BMP corner allows.
 
 ### `saturn_visibility`
@@ -47,10 +47,11 @@ twilight. Visibility logic should highlight the narrow windows:
 
 ### `iss_passes_today`
 Sticky variant of `iss_pass`. Three lines = next 3 pass start
-times tonight. `RISE 21:14` / `RISE 22:46` / `RISE 00:18`. HA pulls
-from open-notify or sat-tracker.
+times tonight. `RISE 21:14` / `RISE 22:46` / `RISE 00:18`. HA computes
+them with the same skyfield + CelesTrak TLE path `refresh_iss_next_pass`
+already uses (open-notify's pass API has been dead since ~2021).
 
-### `tonight_planets`
+### ~~`tonight_planets`~~ — **promoted as `sky_now` (PLAN.md Phase V, FR-21.2)**
 Single-screen overview: which naked-eye planets are above horizon
 *right now*, sorted by brightness. 3 lines = top 3 with format
 `JUP W 45° -2.1`. One scene, full sky summary. **Likely the highest
@@ -83,7 +84,7 @@ Companion to `moon_phase`. Lines: `RISE 14:32` / `SET 03:18` /
 The pieces that turn the dashboard from an ephemeris into a small
 science classroom.
 
-### `light_travel_time`
+### ~~`light_travel_time`~~ — **promoted as `light_travel` (PLAN.md Phase V, FR-21.4)**
 Daily rotation of "how long ago did this light leave?" Cycles a
 different object each minute: `PROXIMA / 4Y 3M`,
 `ANDROMEDA / 2.5MY`, `M87 / 53MY`, `CMB / 13.8GY`. Builds intuition
@@ -113,12 +114,12 @@ Animated 1-pixel "Earth" orbiting the sun with current Earth angle
 correct for date. Teaches axial-tilt → seasons. Same engine could
 demonstrate Kepler's 2nd law (pixel speeds up at perihelion).
 
-### `black_hole_news`
+### ~~`black_hole_news`~~ — **promoted as `black_holes` (PLAN.md Phase V, FR-21.6)**
 Sticky: most recent published black-hole / gravitational-wave
 event. Lines: `GW250414` / `2 BH MERGE` / `1.2BLY`. HA polls
 LIGO/Virgo public alerts (GraceDB has a JSON feed).
 
-### `solar_activity`
+### ~~`solar_activity`~~ — **promoted as `aurora` (PLAN.md Phase V, FR-21.5)**
 Current sunspot count + solar wind speed + Kp index (geomagnetic
 storm). Hook: `AURORA TONIGHT?` verdict line. NOAA SWPC has free
 JSON feeds. Genuinely useful for a stargazing kid.
@@ -134,7 +135,7 @@ with a tiny diagram + which spacecraft live there (`L2: JWST`,
 
 The scenes that get the kid to *show their friends*.
 
-### `meteor_shower`
+### ~~`meteor_shower`~~ — **promoted as an `observatory/alert` source (PLAN.md Phase V, FR-21.3)**
 Sticky during shower windows (Perseids / Geminids / Quadrantids /
 etc.). Lines: `PERSEIDS` / `60/HR` / `RAD NE`. Bonus: animated
 1-pixel streaks across the bg. HA has a static calendar; firmware
@@ -153,6 +154,8 @@ Starlink train / Tianhe. The "Starlink train just after sunset"
 moment is a gateway-drug astronomy experience.
 
 ### `andromeda_pointer`
+(Partly covered by `deep_sky`, FR-21.8, which paints M31 / M42 / M45 —
+the live "NE 35°" pointer is still open.)
 Sticky novelty: `ANDROMEDA` / `2.5MY` / `NE 35°`. The fact that
 you can see a whole galaxy with the naked eye is mind-blowing if
 you've never been told. Replace with M31 / M42 / M13 / M81 on
@@ -174,7 +177,7 @@ within budget). High educational density per byte.
 
 Conversation-starter scenes. Lower priority but very low cost.
 
-### `relativity_ticker`
+### ~~`relativity_ticker`~~ — **promoted as `relativity` (PLAN.md Phase V, FR-21.4)**
 `TIME DILATION AT ISS / 0.007s/YR`. Cycles through "time dilation
 at this orbit / mass / velocity" examples — surface, ISS, GPS sat,
 Mercury orbit, neutron star surface.
@@ -197,8 +200,9 @@ cosmic time → "HUMANS APPEAR 10S AGO". Daily refresh from RTC.
 
 ## Tier 5 — Non-Celestial
 
-Resist scope creep here (weather is explicitly out per REQUIREMENTS),
-but a couple of personal-status-board ideas earn their slot.
+Resist scope creep here, but a couple of personal-status-board ideas
+earn their slot. (Everyday weather is now in scope as the `weather`
+scene, FR-21.1.)
 
 ### `now_observing`
 Manual override topic — HA can push "currently photographing M42 —

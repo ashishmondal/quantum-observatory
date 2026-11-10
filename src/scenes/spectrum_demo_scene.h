@@ -41,6 +41,12 @@
 // Opts in to the FR-9.2 top-right HH:MM clock chrome (default) — the
 // [STRM] header is left-anchored at x=2 so the two share the y=0..6
 // band without overlapping.
+//
+// FR-21.4 lesson mode: after every full sweep the scene runs five
+// 7-second "how astronomers use it" lessons on the same bar — redshift,
+// blueshift, dark lines as an element recipe, exoplanet atmospheres,
+// and (Project Hail Mary easter egg) the infrared Petrova line — then
+// returns to the sweep.
 
 #pragma once
 
@@ -173,6 +179,20 @@ constexpr int16_t kMarkerBot = kBarY + kBarH + 1;      // bottom tick of the swe
 constexpr int16_t kNameBaseY = 24;    // BODY baseline for element name
 constexpr int16_t kWaveBaseY = 30;    // BODY baseline for wavelength
 
+// FR-21.4 lessons.
+struct Lesson { const char* top; const char* bottom; };
+inline constexpr Lesson kLessons[] = {
+  { "REDSHIFT",      "GALAXY FLEES US" },
+  { "BLUESHIFT",     "ANDROMEDA NEARS" },
+  { "DARK LINES =",  "STAR'S RECIPE" },
+  { "EXOPLANET AIR", "JWST READS GAS" },
+  { "PETROVA LINE",  "25.98 MICRON IR" },
+};
+inline constexpr uint8_t  kLessonCount = sizeof(kLessons) / sizeof(kLessons[0]);
+constexpr uint32_t kLessonMs = 7000;
+// Lines used by the shift lessons (Hβ, Na D, Hα).
+inline constexpr uint16_t kShiftNm[] = { 486, 589, 656 };
+
 }  // namespace spectrum_demo_detail
 
 class SpectrumDemoScene : public Scene {
@@ -189,6 +209,7 @@ public:
     m_idx              = 0;
     m_phase            = Phase::SWEEPING;
     m_segment_start_ms = 0;
+    m_lesson           = kNoLesson;
     // Sweep begins by gliding from the last line in the table back to
     // the first one, so the marker has a visible motion at startup
     // rather than snapping into place mid-panel.
@@ -207,6 +228,10 @@ public:
 
     matrix.fillScreen(0x0000);
 
+    if (m_lesson != kNoLesson) {
+      render_lesson(matrix, now_ms);
+      return;
+    }
     // ── 1. Gradient strip ──────────────────────────────────────────
     // 64 drawFastVLine calls — well under the per-frame budget
     // (bayer_dither.h notes 2048 drawPixel calls fit in < 0.5 ms).
@@ -239,6 +264,11 @@ public:
       } else {
         // Advance to the next line, swap from/to anchors.
         m_idx = static_cast<uint8_t>((m_idx + 1) % kLineCount);
+        if (m_idx == 0) {
+          m_lesson = 0;
+          m_segment_start_ms = now_ms;
+          return;
+        }
         m_from_x = m_to_x;
         m_to_x   = nm_to_x(kLines[m_idx].nm);
         m_phase  = Phase::SWEEPING;
@@ -314,7 +344,77 @@ public:
 
 private:
   enum class Phase : uint8_t { SWEEPING, SETTLED };
+  static constexpr uint8_t kNoLesson = 0xFF;
 
+  void render_lesson(Adafruit_Protomatter& matrix, uint32_t now_ms) {
+    using namespace spectrum_demo_detail;
+    uint32_t t = now_ms - m_segment_start_ms;
+    if (t >= kLessonMs) {
+      m_segment_start_ms = now_ms;
+      t = 0;
+      ++m_lesson;
+      if (m_lesson >= kLessonCount) {
+        // Back to the sweep, gliding in from the last line.
+        m_lesson = kNoLesson;
+        m_phase  = Phase::SWEEPING;
+        m_from_x = nm_to_x(kLines[kLineCount - 1].nm);
+        m_to_x   = nm_to_x(kLines[0].nm);
+        return;
+      }
+    }
+
+    gfx::draw_scene_header(matrix, "STRM", 0, 0, theme::ink(theme::Ink::HEADER));
+    const uint16_t label_ink = theme::ink(theme::Ink::LABEL);
+
+    if (m_lesson == 4) {
+      // Petrova: visible bar squeezed into x=0..43, dim infrared zone
+      // beyond it, and a pulsing line far off the red end.
+      for (int16_t x = 0; x < 44; ++x) {
+        matrix.drawFastVLine(x, kBarY, kBarH, kSpectrumBar.v[(x * PANEL_WIDTH) / 44]);
+      }
+      for (int16_t x = 44; x < PANEL_WIDTH; ++x) {
+        matrix.drawFastVLine(x, kBarY + 3, 2, static_cast<uint16_t>(((x - 40) / 6) << 11));
+      }
+      const bool on = (t / 350u) & 1u;
+      matrix.drawFastVLine(60, kBarY - 2, kBarH + 4, on ? 0xF80A : 0x6003);
+    } else {
+      for (int16_t x = 0; x < PANEL_WIDTH; ++x) {
+        matrix.drawFastVLine(x, kBarY, kBarH, kSpectrumBar.v[x]);
+      }
+      if (m_lesson <= 1) {
+        const int32_t full = (m_lesson == 0) ? 40 : -30;
+        const uint32_t ramp = t < 3000u ? t : 3000u;
+        const int32_t shift = (full * static_cast<int32_t>(ramp)) / 3000;
+        for (uint16_t nm : kShiftNm) {
+          matrix.drawPixel(nm_to_x(nm), kTickY, label_ink);
+          matrix.drawFastVLine(nm_to_x(static_cast<int>(nm) + shift), kBarY, kBarH, 0x0000);
+        }
+      } else if (m_lesson == 2) {
+        for (const Line& l : kLines) {
+          matrix.drawFastVLine(nm_to_x(l.nm), kBarY, kBarH, 0x0000);
+        }
+      } else {
+        // Exoplanet transit: the Na D band darkens and recovers as
+        // the planet crosses its star.
+        const uint32_t ph = t % 2000u;
+        const int16_t depth = static_cast<int16_t>(ph < 1000u ? ph / 125u : (2000u - ph) / 125u);
+        const uint8_t x0 = nm_to_x(589);
+        matrix.fillRect(x0 - 1, kBarY + (kBarH - depth) / 2, 3, depth, 0x0000);
+      }
+    }
+
+    const Lesson& L = kLessons[m_lesson];
+    matrix.setFont(theme::font(theme::FontRole::BODY));
+    matrix.setTextSize(1);
+    matrix.setTextColor(theme::ink(theme::Ink::VALUE));
+    matrix.setCursor(gfx::centered_x(matrix, L.top), kNameBaseY);
+    matrix.print(L.top);
+    matrix.setTextColor(theme::ink(theme::Ink::STATUS_INFO));
+    matrix.setCursor(gfx::centered_x(matrix, L.bottom), kWaveBaseY);
+    matrix.print(L.bottom);
+  }
+
+  uint8_t  m_lesson           = kNoLesson;
   uint32_t m_segment_start_ms = 0;
   uint8_t  m_idx              = 0;
   uint8_t  m_from_x           = 0;

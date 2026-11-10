@@ -118,12 +118,17 @@ uint8_t remote_cycle_index_of_current() {
 // into the curated list".
 void remote_cycle_step(int8_t delta) {
   const uint8_t cur = remote_cycle_index_of_current();
-  uint8_t next;
-  if (cur == kRemoteCycleCount) {
-    next = (delta > 0) ? 0u : (kRemoteCycleCount - 1u);
-  } else {
-    next = static_cast<uint8_t>(
-        (cur + kRemoteCycleCount + (delta > 0 ? 1 : -1)) % kRemoteCycleCount);
+  uint8_t next = cur;
+  // FR-21.9: hop over scenes the viewer marked SKIP; bounded so an
+  // all-skipped list still lands somewhere.
+  for (uint8_t tries = 0; tries < kRemoteCycleCount; ++tries) {
+    if (next == kRemoteCycleCount) {
+      next = (delta > 0) ? 0u : (kRemoteCycleCount - 1u);
+    } else {
+      next = static_cast<uint8_t>(
+          (next + kRemoteCycleCount + (delta > 0 ? 1 : -1)) % kRemoteCycleCount);
+    }
+    if (prefs::scene_mark(kRemoteCycle[next]) != prefs::SceneMark::SKIP) break;
   }
   scene_state::request(kRemoteCycle[next],
                        kRemoteCyclePriority,

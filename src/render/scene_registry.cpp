@@ -22,6 +22,16 @@
 #include "scenes/splash_scene.h"
 #include "scenes/text_demo_scene.h"
 #include "scenes/thermal_safe_scene.h"
+#include "scenes/alert_scene.h"
+#include "scenes/artemis_scene.h"
+#include "scenes/aurora_scene.h"
+#include "scenes/black_holes_scene.h"
+#include "scenes/deep_sky_scene.h"
+#include "scenes/hail_mary_scene.h"
+#include "scenes/light_travel_scene.h"
+#include "scenes/relativity_scene.h"
+#include "scenes/sky_now_scene.h"
+#include "scenes/weather_scene.h"
 
 // Static scene instances — never heap-allocated (NFR-2.2). Add new
 // scenes here as plain file-scope objects, then add a SceneId case
@@ -62,6 +72,16 @@ SpectrumDemoScene      s_spectrum_demo_scene;      // phase 7.6   — visible-sp
 ExoplanetCountScene    s_exoplanet_count_scene;    // phase 7.7   — animated procedural planet + NASA Exoplanet Archive stats
 PlanetZooDemoScene     s_planet_zoo_demo_scene;    // phase 7.7b  — diagnostic: walk every planet_renderer preset across LOD tiers
 PlanetsScene           s_planets_scene;            // generic procedural-planet scene (replaces JUPITER_VISIBILITY)
+WeatherScene           s_weather_scene;            // FR-21.1 weather + what to wear / stargazing verdict
+SkyNowScene            s_sky_now_scene;            // FR-21.2 bright objects up now
+AlertScene             s_alert_scene;              // FR-21.3 go-look-now callout
+LightTravelScene       s_light_travel_scene;       // FR-21.4 light-travel time
+RelativityScene        s_relativity_scene;         // FR-21.4 time dilation
+BlackHolesScene        s_black_holes_scene;        // FR-21.6 gravitational waves
+DeepSkyScene           s_deep_sky_scene;           // FR-21.8 pixel-art nebulae/galaxies
+AuroraScene            s_aurora_scene;             // FR-21.5 Kp + aurora curtain
+ArtemisScene           s_artemis_scene;            // FR-21.7 Artemis tracker
+HailMaryScene          s_hail_mary_scene;          // FR-21.8 Project Hail Mary easter eggs
 
 }  // namespace
 
@@ -94,6 +114,16 @@ Scene* scene_for(scene_state::SceneId id) {
     case SI::PLANET_ZOO_DEMO:    return &s_planet_zoo_demo_scene;
     case SI::PLANETS:            return &s_planets_scene;
     case SI::FONT_DEMO:          return &s_font_demo_scene;
+    case SI::WEATHER:            return &s_weather_scene;
+    case SI::SKY_NOW:            return &s_sky_now_scene;
+    case SI::ALERT:              return &s_alert_scene;
+    case SI::LIGHT_TRAVEL:       return &s_light_travel_scene;
+    case SI::RELATIVITY:         return &s_relativity_scene;
+    case SI::BLACK_HOLES:        return &s_black_holes_scene;
+    case SI::DEEP_SKY:           return &s_deep_sky_scene;
+    case SI::AURORA:             return &s_aurora_scene;
+    case SI::ARTEMIS:            return &s_artemis_scene;
+    case SI::HAIL_MARY:          return &s_hail_mary_scene;
   }
   return nullptr;
 }

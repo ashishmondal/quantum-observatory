@@ -57,7 +57,7 @@
 # against tod::now() at apply time — a stale retained launch whose
 # t0 has slipped past `now - 3600 s` is rejected (handle_launch
 # bounds check), not rendered.
-_RETAIN_TOPICS = {"observatory/launch"}
+_RETAIN_TOPICS = {"observatory/launch", "observatory/gw", "observatory/artemis"}
 
 import json
 
@@ -545,8 +545,9 @@ def _compute_iss_next_pass(lat_deg, lon_deg, tle_line1, tle_line2):
         times, events = sat.find_events(observer, t0, t1, altitude_degrees=10.0)
 
         observer_topos = earth + wgs84.latlon(lat_deg, lon_deg)
+        topo_sat = sat - observer
 
-        for ti, ev in zip(times, events):
+        for j, (ti, ev) in enumerate(zip(times, events)):
             if ev != 0:
                 continue
             # Gate A: is the station itself sunlit at this moment?
@@ -556,8 +557,25 @@ def _compute_iss_next_pass(lat_deg, lon_deg, tle_line1, tle_line2):
             sun_alt, _, _ = observer_topos.at(ti).observe(sun).apparent().altaz()
             if sun_alt.degrees > -6.0:
                 continue
-            # Both pass — this is the next *visible* pass start.
-            return {"unix": int(ti.utc_datetime().timestamp())}
+            # Both pass — this is the next *visible* pass start. Pull the
+            # culmination + set that follow it for the FR-21.3 alert text.
+            _, rise_az, _ = topo_sat.at(ti).altaz()
+            max_alt, set_az, set_t = None, rise_az, ti
+            for tk, ek in zip(times[j + 1:], events[j + 1:]):
+                if ek == 1 and max_alt is None:
+                    max_alt, _, _ = topo_sat.at(tk).altaz()
+                elif ek == 2:
+                    _, set_az, _ = topo_sat.at(tk).altaz()
+                    set_t = tk
+                    break
+            rise_unix = int(ti.utc_datetime().timestamp())
+            return {
+                "unix":    rise_unix,
+                "rise_az": int(round(rise_az.degrees)) % 360,
+                "set_az":  int(round(set_az.degrees)) % 360,
+                "max_alt": int(round(max_alt.degrees)) if max_alt is not None else 10,
+                "dur_s":   max(60, int(set_t.utc_datetime().timestamp()) - rise_unix),
+            }
 
         # No visible pass in 7 days — honest answer is "none".
         return {"unix": None}
@@ -1582,6 +1600,7 @@ def refresh_iss_next_pass(**_):
     _NEXT_PASS_CACHE["lat"] = lat
     _NEXT_PASS_CACHE["lon"] = lon
     _NEXT_PASS_CACHE["unix"] = pass_result["unix"]
+    _NEXT_PASS_CACHE["detail"] = pass_result if pass_result["unix"] is not None else None
     _NEXT_PASS_CACHE["computed_at"] = now
 
     # Stash on a witness entity for operator visibility (Developer
@@ -1634,3 +1653,479 @@ def publish_iss(**_):
     """
     lat, lon = _observer_lat_lon()
     _publish("observatory/iss", _compose_iss(lat, lon))
+    _maybe_alert_iss()
+
+
+# =====================================================================
+# FR-21 — teen-profile feeds: weather, sky now, go-look-now alerts,
+# aurora (NOAA Kp), gravitational waves (GraceDB), Artemis (LL2).
+# Wire contracts: docs/MQTT_TOPICS.md. Network + skyfield work runs in
+# @pyscript_executor helpers; HA state / services stay in pyscript.
+# =====================================================================
+
+_UA = {"User-Agent": "quantum-observatory/1.0 (+https://github.com)",
+       "Accept": "application/json"}
+
+# HA weather entities. Current conditions + daily hi/lo/rain chance
+# come from _WEATHER_DAILY (OpenWeatherMap reports precipitation
+# probability); tonight's cloud cover from _WEATHER_HOURLY (met.no).
+_WEATHER_DAILY = "weather.openweathermap"
+_WEATHER_HOURLY = "weather.forecast_home"
+
+_COND_SHORT = {
+    "clear-night": "CLEAR", "sunny": "SUNNY", "partlycloudy": "PARTLY CLDY",
+    "cloudy": "CLOUDY", "rainy": "RAIN", "pouring": "HEAVY RAIN",
+    "lightning": "STORM", "lightning-rainy": "STORM", "fog": "FOG",
+    "snowy": "SNOW", "snowy-rainy": "SLEET", "windy": "WINDY",
+    "windy-variant": "WINDY", "hail": "HAIL", "exceptional": "WILD",
+}
+
+# Alerts only fire while she's around and awake (FR-21.3).
+_ALERT_WINDOWS = ((5 * 60, 6 * 60), (15 * 60, 22 * 60))
+
+
+def _ha_tz():
+    from zoneinfo import ZoneInfo
+    try:
+        return ZoneInfo(str(hass.config.time_zone))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _local_now():
+    from datetime import datetime
+    return datetime.now(_ha_tz())
+
+
+def _alert_window_ok():
+    n = _local_now()
+    m = n.hour * 60 + n.minute
+    return any(lo <= m < hi for lo, hi in _ALERT_WINDOWS)
+
+
+def _sun_elevation():
+    try:
+        return float(state.getattr("sun.sun").get("elevation", 0.0))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+@pyscript_compile
+def _compass8(az):
+    return ("N", "NE", "E", "SE", "S", "SW", "W", "NW")[int(((az % 360) + 22.5) // 45) % 8]
+
+
+def _publish_alert(kind, title, line2, line3, duration_s):
+    _publish("observatory/alert", {
+        "kind": kind, "title": title[:13], "line2": line2[:13],
+        "line3": line3[:13], "duration_s": int(max(10, min(3600, duration_s))),
+    })
+
+
+# ---------------------------------------------------------------------
+# observatory/weather (FR-21.1)
+# ---------------------------------------------------------------------
+
+def _forecast(entity_id, kind):
+    try:
+        resp = service.call("weather", "get_forecasts", entity_id=entity_id,
+                            type=kind, return_response=True)
+        return (resp or {}).get(entity_id, {}).get("forecast", []) or []
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"observatory_publisher: {entity_id} {kind} forecast failed: {exc}")
+        return []
+
+
+@service
+@time_trigger("startup", "cron(*/15 * * * *)")
+def publish_weather(**_):
+    """Today's weather + tonight's clouds. Firmware kFreshMs = 3 h."""
+    from datetime import datetime
+    cur = state.get(_WEATHER_DAILY)
+    attrs = state.getattr(_WEATHER_DAILY) or {}
+    if cur in (None, "unknown", "unavailable") or "temperature" not in attrs:
+        cur = state.get(_WEATHER_HOURLY)
+        attrs = state.getattr(_WEATHER_HOURLY) or {}
+    if cur in (None, "unknown", "unavailable") or "temperature" not in attrs:
+        _publish("observatory/weather", {"_error": "no weather entity available"})
+        return
+
+    daily = _forecast(_WEATHER_DAILY, "daily") or _forecast(_WEATHER_HOURLY, "daily")
+    hourly = _forecast(_WEATHER_HOURLY, "hourly")
+    now = _local_now()
+    today = daily[0] if daily else {}
+    # After noon the useful "low" is the overnight one (tomorrow's min).
+    low_src = daily[1] if (now.hour >= 12 and len(daily) > 1) else today
+    temp = int(round(float(attrs.get("temperature", 0))))
+    hi = int(round(float(today.get("temperature", temp))))
+    lo = int(round(float(low_src.get("templow", temp))))
+
+    tz = _ha_tz()
+    clouds = []
+    for h in hourly:
+        try:
+            t = datetime.fromisoformat(h["datetime"].replace("Z", "+00:00")).astimezone(tz)
+        except Exception:  # noqa: BLE001
+            continue
+        tonight = (t.date() == now.date() and 19 <= t.hour <= 23) or \
+                  (now.hour < 6 and t.date() == now.date() and t.hour < 6)
+        if tonight and h.get("cloud_coverage") is not None:
+            clouds.append(float(h["cloud_coverage"]))
+    cloud = int(round(sum(clouds) / len(clouds))) if clouds else int(attrs.get("cloud_coverage", 50) or 50)
+
+    _publish("observatory/weather", {
+        "temp_f": temp, "hi_f": hi, "lo_f": lo,
+        "precip_pct": int(round(float(today.get("precipitation_probability", 0) or 0))),
+        "cloud_tonight_pct": max(0, min(100, cloud)),
+        "wind_mph": int(round(float(attrs.get("wind_speed", 0) or 0))),
+        "cond": _COND_SHORT.get(str(cur), str(cur).upper()[:11]),
+    })
+
+
+# ---------------------------------------------------------------------
+# observatory/sky (FR-21.2) + conjunction alerts (FR-21.3)
+# ---------------------------------------------------------------------
+
+# (name ≤ 8 chars, RA hours J2000, Dec degrees, V magnitude)
+_BRIGHT_STARS = (
+    ("SIRIUS", 6.7525, -16.716, -1.46), ("ARCTURUS", 14.261, 19.182, -0.05),
+    ("VEGA", 18.6156, 38.784, 0.03),    ("CAPELLA", 5.278, 45.998, 0.08),
+    ("RIGEL", 5.2423, -8.2016, 0.13),   ("PROCYON", 7.655, 5.225, 0.34),
+    ("BETELGSE", 5.9195, 7.407, 0.50),  ("ALTAIR", 19.846, 8.868, 0.76),
+    ("ALDEBARN", 4.5987, 16.509, 0.86), ("SPICA", 13.4199, -11.161, 0.97),
+    ("ANTARES", 16.490, -26.432, 1.0),  ("POLLUX", 7.7553, 28.026, 1.14),
+    ("FOMALHT", 22.9608, -29.622, 1.16),("DENEB", 20.690, 45.280, 1.25),
+    ("REGULUS", 10.1395, 11.967, 1.35),
+)
+_SKY_PLANETS = (("MOON", "moon", -12.0), ("VENUS", "venus", -4.2),
+                ("JUPITER", "jupiter barycenter", -2.3), ("MARS", "mars", 0.5),
+                ("MERCURY", "mercury", 0.0), ("SATURN", "saturn barycenter", 0.7))
+
+
+@pyscript_executor
+def _compute_sky(lat_deg, lon_deg):
+    """Bright objects ≥ 10° up now, brightest first; plus close pairs."""
+    try:
+        from skyfield.api import wgs84, Loader, Star
+        loader = Loader(SKYFIELD_CACHE)
+        eph = loader('de421.bsp')
+        ts = loader.timescale()
+        t = ts.now()
+        obs = eph['earth'] + wgs84.latlon(lat_deg, lon_deg)
+        here = obs.at(t)
+        sun_alt = here.observe(eph['sun']).apparent().altaz()[0].degrees
+        dark = sun_alt < -6.0
+
+        found, positions = [], {}
+        for name, key, mag in _SKY_PLANETS:
+            app = here.observe(eph[key]).apparent()
+            alt, az, _ = app.altaz()
+            positions[name] = (app, alt.degrees, az.degrees)
+            if alt.degrees >= 10 and (dark or name in ("MOON", "VENUS")):
+                found.append((mag, name, az.degrees, alt.degrees))
+        if dark:
+            for name, ra, dec, mag in _BRIGHT_STARS:
+                alt, az, _ = here.observe(Star(ra_hours=ra, dec_degrees=dec)).apparent().altaz()
+                if alt.degrees >= 10:
+                    found.append((mag, name, az.degrees, alt.degrees))
+        found.sort(key=lambda r: r[0])
+        objs = [{"name": n, "az": int(round(az)) % 360, "alt": int(round(alt))}
+                for _, n, az, alt in found[:5]]
+
+        pairs = []
+        if dark:
+            names = [n for n, _, _ in _SKY_PLANETS if n != "MERCURY"]
+            for i, a in enumerate(names):
+                for b in names[i + 1:]:
+                    pa, pb = positions[a], positions[b]
+                    if pa[1] < 8 or pb[1] < 8:
+                        continue
+                    sep = pa[0].separation_from(pb[0]).degrees
+                    if sep < 4.0:
+                        pairs.append((a, b, sep, pa[2], pa[1]))
+        return {"objs": objs, "pairs": pairs}
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
+_SHORT_BODY = {"MOON": "MOON", "VENUS": "VENUS", "JUPITER": "JUP", "MARS": "MARS", "SATURN": "SAT"}
+_PAIR_ALERTED = {}
+
+
+@service
+@time_trigger("startup", "cron(*/10 * * * *)")
+def publish_sky(**_):
+    """What's up now (≤ 5 objects). Firmware kFreshMs = 30 min."""
+    lat, lon = _observer_lat_lon()
+    result = _compute_sky(lat, lon)
+    if "_error" in result:
+        _publish("observatory/sky", result)
+        return
+    _publish("observatory/sky", {"objs": result["objs"]})
+
+    # Close pairs → one alert per pair per night (a pre-dawn alert counts
+    # toward the previous evening's night).
+    if not _alert_window_ok():
+        return
+    from datetime import timedelta
+    now = _local_now()
+    night = (now - timedelta(hours=12)).strftime("%Y-%m-%d")
+    for a, b, sep, az, alt in result.get("pairs", []):
+        key = f"{a}+{b}"
+        if _PAIR_ALERTED.get(key) == night:
+            continue
+        _PAIR_ALERTED[key] = night
+        _publish_alert("planet", f"{_SHORT_BODY[a]}+{_SHORT_BODY[b]}",
+                       f"LOOK {_compass8(az)} {int(round(alt))}",
+                       f"{sep:.0f} DEG APART" if sep >= 1 else "SUPER CLOSE!",
+                       15 * 60)
+
+
+# ---------------------------------------------------------------------
+# ISS go-look alert (FR-21.3) — called from publish_iss every 30 s.
+# ---------------------------------------------------------------------
+
+def _maybe_alert_iss():
+    import time
+    detail = _NEXT_PASS_CACHE.get("detail")
+    if not detail or not _alert_window_ok():
+        return
+    lead = detail["unix"] - time.time()
+    if not (0 <= lead <= 150) or _NEXT_PASS_CACHE.get("alerted") == detail["unix"]:
+        return
+    _NEXT_PASS_CACHE["alerted"] = detail["unix"]
+    mins = max(1, int(round(lead / 60)))
+    _publish_alert("iss", f"ISS IN {mins} MIN",
+                   f"LOOK {_compass8(detail['rise_az'])}>{_compass8(detail['set_az'])}",
+                   f"{max(1, detail['dur_s'] // 60)} MIN MAX {detail['max_alt']}",
+                   lead + detail["dur_s"] + 60)
+
+
+# ---------------------------------------------------------------------
+# Meteor-shower peaks (FR-21.3). Peak (month, day), radiant RA h / Dec°,
+# typical ZHR. Evening alert at 20:30 on the peak date; morning alert
+# at 05:05 on the peak date and the morning after.
+# ---------------------------------------------------------------------
+
+_SHOWERS = (
+    ("QUADRANTIDS", (1, 3), 15.3, 49.5, 110), ("LYRIDS", (4, 22), 18.07, 34.0, 18),
+    ("ETA AQUARIDS", (5, 6), 22.5, -1.0, 50), ("PERSEIDS", (8, 12), 3.2, 58.0, 100),
+    ("ORIONIDS", (10, 21), 6.33, 16.0, 20),   ("LEONIDS", (11, 17), 10.2, 22.0, 15),
+    ("GEMINIDS", (12, 14), 7.47, 32.5, 150),
+)
+
+
+@pyscript_executor
+def _radiant_altaz(lat_deg, lon_deg, ra_h, dec_d):
+    try:
+        from skyfield.api import wgs84, Loader, Star
+        loader = Loader(SKYFIELD_CACHE)
+        eph = loader('de421.bsp')
+        t = loader.timescale().now()
+        alt, az, _ = (eph['earth'] + wgs84.latlon(lat_deg, lon_deg)).at(t) \
+            .observe(Star(ra_hours=ra_h, dec_degrees=dec_d)).apparent().altaz()
+        return alt.degrees, az.degrees
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+@service
+@time_trigger("cron(30 20 * * *)", "cron(5 5 * * *)")
+def alert_meteor_shower(**_):
+    from datetime import timedelta
+    now = _local_now()
+    for name, (mo, day), ra, dec, zhr in _SHOWERS:
+        peak_today = (now.month, now.day) == (mo, day)
+        yday = now - timedelta(days=1)
+        morning_after = now.hour < 12 and (yday.month, yday.day) == (mo, day)
+        if not (peak_today or morning_after):
+            continue
+        lat, lon = _observer_lat_lon()
+        alt, az = _radiant_altaz(lat, lon, ra, dec)
+        where = f"LOOK {_compass8(az)} {int(round(alt))}" if alt is not None and alt > 10 \
+            else "LOOK UP HIGH"
+        _publish_alert("meteor", f"{name[:9]} NOW", where, f"~{zhr} PER HOUR", 30 * 60)
+
+
+# ---------------------------------------------------------------------
+# observatory/aurora (FR-21.5) — NOAA SWPC planetary Kp.
+# ---------------------------------------------------------------------
+
+_KP_NOW_URL = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json"
+_KP_FCST_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json"
+
+
+@pyscript_compile
+def _kp_needed(lat):
+    lat = abs(lat)
+    for edge, kp in ((60, 2), (55, 3), (50, 4), (45, 5), (40, 6), (35, 7), (30, 8)):
+        if lat >= edge:
+            return kp
+    return 9
+
+
+@pyscript_executor
+def _compute_aurora():
+    try:
+        import urllib.request
+        from datetime import datetime, timezone, timedelta
+
+        def _get(url):
+            with urllib.request.urlopen(urllib.request.Request(url, headers=_UA), timeout=15) as r:
+                return json.loads(r.read().decode("utf-8"))
+
+        now_rows = _get(_KP_NOW_URL)
+        last = now_rows[-1]
+        kp_now = float(last.get("estimated_kp", last.get("kp_index", 0)) or 0)
+        horizon = datetime.now(timezone.utc) + timedelta(hours=24)
+        kp_max = kp_now
+        for row in _get(_KP_FCST_URL):
+            if not isinstance(row, dict):
+                continue
+            t = datetime.fromisoformat(row["time_tag"]).replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) <= t <= horizon:
+                kp_max = max(kp_max, float(row.get("kp") or 0))
+        return {"kp_now": round(min(9.0, kp_now), 1), "kp_max_24h": round(min(9.0, kp_max), 1)}
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
+_AURORA_ALERTED = {"at": 0.0}
+
+
+@service
+@time_trigger("startup", "cron(*/30 * * * *)")
+def publish_aurora(**_):
+    """Kp now + 24 h max. Firmware kFreshMs = 6 h."""
+    import time
+    result = _compute_aurora()
+    _publish("observatory/aurora", result)
+    if "_error" in result:
+        return
+    lat, _lon = _observer_lat_lon()
+    if (result["kp_now"] >= _kp_needed(lat) and _sun_elevation() < -12
+            and _alert_window_ok() and time.time() - _AURORA_ALERTED["at"] > 3 * 3600):
+        _AURORA_ALERTED["at"] = time.time()
+        _publish_alert("aurora", "AURORA ALERT", "LOOK NORTH",
+                       f"KP {result['kp_now']:.0f} STORM", 30 * 60)
+
+
+# ---------------------------------------------------------------------
+# observatory/gw (FR-21.6) — latest significant GraceDB superevent.
+# ---------------------------------------------------------------------
+
+_GRACEDB = "https://gracedb.ligo.org/api/superevents/"
+_MPC_TO_MLY = 3.26156
+
+
+@pyscript_executor
+def _compute_gw():
+    try:
+        import base64
+        import re
+        import urllib.parse
+        import urllib.request
+        from datetime import datetime, timezone
+
+        def _get(url):
+            with urllib.request.urlopen(urllib.request.Request(url, headers=_UA), timeout=60) as r:
+                return json.loads(r.read().decode("utf-8"))
+
+        q = urllib.parse.quote("is_public: True category: Production SIGNIF_LOCKED")
+        listing = _get(f"{_GRACEDB}?format=json&count=1&orderby=-created&query={q}")
+        ev = listing["superevents"][0]
+        sid = ev["superevent_id"]
+        files = _get(ev["links"]["files"])
+        notice = None
+        for suffix in ("-update.json", "-initial.json", "-preliminary.json"):
+            names = sorted(k for k in files if k.endswith(suffix) and "," not in k)
+            if names:
+                notice = _get(files[names[-1]])
+                break
+        gw_type, dist_mly = "OTHER", 0
+        if notice:
+            cls = (notice.get("event") or {}).get("classification") or {}
+            astro = {k: v for k, v in cls.items() if k != "Terrestrial"}
+            if astro:
+                gw_type = max(astro, key=astro.get)
+            sky = (notice.get("event") or {}).get("skymap") or ""
+            head = base64.b64decode(sky[:40000] + "=" * (-len(sky[:40000]) % 4))
+            m = re.search(rb"DISTMEAN\s*=\s*([0-9.Ee+-]+)", head)
+            if m:
+                dist_mly = int(round(float(m.group(1)) * _MPC_TO_MLY))
+        created = datetime.strptime(ev["created"], "%Y-%m-%d %H:%M:%S %Z").replace(tzinfo=timezone.utc)
+        return {
+            "id": sid[:11],
+            "type": gw_type,
+            "dist_mly": max(0, min(65535, dist_mly)),
+            "days_ago": max(0, (datetime.now(timezone.utc) - created).days),
+            "count": int(listing.get("numRows", 0)),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
+@service
+@time_trigger("startup", "cron(5 */6 * * *)")
+def publish_gw(**_):
+    """Latest gravitational-wave detection. Firmware kFreshMs = 48 h."""
+    _publish("observatory/gw", _compute_gw())
+
+
+# ---------------------------------------------------------------------
+# observatory/artemis (FR-21.7) — Artemis missions from Launch Library 2.
+# ---------------------------------------------------------------------
+
+_ARTEMIS_URL = ("https://ll.thespacedevs.com/2.3.0/launches/"
+                "?search=Artemis&ordering=net&limit=20&mode=normal")
+
+
+@pyscript_executor
+def _compute_artemis(tz_name):
+    try:
+        import urllib.request
+        from datetime import datetime, timezone
+        with urllib.request.urlopen(urllib.request.Request(_ARTEMIS_URL, headers=_UA), timeout=20) as r:
+            rows = json.loads(r.read().decode("utf-8")).get("results") or []
+        rows = [e for e in rows if "SLS" in ((e.get("rocket") or {}).get("configuration") or {}).get("name", "")]
+        now = datetime.now(timezone.utc).timestamp()
+        last, nxt = None, None
+        for e in rows:
+            sid = (e.get("status") or {}).get("id")
+            net = datetime.fromisoformat(e["net"].replace("Z", "+00:00")).timestamp()
+            if sid in (3, 4, 7) and net <= now:
+                last = e
+            elif sid in (1, 2, 8) and net > now and nxt is None:
+                nxt = e
+        if nxt is None:
+            return {"_error": "no upcoming Artemis mission in LL2"}
+
+        def _name(e):
+            return ((e.get("mission") or {}).get("name") or e.get("name", "")).upper()[:13]
+
+        payload = {
+            "next": _name(nxt),
+            "next_local_epoch": _parse_iso_local_epoch(nxt["net"], tz_name),
+            "next_estimate": (nxt.get("net_precision") or {}).get("abbrev", "") not in _LL2_EXACT_PRECISION,
+            "desc": _shape_description((nxt.get("mission") or {}).get("description", ""))[:120],
+        }
+        if last is not None:
+            payload.update({
+                "last": _name(last),
+                "last_local_epoch": _parse_iso_local_epoch(last["net"], tz_name),
+                "last_result": _LL2_STATUS_TO_RESULT.get((last.get("status") or {}).get("id"), 1),
+            })
+        return payload
+    except Exception as exc:  # noqa: BLE001
+        return {"_error": f"{type(exc).__name__}: {exc}"}
+
+
+@service
+@time_trigger("startup", "cron(20 */6 * * *)")
+def publish_artemis(**_):
+    """Artemis tracker. Firmware kFreshMs = 48 h."""
+    try:
+        tz_name = str(hass.config.time_zone) if hass.config.time_zone else None
+    except Exception:  # noqa: BLE001
+        tz_name = None
+    _publish("observatory/artemis", _compute_artemis(tz_name))

@@ -21,6 +21,12 @@
 // per FR-9.6 — same masking convention as giant_clock_scene.
 //
 // (added in phase 5.5.1; redesigned to mirror giant_clock layout)
+//
+// FR-21.10 bedtime night-light: behind the clock sits a very dim, very
+// slow sky — a few twinkling stars and a faint aurora ribbon drifting
+// across the top rows over ~40 s. Every background pixel stays at or
+// below ~6 % of full brightness so the room stays dark; the clock
+// itself is unchanged (deep red, always present).
 
 #pragma once
 
@@ -30,6 +36,7 @@
 #include <Adafruit_Protomatter.h>
 
 #include "config.h"
+#include "fixed_point.h"
 #include "gfx_text.h"
 #include "scene.h"
 #include "theme.h"
@@ -54,9 +61,9 @@ public:
 public:
 
   void render(Adafruit_Protomatter& matrix, uint32_t now_ms) override {
-    // Solid black field — no animated bg in night mode (FR-7.2 spirit:
-    // minimum perceptible disturbance, zero motion).
+    // Solid black field + the FR-21.10 calm night-light sky.
     matrix.fillScreen(0x0000);
+    draw_calm_sky(matrix, now_ms);
 
     // Uniform deep red for every glyph. See header comment for why
     // we don't use theme::Ink::SAFETY.
@@ -114,5 +121,36 @@ public:
     matrix.setCursor(gfx::centered_x(matrix, date), 29);
     matrix.print(date);
     // matrix.show() is called by loop1().
+  }
+
+ private:
+  // Stars: fixed positions, each fading in/out on its own ~6 s cycle.
+  // Aurora: one ribbon across rows 0..9, height from two slow sines,
+  // green channel ≤ 4/63 so it reads as a glow, not a light source.
+  static void draw_calm_sky(Adafruit_Protomatter& m, uint32_t now_ms) {
+    static constexpr int8_t kStars[][2] = {
+      {3, 2}, {11, 7}, {20, 1}, {29, 5}, {38, 2}, {47, 8}, {55, 3}, {61, 6},
+      {7, 26}, {60, 25},
+    };
+    uint8_t k = 0;
+    for (const auto& s : kStars) {
+      const uint32_t ph = (now_ms / 47u + k * 523u) % 6000u;
+      const uint32_t tri = ph < 3000u ? ph : 6000u - ph;
+      const uint8_t v = static_cast<uint8_t>(tri / 1000u);   // 0..3 of 31
+      if (v > 0) m.drawPixel(s[0], s[1], static_cast<uint16_t>((v << 11) | (v << 6) | v));
+      ++k;
+    }
+    const uint8_t t1 = static_cast<uint8_t>(now_ms / 160u);
+    const uint8_t t2 = static_cast<uint8_t>(now_ms / 230u);
+    for (int16_t x = 0; x < PANEL_WIDTH; ++x) {
+      const int16_t s1 = fp::sin_q8(static_cast<uint8_t>(x * 4 + t1));
+      const int16_t s2 = fp::sin_q8(static_cast<uint8_t>(x * 7 - t2));
+      const int16_t top = static_cast<int16_t>(2 + (s1 + 256) / 128);       // 2..6
+      const uint8_t g   = static_cast<uint8_t>(1 + (s2 + 256) / 171);       // 1..3
+      for (int16_t y = top; y < top + 4; ++y) {
+        const uint8_t gy = static_cast<uint8_t>(g + (y == top + 1 ? 1 : 0));
+        m.drawPixel(x, y, static_cast<uint16_t>((gy << 5) | (gy > 2 ? 1 : 0)));
+      }
+    }
   }
 };

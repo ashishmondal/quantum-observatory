@@ -32,6 +32,7 @@
 #include "exoplanet_state.h"
 #include "launch_state.h"
 #include "constellation_state.h"
+#include "feeds.h"
 #include "moon_state.h"
 #include "ir_remote.h"
 #include "buzzer.h"
@@ -195,6 +196,9 @@ void setup() {
   // local rotation through the catalog every 30 s when no fresh
   // value has been pushed (so the scene works standalone).
   constellation_state::init();
+
+  // FR-21 HA-pushed feeds (weather, sky, aurora, gw, artemis, alert).
+  feeds::init();
 
   // DS3231 RTC bring-up (FR-9.5). Battery-backed authoritative time
   // source — every reader (chrome, giant clock, future scenes) goes

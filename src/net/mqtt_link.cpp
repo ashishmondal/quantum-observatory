@@ -17,7 +17,9 @@
 
 #include "scene_state.h"
 #include "secrets.h"
+#include "buzzer.h"
 #include "config.h"
+#include "feeds.h"
 #include "ha_discovery.h"
 #include "light_sensor.h"
 #include "iss_state.h"
@@ -68,6 +70,12 @@ constexpr const char* kTopicLaunch  = "observatory/launch";  // phase L     next
 constexpr const char* kTopicConstellation = "observatory/constellation"; // phase 7.4 constellation selector
 constexpr const char* kTopicTheme   = "observatory/theme";   // FR-15.2 (phase T.4)
 constexpr const char* kTopicPrefsReset = "observatory/prefs/reset"; // FR-18.8 (phase P.5)
+constexpr const char* kTopicWeather = "observatory/weather"; // FR-21.1 weather + what to wear
+constexpr const char* kTopicSky     = "observatory/sky";     // FR-21.2 bright objects up now
+constexpr const char* kTopicAurora  = "observatory/aurora";  // FR-21.5 NOAA Kp
+constexpr const char* kTopicGw      = "observatory/gw";      // FR-21.6 gravitational waves
+constexpr const char* kTopicArtemis = "observatory/artemis"; // FR-21.7 Artemis tracker
+constexpr const char* kTopicAlert   = "observatory/alert";   // FR-21.3 go-look-now callout
 constexpr const char* kTopicAvailability = "observatory/availability"; // FR-20.3 LWT (phase HA.1)
 constexpr const char* kTopicDebug   = "observatory/debug";   // phase IR.2 one-shot diagnostic dump (Pico → HA)
 #ifdef CLOCK_ANIM_TEST
@@ -108,9 +116,10 @@ constexpr const char* kTopicClockAnimTest = "observatory/test/clock_anim";
 // §5.4 status example is ~85 B originally; phase HA.3 added sensor /
 // diagnostic fields that take the worst-case payload to ~360 B. The
 // route-table additions in this commit (`<topic>_msgs/_rejects` for
-// every topic) added another ~200 B. NFR-2.3 → max + headroom, kept
-// at 768 to leave room for future heartbeat growth.
-constexpr size_t kStatusJsonCapacity = 768;
+// every topic) added another ~200 B; sound prefs + launch context
+// pushed it past 768 (silent `serialise overflow`); the FR-21 feeds +
+// scene fav/skip lists add ~450 B more. NFR-2.3 → 1792.
+constexpr size_t kStatusJsonCapacity = 1792;
 
 // IR-learning capture dump (phase IR.2): up to ~9 buttons × ~55 B
 // each + envelope ≈ 550 B. 768 leaves ~25 % headroom.
@@ -154,6 +163,12 @@ uint32_t s_launch_msgs          = 0; uint32_t s_launch_rejects        = 0;
 uint32_t s_constellation_msgs   = 0; uint32_t s_constellation_rejects = 0;
 uint32_t s_theme_msgs           = 0; uint32_t s_theme_rejects         = 0;
 uint32_t s_prefs_reset_msgs     = 0; uint32_t s_prefs_reset_rejects   = 0;
+uint32_t s_weather_msgs         = 0; uint32_t s_weather_rejects       = 0;
+uint32_t s_sky_msgs             = 0; uint32_t s_sky_rejects           = 0;
+uint32_t s_aurora_msgs          = 0; uint32_t s_aurora_rejects        = 0;
+uint32_t s_gw_msgs              = 0; uint32_t s_gw_rejects            = 0;
+uint32_t s_artemis_msgs         = 0; uint32_t s_artemis_rejects       = 0;
+uint32_t s_alert_msgs           = 0; uint32_t s_alert_rejects         = 0;
 #ifdef CLOCK_ANIM_TEST
 uint32_t s_clock_anim_msgs      = 0; uint32_t s_clock_anim_rejects    = 0;
 #endif
@@ -314,8 +329,8 @@ void handle_time(char* buf, unsigned int length, uint32_t now_ms) {
   // is two digits (2000..2099); reject anything that would underflow
   // the chip on write rather than letting ds3231::write() fail
   // silently. Upper bound is generous (year 2099-ish).
-  constexpr long kMinEpoch = 1577836800L;
-  constexpr long kMaxEpoch = 4102444800L;  // 2100-01-01
+  constexpr long      kMinEpoch = 1577836800L;
+  constexpr long long kMaxEpoch = 4102444800LL;  // 2100-01-01; > INT32_MAX, so not `long` on RP2040
   if (epoch_utc < kMinEpoch || epoch_utc >= kMaxEpoch) {
     ++s_time_rejects;
     Serial.print("[mqtt] time out-of-range epoch_utc=");
@@ -1200,6 +1215,225 @@ void handle_prefs_reset(char* /*buf*/, unsigned int /*length*/, uint32_t /*now_m
   // unreachable
 }
 
+// ── Teen-profile feeds (weather / sky / aurora / gw / artemis / alert) ──
+// Same FR-1.3 / FR-1.4 discipline as every other handler: required
+// fields missing or out of range → log + reject the whole payload;
+// optional fields degrade to defaults. Text fields are uppercased and
+// stripped to printable ASCII so every theme font can render them.
+
+void copy_text(char* dst, size_t cap, const char* src) {
+  size_t n = 0;
+  if (src != nullptr) {
+    for (; *src != '\0' && n + 1 < cap; ++src) {
+      char c = *src;
+      if (c < 0x20 || c > 0x7E) continue;
+      if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+      dst[n++] = c;
+    }
+  }
+  dst[n] = '\0';
+}
+
+void reject(uint32_t& counter, const char* tag, const char* why, const char* buf) {
+  ++counter;
+  Serial.print("[mqtt] ");
+  Serial.print(tag);
+  Serial.print(' ');
+  Serial.print(why);
+  Serial.print(" payload=");
+  Serial.println(buf);
+}
+
+// observatory/weather — {"temp_f","hi_f","lo_f","precip_pct",
+// "cloud_tonight_pct","wind_mph","cond"}. temp/hi/lo required.
+void handle_weather(char* buf, unsigned int length, uint32_t now_ms) {
+  ParsedJson<256> p(buf, length, "weather", s_weather_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
+  if (!doc["temp_f"].is<int>() || !doc["hi_f"].is<int>() || !doc["lo_f"].is<int>()) {
+    reject(s_weather_rejects, "weather", "missing temp_f/hi_f/lo_f", buf);
+    return;
+  }
+  const long t = doc["temp_f"].as<long>(), hi = doc["hi_f"].as<long>(), lo = doc["lo_f"].as<long>();
+  if (t < -60 || t > 140 || hi < -60 || hi > 140 || lo < -60 || lo > 140) {
+    reject(s_weather_rejects, "weather", "temperature out of range", buf);
+    return;
+  }
+  auto pct = [&](const char* k) -> uint8_t {
+    const long v = doc[k] | 0L;
+    return static_cast<uint8_t>(v < 0 ? 0 : (v > 100 ? 100 : v));
+  };
+  feeds::Weather w{};
+  w.temp_f            = static_cast<int16_t>(t);
+  w.hi_f              = static_cast<int16_t>(hi);
+  w.lo_f              = static_cast<int16_t>(lo);
+  w.precip_pct        = pct("precip_pct");
+  w.cloud_tonight_pct = pct("cloud_tonight_pct");
+  const long wind     = doc["wind_mph"] | 0L;
+  w.wind_mph          = static_cast<uint8_t>(wind < 0 ? 0 : (wind > 199 ? 199 : wind));
+  copy_text(w.cond, sizeof(w.cond), doc["cond"] | "");
+  feeds::set(w, now_ms);
+  Serial.print("[mqtt] weather applied t=");
+  Serial.print(t);
+  Serial.print(" cond=");
+  Serial.println(w.cond);
+}
+
+// observatory/sky — {"objs":[{"name","az","alt"}, …]} (≤5, sorted
+// brightest first by the publisher). Empty list is legal: nothing
+// bright is up.
+void handle_sky(char* buf, unsigned int length, uint32_t now_ms) {
+  ParsedJson<384> p(buf, length, "sky", s_sky_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
+  if (!doc["objs"].is<JsonArray>()) {
+    reject(s_sky_rejects, "sky", "missing objs[]", buf);
+    return;
+  }
+  feeds::Sky s{};
+  for (JsonObject o : doc["objs"].as<JsonArray>()) {
+    if (s.n >= feeds::Sky::kMax) break;
+    const char* name = o["name"] | static_cast<const char*>(nullptr);
+    if (name == nullptr || !o["az"].is<int>() || !o["alt"].is<int>()) continue;
+    const long az = o["az"].as<long>(), alt = o["alt"].as<long>();
+    if (az < 0 || az > 359 || alt < 0 || alt > 90) continue;
+    feeds::SkyObj& d = s.obj[s.n++];
+    copy_text(d.name, sizeof(d.name), name);
+    d.az_deg  = static_cast<uint16_t>(az);
+    d.alt_deg = static_cast<int8_t>(alt);
+  }
+  feeds::set(s, now_ms);
+  Serial.print("[mqtt] sky applied n=");
+  Serial.println(s.n);
+}
+
+// observatory/aurora — {"kp_now": 0..9, "kp_max_24h": 0..9}.
+void handle_aurora(char* buf, unsigned int length, uint32_t now_ms) {
+  ParsedJson<128> p(buf, length, "aurora", s_aurora_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
+  if (!doc["kp_now"].is<float>() && !doc["kp_now"].is<int>()) {
+    reject(s_aurora_rejects, "aurora", "missing kp_now", buf);
+    return;
+  }
+  const float now_kp = doc["kp_now"].as<float>();
+  const float max_kp = doc["kp_max_24h"] | now_kp;
+  if (now_kp < 0.0f || now_kp > 9.0f || max_kp < 0.0f || max_kp > 9.0f) {
+    reject(s_aurora_rejects, "aurora", "kp out of range", buf);
+    return;
+  }
+  feeds::Aurora a{};
+  a.kp_now_x10   = static_cast<uint8_t>(now_kp * 10.0f + 0.5f);
+  a.kp_max24_x10 = static_cast<uint8_t>(max_kp * 10.0f + 0.5f);
+  feeds::set(a, now_ms);
+  Serial.print("[mqtt] aurora applied kp=");
+  Serial.println(now_kp);
+}
+
+// observatory/gw — {"id","type":"BBH|BNS|NSBH|…","dist_mly","days_ago","count"}.
+void handle_gw(char* buf, unsigned int length, uint32_t now_ms) {
+  ParsedJson<192> p(buf, length, "gw", s_gw_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
+  const char* id = doc["id"] | static_cast<const char*>(nullptr);
+  if (id == nullptr || id[0] == '\0' || !doc["days_ago"].is<int>()) {
+    reject(s_gw_rejects, "gw", "missing id/days_ago", buf);
+    return;
+  }
+  const long days = doc["days_ago"].as<long>();
+  const long dist = doc["dist_mly"] | 0L;
+  const long cnt  = doc["count"] | 0L;
+  if (days < 0 || days > 36500 || dist < 0 || dist > 65535 || cnt < 0 || cnt > 65535) {
+    reject(s_gw_rejects, "gw", "field out of range", buf);
+    return;
+  }
+  feeds::Gw g{};
+  copy_text(g.id, sizeof(g.id), id);
+  const char* type = doc["type"] | "";
+  g.type = (strcmp(type, "BBH") == 0)  ? feeds::GwType::BBH
+         : (strcmp(type, "BNS") == 0)  ? feeds::GwType::BNS
+         : (strcmp(type, "NSBH") == 0) ? feeds::GwType::NSBH
+                                       : feeds::GwType::OTHER;
+  g.dist_mly = static_cast<uint16_t>(dist);
+  g.days_ago = static_cast<int32_t>(days);
+  g.count    = static_cast<uint16_t>(cnt);
+  feeds::set(g, now_ms);
+  Serial.print("[mqtt] gw applied id=");
+  Serial.println(g.id);
+}
+
+// observatory/artemis — {"last","last_local_epoch","last_result",
+// "next","next_local_epoch","next_estimate","desc"}. next + epoch required.
+void handle_artemis(char* buf, unsigned int length, uint32_t now_ms) {
+  ParsedJson<384> p(buf, length, "artemis", s_artemis_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
+  const char* next = doc["next"] | static_cast<const char*>(nullptr);
+  if (next == nullptr || next[0] == '\0' || !doc["next_local_epoch"].is<long>()) {
+    reject(s_artemis_rejects, "artemis", "missing next/next_local_epoch", buf);
+    return;
+  }
+  feeds::Artemis a{};
+  copy_text(a.next, sizeof(a.next), next);
+  a.next_local_epoch = static_cast<int32_t>(doc["next_local_epoch"].as<long>());
+  a.next_estimate    = doc["next_estimate"] | true;
+  copy_text(a.last, sizeof(a.last), doc["last"] | "");
+  a.last_local_epoch = static_cast<int32_t>(doc["last_local_epoch"] | 0L);
+  a.last_result      = static_cast<int8_t>(doc["last_result"] | 1);
+  copy_text(a.desc, sizeof(a.desc), doc["desc"] | "");
+  feeds::set(a, now_ms);
+  Serial.print("[mqtt] artemis applied next=");
+  Serial.println(a.next);
+}
+
+// observatory/alert — {"kind","title","line2","line3","duration_s"}.
+// Stores the callout, then (unless the room is dark) switches to the
+// ALERT scene at priority 4 for duration_s and plays a short fanfare.
+void handle_alert(char* buf, unsigned int length, uint32_t now_ms) {
+  ParsedJson<256> p(buf, length, "alert", s_alert_rejects);
+  if (!p.ok()) return;
+  auto& doc = p.doc();
+  const char* title = doc["title"] | static_cast<const char*>(nullptr);
+  if (title == nullptr || title[0] == '\0' || !doc["duration_s"].is<int>()) {
+    reject(s_alert_rejects, "alert", "missing title/duration_s", buf);
+    return;
+  }
+  const long dur = doc["duration_s"].as<long>();
+  if (dur < 10 || dur > 3600) {
+    reject(s_alert_rejects, "alert", "duration_s out of range", buf);
+    return;
+  }
+  feeds::Alert a{};
+  const char* kind = doc["kind"] | "";
+  a.kind = (strcmp(kind, "iss") == 0)    ? feeds::AlertKind::ISS
+         : (strcmp(kind, "meteor") == 0) ? feeds::AlertKind::METEOR
+         : (strcmp(kind, "planet") == 0) ? feeds::AlertKind::PLANET
+         : (strcmp(kind, "aurora") == 0) ? feeds::AlertKind::AURORA
+                                         : feeds::AlertKind::OTHER;
+  copy_text(a.title, sizeof(a.title), title);
+  copy_text(a.line2, sizeof(a.line2), doc["line2"] | "");
+  copy_text(a.line3, sizeof(a.line3), doc["line3"] | "");
+  a.duration_s = static_cast<uint16_t>(dur);
+  feeds::set(a, now_ms);
+
+  if (light_sensor::is_night()) {
+    Serial.println("[mqtt] alert stored (night — no switch)");
+    return;
+  }
+  // Priority 4 matches the ISS auto-switch; a launch in its final
+  // 5 min (priority 5) still wins.
+  if (scene_state::request(scene_state::SceneId::ALERT, /*priority=*/4,
+                           static_cast<uint16_t>(dur), /*sticky=*/false,
+                           /*user_intent=*/false)) {
+    static constexpr buzzer::Note kAlertMelody[] = {
+        {1568, 90}, {0, 40}, {1568, 90}, {0, 40}, {2093, 260},
+    };
+    buzzer::play(kAlertMelody, sizeof(kAlertMelody) / sizeof(kAlertMelody[0]));
+  }
+  Serial.print("[mqtt] alert applied title=");
+  Serial.println(a.title);
+}
+
 void handle_scene(char* buf, unsigned int length, uint32_t /*now_ms*/) {
   // ParsedJson<384> bundles the v7 deprecation pragma (StaticJsonDocument
   // is exactly the static-buffer behaviour we want — JsonDocument's
@@ -1254,6 +1488,15 @@ void handle_scene(char* buf, unsigned int length, uint32_t /*now_ms*/) {
   if      (duration <= 0)   dur_u16 = 30;     // FR-2.3 default
   else if (duration > 3600) dur_u16 = 3600;
   else                      dur_u16 = static_cast<uint16_t>(duration);
+
+  // FR-21.9: scheduled rotation pushes (priority ≤ 2) never land on a
+  // scene the viewer marked SKIP from the remote; deliberate commands
+  // at priority ≥ 3 still go through.
+  if (prio_u8 <= 2 && prefs::scene_mark(id) == prefs::SceneMark::SKIP) {
+    Serial.print("[mqtt] scene skipped by viewer id=");
+    Serial.println(scene_id);
+    return;
+  }
 
   const bool accepted = scene_state::request(id, prio_u8, dur_u16, sticky,
                                              /*user_intent=*/true);  // explicit operator command always wins
@@ -1318,6 +1561,12 @@ constexpr Route kRoutes[] = {
   { kTopicConstellation, 128, handle_constellation, &s_constellation_msgs, &s_constellation_rejects, "constellation"},
   { kTopicTheme,         128, handle_theme,         &s_theme_msgs,         &s_theme_rejects,         "theme"        },
   { kTopicPrefsReset,     32, handle_prefs_reset,   &s_prefs_reset_msgs,   &s_prefs_reset_rejects,   "prefs_reset"  },
+  { kTopicWeather,       256, handle_weather,       &s_weather_msgs,       &s_weather_rejects,       "weather"      },
+  { kTopicSky,           384, handle_sky,           &s_sky_msgs,           &s_sky_rejects,           "sky"          },
+  { kTopicAurora,        128, handle_aurora,        &s_aurora_msgs,        &s_aurora_rejects,        "aurora"       },
+  { kTopicGw,            192, handle_gw,            &s_gw_msgs,            &s_gw_rejects,            "gw"           },
+  { kTopicArtemis,       384, handle_artemis,       &s_artemis_msgs,       &s_artemis_rejects,       "artemis"      },
+  { kTopicAlert,         256, handle_alert,         &s_alert_msgs,         &s_alert_rejects,         "alert"        },
 #ifdef CLOCK_ANIM_TEST
   { kTopicClockAnimTest,  96, handle_clock_anim_test, &s_clock_anim_msgs,  &s_clock_anim_rejects,    "clock_anim"   },
 #endif
@@ -1338,9 +1587,10 @@ constexpr size_t kInboundJsonCapacity = fold_max_payload();
 // PubSubClient inbound/outbound share a single socket buffer; it must
 // be ≥ the largest payload we receive OR publish, plus topic name +
 // ~5 B MQTT framing. +64 covers the worst-case topic length comfortably.
+constexpr size_t kMaxOf(size_t a, size_t b) { return a > b ? a : b; }
 constexpr size_t kPubSubBufferSize =
-    ((kInboundJsonCapacity > kDebugPayloadCapacity)
-         ? kInboundJsonCapacity : kDebugPayloadCapacity) + 64;
+    kMaxOf(kMaxOf(kInboundJsonCapacity, kDebugPayloadCapacity),
+           kStatusJsonCapacity) + 64;
 
 // Belt-and-braces guard: if a future heartbeat addition pushes
 // kStatusJsonCapacity past the socket buffer, the publish would
@@ -1489,6 +1739,28 @@ bool publish_status(uint32_t now_ms) {
     doc["tick_sound_mode"] = static_cast<int>(p.tick_sound_mode);
   }
 
+  // FR-21.9 — viewer's remote-set favourites / skips as comma lists of
+  // wire ids, so the HA rotation automation can weight / filter.
+  {
+    static char fav[256];
+    static char skip[256];
+    size_t nf = 0, ns = 0;
+    fav[0] = skip[0] = '\0';
+    for (uint8_t i = 0; i < 64; ++i) {
+      const auto id = static_cast<scene_state::SceneId>(i);
+      const prefs::SceneMark m = prefs::scene_mark(id);
+      if (m == prefs::SceneMark::NORMAL) continue;
+      const char* wire = scene_state::string_from_id(id);
+      if (strcmp(wire, "unknown") == 0) continue;
+      char*   dst = (m == prefs::SceneMark::FAV) ? fav : skip;
+      size_t& n   = (m == prefs::SceneMark::FAV) ? nf : ns;
+      const int w = snprintf(dst + n, sizeof(fav) - n, "%s%s", n ? "," : "", wire);
+      if (w > 0 && n + static_cast<size_t>(w) < sizeof(fav)) n += static_cast<size_t>(w);
+    }
+    doc["scene_fav"]  = static_cast<const char*>(fav);
+    doc["scene_skip"] = static_cast<const char*>(skip);
+  }
+
   // FR-20 — sensor + link diagnostics consumed by the auto-discovered
   // HA entities (phase HA.3). Re-using observatory/status (vs minting
   // new per-entity state topics) means steady-state MQTT chatter is
@@ -1577,12 +1849,15 @@ bool publish_status(uint32_t now_ms) {
     }
   }
 
-  char payload[kStatusJsonCapacity];
-  const size_t n = serializeJson(doc, payload, sizeof(payload));
-  if (n == 0 || n >= sizeof(payload)) {
-    Serial.println("[mqtt] status: serialise overflow");
+  // Static: Core 0 only, non-reentrant; keeps 1.2 KB off the stack.
+  static char payload[kStatusJsonCapacity];
+  const size_t need = measureJson(doc);
+  if (doc.overflowed() || need >= sizeof(payload)) {
+    Serial.print("[mqtt] status: serialise overflow need=");
+    Serial.println(static_cast<unsigned long>(need));
     return false;
   }
+  const size_t n = serializeJson(doc, payload, sizeof(payload));
   const bool ok = s_client.publish(kTopicStatus, payload);
   if (ok) {
     ++s_status_publishes;

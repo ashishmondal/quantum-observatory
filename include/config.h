@@ -154,8 +154,11 @@
 // FR-17.6 — operator-facing scene cycle list for ▲/▼ on the IR remote.
 // Excludes firmware-owned overrides (BOOT, NIGHT, THERMAL_SAFE, OFFLINE,
 // SPLASH) and diagnostic scenes (GFX_TEST, IR_TEST) by design — these
-// shouldn't be reachable by accident from the couch. Append-only;
-// reorder = behaviour change for anyone who's memorised "▲ ▲ ▲ = Jupiter".
+// shouldn't be reachable by accident from the couch. Reordered for the
+// FR-21 teen-profile pass: `planets` and `exoplanet_count` dropped
+// (viewer disliked them; still reachable via MQTT), FR-21 scenes added.
+// The same list backs the settings-menu SCENES rows (FR-21.9), so the
+// fav/skip marks are keyed by SceneId, not by position.
 //
 // Defined here (not in main.cpp) so future input modes (on-board
 // buttons FR-11, voice, etc.) can share the same list without
@@ -164,13 +167,20 @@
 // header — `static constexpr` would emit a copy per .cpp.
 inline constexpr scene_state::SceneId kRemoteCycle[] = {
     scene_state::SceneId::CLOCK,
-    scene_state::SceneId::MOON_PHASE,
-    scene_state::SceneId::PLANETS,
-    scene_state::SceneId::CONSTELLATION_NOW,
+    scene_state::SceneId::WEATHER,
+    scene_state::SceneId::SKY_NOW,
     scene_state::SceneId::ISS_PASS,
-    scene_state::SceneId::LAUNCH_COUNTDOWN,
-    scene_state::SceneId::EXOPLANET_COUNT,
+    scene_state::SceneId::CONSTELLATION_NOW,
+    scene_state::SceneId::MOON_PHASE,
     scene_state::SceneId::SPECTRUM_DEMO,
+    scene_state::SceneId::LAUNCH_COUNTDOWN,
+    scene_state::SceneId::ARTEMIS,
+    scene_state::SceneId::BLACK_HOLES,
+    scene_state::SceneId::LIGHT_TRAVEL,
+    scene_state::SceneId::RELATIVITY,
+    scene_state::SceneId::DEEP_SKY,
+    scene_state::SceneId::AURORA,
+    scene_state::SceneId::HAIL_MARY,
 };
 inline constexpr uint8_t kRemoteCycleCount =
     sizeof(kRemoteCycle) / sizeof(kRemoteCycle[0]);

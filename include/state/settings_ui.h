@@ -56,8 +56,12 @@ enum class Mode : uint8_t {
 enum class Cat : uint8_t {
   DISPLAY = 0,   // BG TINT row only (S.1)
   SOUND   = 1,   // theme sound / button sound / time-tick sound rows
-  COUNT   = 2,
+  SCENES  = 2,   // FR-21.9 per-scene ON / FAV / SKIP rows (one per kRemoteCycle entry)
+  COUNT   = 3,
 };
+
+// Upper bound on SCENES rows carried in the snapshot.
+constexpr uint8_t kMaxSceneRows = 24;
 
 // Per-category item indices. Stored in the snapshot as a uint8_t
 // so a torn cross-core read still lands inside a defined enum
@@ -92,6 +96,8 @@ struct Snapshot {
   bool          theme_sound;
   bool          button_sound;
   uint8_t       tick_sound_mode;  // raw enum byte
+  uint8_t       scene_count;                  // rows in the SCENES category
+  uint8_t       scene_marks[kMaxSceneRows];   // prefs::SceneMark per kRemoteCycle row
   // Animation envelopes.
   FadeDir  fade_dir;
   uint32_t fade_started_ms;    // millis() at the active fade's start

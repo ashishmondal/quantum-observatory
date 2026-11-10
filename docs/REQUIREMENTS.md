@@ -15,8 +15,10 @@ The device also doubles as **the only clock in the room**. The current time MUST
 
 **Audience:** the dashboard targets teenagers — roughly 80% astronomy interest (planets, the Moon, ISS passes, what's visible tonight) and 20% astrophysics interest (scale, orbits, light-years, deep-sky context). Scene copy, scene selection, and visual priorities SHALL favour the observable-sky framing first; astrophysics framing is a flavor layer, not the headline.
 
-**In scope:** scene rendering engine, MQTT scene contract, dual-core orchestration, OTA scene registry, offline fallback, always-on clock readout, dedicated clock/date scene.
-**Out of scope:** raw pixel streaming, server-side layout, touchscreen/input handling, audio, weather/meteorological alerts (this is an *astronomy* dashboard; HA already surfaces weather elsewhere in the home).
+**Viewer profile (2026-11 interview, drives FR-21):** the panel lives in the viewer's bedroom, where she spends 15:00–bedtime including homework; she wakes at 05:00 and leaves at 06:00. Loves space unprompted — especially rockets/missions (Artemis), mind-blowing physics (black holes, relativity, light-travel time) and pretty visuals (nebulae, auroras); big *Project Hail Mary* fan. Mostly glances, reads when hooked, welcomes educational content. Rarely goes outside to look but would love to. Keep: `iss_pass`, `constellation_now`, `spectrum_demo`, `moon_phase`, `launch_countdown`. Dislikes: `exoplanet_count`, `planets` (dropped from rotation + remote cycle; still reachable via MQTT). Hard rule: the time is visible on every screen.
+
+**In scope:** scene rendering engine, MQTT scene contract, dual-core orchestration, OTA scene registry, offline fallback, always-on clock readout, dedicated clock/date scene, local weather ("what to wear" + tonight's stargazing conditions, FR-21.1).
+**Out of scope:** raw pixel streaming, server-side layout, touchscreen/input handling, severe-weather / meteorological alerting (HA owns those notifications; the panel only shows the everyday forecast).
 
 ---
 
@@ -615,6 +617,76 @@ pre-FR-20 baseline (one ~500 B publish every 30 s).
   an HA-side configuration recommendation, NOT a firmware
   requirement, and is documented in `docs/MQTT_TOPICS.md`.
 
+### FR-21 Viewer-Profile Content (teen bedroom panel)
+
+Derived from the viewer profile in §1. Wire contracts for every new
+topic live in [MQTT_TOPICS.md](MQTT_TOPICS.md).
+
+- **FR-21.1 Weather.** `weather` scene. Before noon: temperature +
+  condition, high/low, rain chance, then a "WEAR:" card (heavy coat /
+  jacket / layers / hoodie / T-shirt + umbrella) derived on-device from
+  the numbers. After noon: tonight's cloud cover with a stargazing
+  verdict (YES < 30 %, MAYBE < 65 %, else NO), then current temp. Fed
+  by `observatory/weather` (HA pyscript, 15 min, 3 h freshness).
+- **FR-21.2 Sky now.** `sky_now` scene lists up to five naked-eye
+  objects ≥ 10° up, brightest first, with 8-point compass + altitude
+  and a mini horizon dome. After dark: Moon, planets, 15 brightest
+  stars; daylight: Moon/Venus only. Fed by `observatory/sky` (10 min).
+- **FR-21.3 Go-look-now alerts.** `observatory/alert` carries a
+  three-line callout + duration. The firmware stores it, switches to
+  the `alert` scene at priority 4 for the duration and plays a
+  fanfare (suppressed at night like FR-14.6). HA publishes: an ISS
+  alert ~2 min before each *visible* pass (direction rise→set, minutes,
+  max altitude); meteor-shower peaks (20:30 on the peak date, 05:05 on
+  the peak date and the morning after, radiant direction + ZHR); close
+  pairs (< 4°) of Moon/Venus/Mars/Jupiter/Saturn once per night;
+  aurora when Kp reaches this latitude's threshold after dark. Alerts
+  only fire 05:00–06:00 and 15:00–22:00 local.
+- **FR-21.4 Physics & spectra.** `light_travel` (offline table, Moon →
+  CMB, with "LEFT IN <year>" computed from the RTC year) and
+  `relativity` (offline time-dilation facts with twin-clock motif).
+  `spectrum_demo` adds a lesson pass after each sweep: redshift,
+  blueshift, dark lines as an element recipe, exoplanet atmospheres
+  (JWST), and the Project Hail Mary Petrova line.
+- **FR-21.5 Aurora.** `aurora` scene: NOAA planetary Kp now + 24 h max
+  (`observatory/aurora`, 30 min, 6 h freshness), the Kp this latitude
+  needs (derived on-device from `LATITUDE_DEG`), a verdict, and an
+  animated curtain whose brightness follows Kp.
+- **FR-21.6 Black holes.** `black_holes` scene: newest significant
+  public LIGO/Virgo/KAGRA superevent from GraceDB (id, source type,
+  mean distance → light-years → "years ago", count) via
+  `observatory/gw` (6 h, retained, 48 h freshness), plus offline
+  facts; inspiral/merge/ringdown animation.
+- **FR-21.7 Artemis.** `artemis` scene: last + next Artemis mission
+  (Launch Library 2, `observatory/artemis`, 6 h, retained), NET date
+  or days-to-go, mission description word-wrapped across cards, and
+  program facts.
+- **FR-21.8 Visuals & Project Hail Mary.** `deep_sky` paints six
+  procedural pixel-art objects (Orion Nebula, Andromeda, Pillars of
+  Creation, Ring, Crab, Pleiades) with captions, fully offline.
+  `hail_mary` shows fan-reference cards (paraphrase / 2–3-word
+  catchphrases only — no passages from the novel) over an animated
+  Petrova line. A `hail_mary` theme (Petrova crimson + xenonite
+  silver-blue, Petrova-line clock background, "amaze" melody) joins
+  FR-15.
+- **FR-21.9 Favourite / skip.** Settings → SCENES lists the remote
+  cycle; ◄/►/OK cycle each row ON → FAV → SKIP. Marks persist
+  (prefs schema v5, `scene_fav` / `scene_skip` hex bitmasks by
+  SceneId), are echoed in `observatory/status` and as discovered
+  `Favorite scenes` / `Skipped scenes` sensors. Skipped scenes are
+  hopped over by ▲/▼ and refused for rotation pushes at priority
+  ≤ 2; HA's rotation filters them and shows favourites twice.
+- **FR-21.10 Bedtime night-light.** The FR-7.2 night overlay keeps
+  its deep-red clock and adds a very dim, slow sky behind it
+  (twinkling stars + faint aurora ribbon, ≤ ~6 % brightness).
+- **FR-21.11 Time on every screen.** Every scene SHALL show the time
+  (FR-9.2 chrome or its own clock). `planets` / `exoplanet_count` now
+  opt into chrome; `thermal_safe` draws a dim HH:MM.
+- **FR-21.12 Day-shaped rotation.** HA rotation: 05:00–06:00 weather +
+  sky alternating with the giant clock (5 min); 06:00–15:00 nothing
+  pushed (clock); 15:00–21:00 every featured scene (5 min);
+  21:00–23:30 calm scenes (10 min).
+
 ---
 
 ## 3. Non-Functional Requirements
@@ -746,8 +818,8 @@ diagnostic in `IrTestScene`.
 | `splash` | image (observatory.bmp) | — | firmware override; compositor overlay (FR-16.2), shown until first MQTT connect (FR-13.1) |
 | `clock` | image (starfield) | giant HH:MM + date line | default / idle scene (FR-9.4) |
 | `offline` | starfield_dim | local time | MQTT disconnect fallback (FR-5.1); compositor overlay (FR-16.2) |
-| `night` | black | dim HH:MM only | LDR-triggered (FR-7.2); compositor overlay (FR-16.2), preempts MQTT scenes |
-| `thermal_safe` | black | dim "COOL DOWN" + temperature | DS3231-triggered (FR-7.3); compositor overlay (FR-16.2), preempts everything except `splash` |
+| `night` | black + dim stars/aurora | dim HH:MM + date | LDR-triggered (FR-7.2); compositor overlay (FR-16.2), preempts MQTT scenes; calm night-light sky per FR-21.10 |
+| `thermal_safe` | black | dim "COOL" + temperature + HH:MM | DS3231-triggered (FR-7.3); compositor overlay (FR-16.2), preempts everything except `splash` |
 | `bg_starfield` | static deep-sky | — | static field + small twinkle overlay |
 | `bg_parallax` | parallax | — | 3-level scrolling stars |
 | `bg_nebula` | nebula | — | dynamic palette-cycled clouds (FR-12.3/12.4) |
@@ -756,11 +828,22 @@ diagnostic in `IrTestScene`.
 | `gfx_test` | gradient + ramps | live FPS readout | diagnostic (FR-12.6) |
 | `iss_pass` | nebula | typewriter ALT/CREW/VIS | priority 4; on-device look-angle + visibility derivation per FR-14 |
 | `moon_phase` | starfield | phase glyph + name | sticky |
-| `jupiter_visibility` | nebula | direction + magnitude/distance + visibility (or host constellation when above-horizon-but-daylight) | example in §5.1; on-device daylight derivation per FR-14 |
+| `jupiter_visibility` | — | — | **retired** — generalised into `planets` |
+| `planets` | procedural planet | catalog body + live look-angles | out of rotation + remote cycle per viewer profile (§1); MQTT-reachable; FR-9.2 chrome per FR-21.11 |
 | `constellation_now` | starfield | constellation art + name | sticky; HA picks current overhead constellation by date + observer lat/lon — see [FUTURE_SCENES.md](FUTURE_SCENES.md) Tier 1 |
 | `launch_countdown` | nebula | LNCH header + 6-cell `T-HH:MM:SS` odometer + typewriter info row + description marquee | priority-5 auto-switch in final 5 min before T-0 (suppressed at night); on-device T-minus per FR-14.6; HA polls Launch Library 2 every 10 min (`observatory/launch`) |
-| `spectrum_demo` | (none, scene-local gradient) | [STRM] header + 64-wide 380→700 nm gradient bar + sweeping marker + element name + wavelength | educational Tier-2 backlog scene (FUTURE_SCENES.md); **fully offline** — no MQTT topic, no asset pipeline; gradient is a compile-time `constexpr` PROGMEM table (~128 B flash); rotates an 8-line absorption-line table (Ca-K … O₂-B) with 1.5 s sweep + 5 s settle per line; standard FR-9.2 top-right HH:MM chrome opt-in |
-| `exoplanet_count` | (none, procedural planet) | [EXO] header + animated procedural planet (seeded from `nearest_name`) + typewriter `TOT N` / `±N WK` / `NR x.xLY` | astrophysics Tier-2 backlog scene (FUTURE_SCENES.md); HA pyscript daily poll of NASA Exoplanet Archive TAP → `observatory/exoplanet`; on-device freshness ceiling 48 h; opts OUT of FR-9.2 clock chrome (parked planet at cx=50,r=12 occupies the top-right HH:MM region — same trade-off as GiantClockScene); reusable `planet::ProceduralPlanet` renderer (FNV-1a hash → 8 archetypes × hue × surface features, Lambert-shaded sphere, ≤ 16 px radius) |
+| `spectrum_demo` | (none, scene-local gradient) | [STRM] header + 64-wide 380→700 nm gradient bar + sweeping marker + element name + wavelength | educational Tier-2 backlog scene (FUTURE_SCENES.md); **fully offline** — no MQTT topic, no asset pipeline; gradient is a compile-time `constexpr` PROGMEM table (~128 B flash); rotates an 8-line absorption-line table (Ca-K … O₂-B) with 1.5 s sweep + 5 s settle per line, then the FR-21.4 lesson pass; standard FR-9.2 top-right HH:MM chrome opt-in |
+| `exoplanet_count` | (none, procedural planet) | [EXO] header + animated procedural planet (seeded from `nearest_name`) + typewriter `TOT N` / `±N WK` / `NR x.xLY` | out of rotation + remote cycle per viewer profile (§1); HA pyscript daily poll of NASA Exoplanet Archive TAP → `observatory/exoplanet`; on-device freshness ceiling 48 h; FR-9.2 chrome per FR-21.11; reusable `planet::ProceduralPlanet` renderer |
+| `weather` | condition icon | [WX] + 3-line cards | FR-21.1; `observatory/weather` |
+| `sky_now` | mini horizon dome | [SKY] + up to 3 objects per card | FR-21.2; `observatory/sky` |
+| `alert` | pulsing frame | [LOOK] + 3 instant lines + time-left bar | FR-21.3; priority-4 auto-switch from `observatory/alert` |
+| `light_travel` | photon streak | [LITE] cards | FR-21.4; offline |
+| `relativity` | twin-clock sweeps | [TIME] cards | FR-21.4; offline |
+| `black_holes` | inspiral animation | [GW] cards | FR-21.6; `observatory/gw` + offline facts |
+| `deep_sky` | procedural pixel art | [DSO] name, then 3 caption lines | FR-21.8; offline |
+| `aurora` | animated curtain (Kp-scaled) | [AUR] cards | FR-21.5; `observatory/aurora` |
+| `artemis` | Moon + Orion loop | [ART] cards | FR-21.7; `observatory/artemis` |
+| `hail_mary` | Petrova-line arc | [PHM] cards | FR-21.8; offline |
 
 All scenes above (except possibly `boot` during the splash window) carry the standard small clock readout per FR-9.2. All `bg_type` values in this table are subject to FR-15.6 — the actual palette used at render time is whatever `theme::bg_palette_for()` returns for the active theme.
 

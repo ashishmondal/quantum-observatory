@@ -26,6 +26,10 @@ Payload (FR-1.1, REQUIREMENTS §5.1):
 | `sticky` | bool | no | false | — | persists until clear/override/TTL (FR-2.2) |
 | `overrides` | object | no | `{}` | — | scene-specific (`text`, `val`, …) — currently logged only |
 
+Requests at priority ≤ 2 (the HA rotation) for a scene the viewer
+marked SKIP in Settings → SCENES are silently ignored (FR-21.9);
+priority ≥ 3 always goes through.
+
 Example:
 ```bash
 mosquitto_pub -t observatory/scene -m '{"scene_id":"moon_phase","priority":2,"sticky":true}'
@@ -157,10 +161,11 @@ that is computed on-device every frame in the `iss_pass` scene.
   cap, which the firmware renders as `VIS IN 7D` rather than lying.
   *Was previously sourced from `http://api.open-notify.org/iss-pass.json`
   which has been HTTP 404 since ~2021.*
-- `crew_count` — `http://api.open-notify.org/astros.json` →
-  `.people | selectattr('craft','eq','ISS') | count`. Note the
-  filter is necessary — the top-level `.number` field also includes
-  Tiangong crew. Polled hourly by an HA REST sensor.
+- `crew_count` — `https://corquaid.github.io/international-space-station-APIs/JSON/people-in-space.json` →
+  `.people | selectattr('iss') | count`. Note the filter is
+  necessary — the top-level `.number` field also includes Tiangong
+  crew. Polled hourly by an HA REST sensor. *Was previously
+  `http://api.open-notify.org/astros.json`, which froze in mid-2024.*
 
 **On-device derivation (no firmware TLE math, no HA template
 math).** Every render frame the scene computes:
@@ -551,7 +556,7 @@ mosquitto_pub -t observatory/launch -m '{"t0_local_epoch":1779494400,"t0_estimat
 
 | Field | Type | Required | Range | Notes |
 |---|---|---|---|---|
-| `id` | string | one of `id` / `tint` required | one of `apollo_amber`, `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`, `section_nine` | lowercase wire id matching `theme::Id` enumerators (FR-15.1). Unknown ids → drop whole payload (FR-1.3). |
+| `id` | string | one of `id` / `tint` required | one of `apollo_amber`, `nostromo_green`, `vectrex_neon`, `blade_runner`, `lcars_tos`, `section_nine`, `hail_mary` | lowercase wire id matching `theme::Id` enumerators (FR-15.1). Unknown ids → drop whole payload (FR-1.3). |
 | `tint` | int (%) | one of `id` / `tint` required | 0..100 (default 50) | image-tint strength for non-default themes (FR-15.6). `0` = each themable BMP renders in its original baked palette regardless of theme; `100` = full duotone retoning. Out-of-range or non-integer → drop whole payload (FR-1.3, never half-apply). Apollo is passthrough at every value. |
 
 The swap takes effect at the next frame boundary with no scene re-init
@@ -601,6 +606,109 @@ other input). The reset is logged to serial before the reboot:
 mosquitto_pub -t observatory/prefs/reset -n
 ```
 
+### FR-21 feeds — viewer-profile scenes
+
+All published by `homeassistant/pyscript/observatory_publisher.py`,
+qos 1. Text fields are uppercased + stripped to printable ASCII on
+the device. Missing/out-of-range required fields → whole payload
+dropped and `<short>_rejects` bumped (FR-1.3).
+
+#### `observatory/weather` — `weather` scene (FR-21.1)
+
+Every 15 min; firmware freshness 3 h.
+
+```json
+{"temp_f":61,"hi_f":78,"lo_f":58,"precip_pct":20,"cloud_tonight_pct":15,"wind_mph":5,"cond":"PARTLY CLDY"}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `temp_f` / `hi_f` / `lo_f` | int °F | yes | −60..140. After noon `lo_f` is the overnight low. |
+| `precip_pct` | int % | no | max precipitation probability today (OpenWeatherMap daily). |
+| `cloud_tonight_pct` | int % | no | mean met.no hourly cloud cover 19:00–23:00. Drives the stargazing verdict. |
+| `wind_mph` | int | no | |
+| `cond` | string ≤ 11 | no | short condition (`SUNNY`, `CLEAR`, `PARTLY CLDY`, `CLOUDY`, `RAIN`, `STORM`, `FOG`, `SNOW`, …). Picks the icon. |
+
+#### `observatory/sky` — `sky_now` scene (FR-21.2)
+
+Every 10 min; freshness 30 min. ≤ 5 objects ≥ 10° up, brightest first.
+An empty list is legal (nothing bright is up).
+
+```json
+{"objs":[{"name":"JUPITER","az":80,"alt":34},{"name":"SIRIUS","az":110,"alt":11}]}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `objs[].name` | string ≤ 8 | |
+| `objs[].az` | int 0..359 | compass bearing; firmware shows 8-point label |
+| `objs[].alt` | int 0..90 | |
+
+#### `observatory/alert` — go-look-now callout (FR-21.3)
+
+On event. The firmware stores the callout, switches to the `alert` scene
+at priority 4 (non-sticky, `duration_s`) and plays a fanfare — unless the
+room is dark (LDR night), in which case it's only stored.
+
+```json
+{"kind":"iss","title":"ISS IN 2 MIN","line2":"LOOK NW>SE","line3":"6 MIN MAX 54","duration_s":540}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `title` | string ≤ 13 | yes | |
+| `duration_s` | int | yes | 10..3600 |
+| `kind` | string | no | `iss` / `meteor` / `planet` / `aurora` / other |
+| `line2` / `line3` | string ≤ 13 | no | |
+
+HA sources: ISS (~2 min before each visible pass), meteor-shower peaks
+(20:30 and 05:05), close Moon/planet pairs (< 4°, once a night), aurora
+(Kp ≥ latitude threshold after dark, ≤ 1 per 3 h). Only 05:00–06:00 and
+15:00–22:00 local.
+
+#### `observatory/aurora` — `aurora` scene (FR-21.5)
+
+Every 30 min; freshness 6 h. NOAA SWPC planetary Kp (1-minute estimate)
+and the max of the 3-hourly forecast over the next 24 h.
+
+```json
+{"kp_now":2.3,"kp_max_24h":4.0}
+```
+
+#### `observatory/gw` — `black_holes` scene (FR-21.6)
+
+Every 6 h, **retained**; freshness 48 h. Newest GraceDB superevent with
+`is_public category: Production SIGNIF_LOCKED`.
+
+```json
+{"id":"S251117dq","type":"BBH","dist_mly":8802,"days_ago":357,"count":276}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `id` | string | yes | superevent id |
+| `days_ago` | int | yes | since GraceDB `created` |
+| `type` | string | no | `BBH` / `BNS` / `NSBH` (max non-terrestrial class from the public GCN notice) |
+| `dist_mly` | int | no | `DISTMEAN` from the skymap FITS header (Mpc) × 3.26156 |
+| `count` | int | no | total significant public superevents (numRows) |
+
+#### `observatory/artemis` — `artemis` scene (FR-21.7)
+
+Every 6 h, **retained**; freshness 48 h. Launch Library 2
+`launches/?search=Artemis`, SLS vehicles only.
+
+```json
+{"last":"ARTEMIS II","last_local_epoch":1775082912,"last_result":1,"next":"ARTEMIS III","next_local_epoch":1814295600,"next_estimate":true,"desc":"..."}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `next` | string ≤ 13 | yes | mission name |
+| `next_local_epoch` | int | yes | HA-local epoch (same convention as `observatory/launch`) |
+| `next_estimate` | bool | no | `true` → "NET MON YYYY" instead of days-to-go |
+| `last` / `last_local_epoch` / `last_result` | | no | `last_result`: 1 success, 0 failure, 2 partial |
+| `desc` | string ≤ 120 | no | word-wrapped across cards |
+
 ---
 
 ## Publications (Pico → HA)
@@ -634,6 +742,8 @@ Published every 30 s.
 | `mqtt_state` | string | FR-20 — current `mqtt_link::State` lower-cased: `idle` / `wait_wifi` / `connecting` / `connected` / `disconnected`. Always `connected` on the wire (a status publish only happens from that state), but published generically so a future "publish a final status on disconnect" path can reuse the same code. |
 | `mqtt_rc` | int | FR-20 — PubSubClient rc captured at the most recent failed connect / dropped session; `0` = no outage observed yet. See `include/net/mqtt_link.h::last_rc()` for the value table. |
 | `mqtt_backoff_s` | int (sec) | FR-20 — current FR-5.2 retry-backoff delay (`s_backoff_ms / 1000`); `0` while connected. |
+| `scene_fav` / `scene_skip` | string | FR-21.9 — comma lists of scene wire ids the viewer marked FAV / SKIP in Settings → SCENES (empty when none). Discovered as `Favorite scenes` / `Skipped scenes` sensors (state `none` when empty). |
+| `<topic>_msgs` / `<topic>_rejects` | int | per inbound route rx / reject counters (incl. `weather`, `sky`, `aurora`, `gw`, `artemis`, `alert`). |
 
 ---
 

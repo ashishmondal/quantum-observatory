@@ -27,7 +27,7 @@ frame — scenes never hardcode color, font, or accent rules.
 
 ---
 
-## 2. The six themes
+## 2. The seven themes
 
 ### 2.1 APOLLO_AMBER (default)
 70s NASA Mission Operations Control Room — burnt amber phosphor on black,
@@ -147,6 +147,32 @@ bottom and occasionally tear sideways for a frame on signal loss.
 > are deliberately *not* bundled — the look at 64×32 px is dominated
 > by the magenta×teal hue pair plus the band motif, not the script.
 > ASCII-only keeps the THEME.md §5 three-font budget intact.
+
+### 2.7 HAIL_MARY
+*Project Hail Mary* (FR-21.8) — added for the viewer, a big fan of the
+book. Petrova-line crimson identity over deep-space black with pale
+"xenonite" silver-blue body text and hull-light amber warnings.
+
+- **Fonts:**
+  - `MICRO`  — Tiny3x3
+  - `BODY`   — Picopixel
+  - `HEADER` — Pixel Operator
+  - `CLOCK`  — Digital-7 mono 14pt (pale xenonite `0xC6FF`)
+- **Inks:** header Petrova crimson `0xF90A` (H≈345°, V≈100 %), pulse-low
+  `0x4803` at the same hue; halo `0x00A6` deep xenonite blue (H≈215°,
+  V≈19 % — a same-hue crimson halo smeared into the glyphs); body
+  xenonite `0xA65F` (H≈215°, S≈35 %); ghost `0x0862` (~5 % V xenonite,
+  same hue as the live digits); warn amber `0xFD20`.
+- **Brackets:** `<` `>`.
+- **Hints:** `GIANT_DIGIT_GHOST`.
+- **Clock-bg motif:** the Petrova line — a faint infrared-red arc
+  leaving a dim star at lower left, with a travelling brightness pulse
+  and six Astrophage specks riding it at different speeds (shared with
+  the `hail_mary` scene via `HailMaryScene::draw_petrova()`).
+- **Melody:** Rocky's "amaze, amaze, amaze" — A5 C#6 E6 · E6 C#6 A5
+  (710 ms).
+- **BG retoning:** shadow `#200818`, highlight `#FF2050`, white anchor
+  `#FFE8F0`.
 
 ---
 

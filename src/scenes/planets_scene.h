@@ -319,7 +319,8 @@ class PlanetsScene : public Scene {
   // through it during ENTER / EXIT, so we OPT OUT of the shared
   // chrome (FR-9.3). Same trade-off the exoplanet_count + giant
   // clock scenes already make.
-  bool wants_clock_chrome() const override { return false; }
+  // FR-21.11: time on every screen wins over the parked planet.
+  bool wants_clock_chrome() const override { return true; }
 
  private:
   // ── Animation timing ─────────────────────────────────────────────

@@ -67,6 +67,17 @@ constexpr EntityDecl kEntities[] = {
     "Prefs dirty",
     "{{ 'ON' if value_json.prefs_dirty else 'OFF' }}",
     nullptr, "problem", nullptr, "diagnostic", nullptr, nullptr },
+  // FR-21.9 — viewer's remote-set favourites / skips (comma lists of
+  // wire ids). The HA rotation automation reads these. "none" keeps
+  // the state non-empty so HA doesn't render it as unknown.
+  { "sensor",        "scene_fav",
+    "Favorite scenes",
+    "{{ value_json.scene_fav if value_json.scene_fav else 'none' }}",
+    nullptr, nullptr, nullptr, nullptr, "mdi:star", nullptr },
+  { "sensor",        "scene_skip",
+    "Skipped scenes",
+    "{{ value_json.scene_skip if value_json.scene_skip else 'none' }}",
+    nullptr, nullptr, nullptr, nullptr, "mdi:skip-next", nullptr },
 
   // ── render diagnostics ───────────────────────────────────────────
   { "sensor",        "fps",
